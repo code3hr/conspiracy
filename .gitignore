@@ -1,0 +1,26 @@
+# Build output
+build/
+out/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# CMake
+CMakeUserPresets.json
+
+# Object files
+*.o
+*.obj
+*.lib
+*.a
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Debug files
+*.pdb
+*.ilk
