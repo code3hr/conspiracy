@@ -7,6 +7,7 @@
 
 #include "cyxwiz/types.h"
 #include "cyxwiz/transport.h"
+#include "cyxwiz/peer.h"
 #include "cyxwiz/log.h"
 #include "cyxwiz/memory.h"
 
@@ -36,6 +37,9 @@ static void signal_handler(int sig)
     g_running = false;
 }
 
+/* Forward declaration for discovery */
+static cyxwiz_discovery_t *g_discovery = NULL;
+
 static void on_peer_discovered(
     cyxwiz_transport_t *transport,
     const cyxwiz_peer_info_t *peer,
@@ -47,6 +51,24 @@ static void on_peer_discovered(
         peer->rssi);
 }
 
+static void on_peer_state_change(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_peer_t *peer,
+    cyxwiz_peer_state_t old_state,
+    void *user_data)
+{
+    CYXWIZ_UNUSED(table);
+    CYXWIZ_UNUSED(user_data);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+    CYXWIZ_INFO("Peer %.16s... state: %s -> %s",
+        hex_id,
+        cyxwiz_peer_state_name(old_state),
+        cyxwiz_peer_state_name(peer->state));
+}
+
 static void on_data_received(
     cyxwiz_transport_t *transport,
     const cyxwiz_node_id_t *from,
@@ -55,10 +77,13 @@ static void on_data_received(
     void *user_data)
 {
     CYXWIZ_UNUSED(transport);
-    CYXWIZ_UNUSED(from);
     CYXWIZ_UNUSED(user_data);
     CYXWIZ_DEBUG("Received %zu bytes", len);
-    CYXWIZ_UNUSED(data);
+
+    /* Forward to discovery module for protocol messages */
+    if (g_discovery != NULL && len > 0) {
+        cyxwiz_discovery_handle_message(g_discovery, from, data, len);
+    }
 }
 
 static void print_banner(void)
@@ -117,6 +142,25 @@ int main(int argc, char *argv[])
     }
 #endif
 
+    /* Generate local node ID */
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_random(&local_id);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&local_id, hex_id);
+    CYXWIZ_INFO("Local node ID: %.16s...", hex_id);
+
+    /* Create peer table */
+    cyxwiz_peer_table_t *peer_table = NULL;
+    err = cyxwiz_peer_table_create(&peer_table);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to create peer table: %s", cyxwiz_strerror(err));
+        return 1;
+    }
+
+    /* Set peer state change callback */
+    cyxwiz_peer_table_set_callback(peer_table, on_peer_state_change, NULL);
+
     /* Create transports */
     cyxwiz_transport_t *wifi_transport = NULL;
 
@@ -127,16 +171,34 @@ int main(int argc, char *argv[])
     } else {
         cyxwiz_transport_set_peer_callback(wifi_transport, on_peer_discovered, NULL);
         cyxwiz_transport_set_recv_callback(wifi_transport, on_data_received, NULL);
-
-        /* Start discovery */
-        wifi_transport->ops->discover(wifi_transport);
     }
 #endif
+
+    /* Create discovery context */
+    if (wifi_transport != NULL) {
+        err = cyxwiz_discovery_create(&g_discovery, peer_table, wifi_transport, &local_id);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to create discovery context: %s", cyxwiz_strerror(err));
+        } else {
+            /* Start peer discovery */
+            err = cyxwiz_discovery_start(g_discovery);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to start discovery: %s", cyxwiz_strerror(err));
+            }
+        }
+    }
 
     CYXWIZ_INFO("Node running. Press Ctrl+C to stop.");
 
     /* Main event loop */
     while (g_running) {
+        uint64_t now = cyxwiz_time_ms();
+
+        /* Poll discovery (sends announcements, cleans stale peers) */
+        if (g_discovery != NULL) {
+            cyxwiz_discovery_poll(g_discovery, now);
+        }
+
         /* Poll all transports */
         if (wifi_transport != NULL) {
             wifi_transport->ops->poll(wifi_transport, 100);
@@ -152,8 +214,24 @@ int main(int argc, char *argv[])
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
 
+    /* Stop and destroy discovery */
+    if (g_discovery != NULL) {
+        cyxwiz_discovery_stop(g_discovery);
+        cyxwiz_discovery_destroy(g_discovery);
+        g_discovery = NULL;
+    }
+
     if (wifi_transport != NULL) {
         cyxwiz_transport_destroy(wifi_transport);
+    }
+
+    /* Destroy peer table */
+    if (peer_table != NULL) {
+        size_t peer_count = cyxwiz_peer_table_count(peer_table);
+        if (peer_count > 0) {
+            CYXWIZ_INFO("Had %zu peers in table", peer_count);
+        }
+        cyxwiz_peer_table_destroy(peer_table);
     }
 
 #ifdef CYXWIZ_HAS_CRYPTO

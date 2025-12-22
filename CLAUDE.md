@@ -64,11 +64,15 @@ cmake -B build -DCYXWIZ_BUILD_TESTS=OFF
 include/cyxwiz/       Public headers
   types.h             Error codes, node ID, message types, constants
   transport.h         Transport abstraction interface
+  peer.h              Peer table and discovery protocol
   crypto.h            MPC crypto (secret sharing, encryption, MACs)
   memory.h            Secure memory (zeroing, constant-time compare)
   log.h               Logging
 
 src/
+  core/               Core protocol modules
+    peer.c            Peer table management
+    discovery.c       Peer discovery protocol
   transport/          Transport drivers
     transport.c       Transport manager (create/destroy)
     wifi_direct.c     WiFi Direct driver (stub)
@@ -136,6 +140,57 @@ cyxwiz_crypto_decrypt(ciphertext, len, key, plaintext, &pt_len);
 - `CYXWIZ_MAC_SIZE` = 16 (128-bit MACs)
 - `CYXWIZ_DEFAULT_THRESHOLD` = 3
 - `CYXWIZ_DEFAULT_PARTIES` = 5
+
+## Peer Discovery Module
+
+Manages peer discovery and connection state:
+
+### Key Types
+- `cyxwiz_peer_t` - Peer info (ID, state, transport, capabilities, RSSI, timestamps)
+- `cyxwiz_peer_table_t` - Table of known peers (max 64)
+- `cyxwiz_discovery_t` - Discovery protocol context
+
+### Peer States
+```c
+CYXWIZ_PEER_STATE_UNKNOWN      // Initial state
+CYXWIZ_PEER_STATE_DISCOVERED   // Found but not connected
+CYXWIZ_PEER_STATE_CONNECTING   // Handshake in progress
+CYXWIZ_PEER_STATE_CONNECTED    // Active connection
+CYXWIZ_PEER_STATE_DISCONNECTING // Graceful disconnect
+CYXWIZ_PEER_STATE_FAILED       // Connection failed
+```
+
+### Core Operations
+```c
+// Create peer table
+cyxwiz_peer_table_create(&table);
+cyxwiz_peer_table_set_callback(table, on_state_change, user_data);
+
+// Peer management
+cyxwiz_peer_table_add(table, &node_id, transport, rssi);
+cyxwiz_peer_table_find(table, &node_id);
+cyxwiz_peer_table_remove(table, &node_id);
+cyxwiz_peer_table_set_state(table, &node_id, new_state);
+
+// Discovery
+cyxwiz_discovery_create(&discovery, peer_table, transport, &local_id);
+cyxwiz_discovery_start(discovery);
+cyxwiz_discovery_poll(discovery, current_time_ms);  // Call in main loop
+cyxwiz_discovery_stop(discovery);
+```
+
+### Constants
+- `CYXWIZ_MAX_PEERS` = 64
+- `CYXWIZ_PEER_TIMEOUT_MS` = 30000 (30 seconds)
+- `CYXWIZ_DISCOVERY_INTERVAL_MS` = 5000 (5 seconds)
+
+### Discovery Protocol Messages
+- `CYXWIZ_DISC_ANNOUNCE` - Broadcast "I'm here"
+- `CYXWIZ_DISC_ANNOUNCE_ACK` - Response to announce
+- `CYXWIZ_DISC_PING` / `CYXWIZ_DISC_PONG` - Keepalive
+- `CYXWIZ_DISC_GOODBYE` - Graceful disconnect
+
+All messages fit in 37 bytes or less (LoRa-compatible).
 
 ## Architecture Layers
 

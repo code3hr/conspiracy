@@ -91,6 +91,12 @@ if(CYXWIZ_TRANSPORT_LORA)
     add_compile_definitions(CYXWIZ_HAS_LORA=1)
 endif()
 
+# Core modules (peer discovery, routing)
+list(APPEND CYXWIZ_SOURCES
+    src/core/peer.c
+    src/core/discovery.c
+)
+
 # Crypto module (conditional on libsodium)
 if(CYXWIZ_HAS_CRYPTO)
     list(APPEND CYXWIZ_SOURCES
@@ -131,6 +137,10 @@ if(CYXWIZ_BUILD_TESTS)
         target_link_libraries(test_crypto PRIVATE cyxwiz)
         add_test(NAME test_crypto COMMAND test_crypto)
     endif()
+
+    add_executable(test_peer tests/test_peer.c)
+    target_link_libraries(test_peer PRIVATE cyxwiz)
+    add_test(NAME test_peer COMMAND test_peer)
 endif()
 
 # Install
