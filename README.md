@@ -82,11 +82,12 @@ CyxWiz works over multiple physical transports - if internet infrastructure fail
 
 | Transport | Range | Use Case |
 |-----------|-------|----------|
+| **UDP/Internet** | Global | Internet P2P with NAT traversal |
 | **WiFi Direct** | ~250m | High-bandwidth local mesh |
 | **Bluetooth Mesh** | ~100m | Urban density, low power |
 | **LoRa** | ~10km | Rural areas, emergency networks |
 
-The protocol is designed for LoRa's constraints (250-byte packets), ensuring it works everywhere.
+The protocol is designed for LoRa's constraints (250-byte packets), ensuring it works everywhere. The UDP transport enables worldwide connectivity with STUN-based NAT traversal and bootstrap servers for peer discovery.
 
 ### What is MPC (Multi-Party Computation)?
 
@@ -289,9 +290,10 @@ cyxwiz/
 - [x] Basic node daemon
 
 ### Phase 2: Network Core (In Progress)
-- [ ] Peer discovery protocol
-- [ ] Message routing
-- [ ] Onion routing implementation
+- [x] UDP/Internet transport with NAT traversal
+- [x] Bootstrap node for peer discovery
+- [x] Onion routing implementation
+- [ ] Message routing (multi-hop)
 - [ ] SPDZ online computation (Beaver triples)
 - [ ] Full threshold reconstruction
 

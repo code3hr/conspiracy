@@ -22,12 +22,17 @@ extern const cyxwiz_transport_ops_t cyxwiz_bluetooth_ops;
 extern const cyxwiz_transport_ops_t cyxwiz_lora_ops;
 #endif
 
+#ifdef CYXWIZ_HAS_UDP
+extern const cyxwiz_transport_ops_t cyxwiz_udp_ops;
+#endif
+
 const char *cyxwiz_transport_type_name(cyxwiz_transport_type_t type)
 {
     switch (type) {
         case CYXWIZ_TRANSPORT_WIFI_DIRECT: return "WiFi Direct";
         case CYXWIZ_TRANSPORT_BLUETOOTH:   return "Bluetooth";
         case CYXWIZ_TRANSPORT_LORA:        return "LoRa";
+        case CYXWIZ_TRANSPORT_UDP:         return "UDP/Internet";
         default:                           return "Unknown";
     }
 }
@@ -56,6 +61,11 @@ cyxwiz_error_t cyxwiz_transport_create(
 #ifdef CYXWIZ_HAS_LORA
         case CYXWIZ_TRANSPORT_LORA:
             ops = &cyxwiz_lora_ops;
+            break;
+#endif
+#ifdef CYXWIZ_HAS_UDP
+        case CYXWIZ_TRANSPORT_UDP:
+            ops = &cyxwiz_udp_ops;
             break;
 #endif
         default:

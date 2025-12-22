@@ -15,7 +15,8 @@
 typedef enum {
     CYXWIZ_TRANSPORT_WIFI_DIRECT,
     CYXWIZ_TRANSPORT_BLUETOOTH,
-    CYXWIZ_TRANSPORT_LORA
+    CYXWIZ_TRANSPORT_LORA,
+    CYXWIZ_TRANSPORT_UDP           /* Internet P2P via UDP */
 } cyxwiz_transport_type_t;
 
 /* Forward declaration */

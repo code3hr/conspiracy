@@ -16,6 +16,7 @@ option(CYXWIZ_BUILD_TESTS "Build tests" ON)
 option(CYXWIZ_TRANSPORT_WIFI "Enable WiFi Direct transport" ON)
 option(CYXWIZ_TRANSPORT_BLUETOOTH "Enable Bluetooth transport" ON)
 option(CYXWIZ_TRANSPORT_LORA "Enable LoRa transport" ON)
+option(CYXWIZ_TRANSPORT_UDP "Enable UDP/Internet transport" ON)
 option(CYXWIZ_HAS_CRYPTO "Enable crypto module (requires libsodium)" ON)
 
 # Find libsodium
@@ -97,6 +98,15 @@ if(CYXWIZ_TRANSPORT_LORA)
     add_compile_definitions(CYXWIZ_HAS_LORA=1)
 endif()
 
+if(CYXWIZ_TRANSPORT_UDP)
+    list(APPEND CYXWIZ_SOURCES src/transport/udp.c)
+    add_compile_definitions(CYXWIZ_HAS_UDP=1)
+    if(WIN32)
+        # Link Winsock on Windows
+        list(APPEND CYXWIZ_PLATFORM_LIBS ws2_32)
+    endif()
+endif()
+
 # Core modules (peer discovery, routing)
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
@@ -134,9 +144,22 @@ if(CYXWIZ_HAS_CRYPTO)
     target_link_libraries(cyxwiz PUBLIC ${SODIUM_TARGET})
 endif()
 
+# Link platform-specific libraries (e.g., Winsock for UDP on Windows)
+if(CYXWIZ_PLATFORM_LIBS)
+    target_link_libraries(cyxwiz PUBLIC ${CYXWIZ_PLATFORM_LIBS})
+endif()
+
 # Daemon executable
 add_executable(cyxwizd daemon/main.c)
 target_link_libraries(cyxwizd PRIVATE cyxwiz)
+
+# Bootstrap server (standalone tool)
+if(CYXWIZ_TRANSPORT_UDP)
+    add_executable(cyxwiz-bootstrap tools/bootstrap.c)
+    if(WIN32)
+        target_link_libraries(cyxwiz-bootstrap PRIVATE ws2_32)
+    endif()
+endif()
 
 # Tests
 if(CYXWIZ_BUILD_TESTS)
@@ -163,6 +186,12 @@ if(CYXWIZ_BUILD_TESTS)
     add_executable(test_routing tests/test_routing.c)
     target_link_libraries(test_routing PRIVATE cyxwiz)
     add_test(NAME test_routing COMMAND test_routing)
+
+    if(CYXWIZ_TRANSPORT_UDP)
+        add_executable(test_udp tests/test_udp.c)
+        target_link_libraries(test_udp PRIVATE cyxwiz)
+        add_test(NAME test_udp COMMAND test_udp)
+    endif()
 endif()
 
 # Install

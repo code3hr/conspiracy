@@ -263,20 +263,45 @@ int main(int argc, char *argv[])
 
     /* Create transports */
     cyxwiz_transport_t *wifi_transport = NULL;
+    cyxwiz_transport_t *udp_transport = NULL;
+    cyxwiz_transport_t *primary_transport = NULL;
+
+#ifdef CYXWIZ_HAS_UDP
+    /* Try UDP/Internet transport first (if CYXWIZ_BOOTSTRAP is set) */
+    const char *bootstrap = getenv("CYXWIZ_BOOTSTRAP");
+    if (bootstrap != NULL && strlen(bootstrap) > 0) {
+        err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &udp_transport);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to create UDP transport: %s", cyxwiz_strerror(err));
+        } else {
+            cyxwiz_transport_set_peer_callback(udp_transport, on_peer_discovered, NULL);
+            cyxwiz_transport_set_recv_callback(udp_transport, on_data_received, NULL);
+            primary_transport = udp_transport;
+            CYXWIZ_INFO("Using UDP/Internet transport");
+
+            /* Start discovery (register with bootstrap) */
+            udp_transport->ops->discover(udp_transport);
+        }
+    }
+#endif
 
 #ifdef CYXWIZ_HAS_WIFI
-    err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &wifi_transport);
-    if (err != CYXWIZ_OK) {
-        CYXWIZ_ERROR("Failed to create WiFi transport: %s", cyxwiz_strerror(err));
-    } else {
-        cyxwiz_transport_set_peer_callback(wifi_transport, on_peer_discovered, NULL);
-        cyxwiz_transport_set_recv_callback(wifi_transport, on_data_received, NULL);
+    /* Fall back to WiFi Direct for local mesh */
+    if (primary_transport == NULL) {
+        err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &wifi_transport);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to create WiFi transport: %s", cyxwiz_strerror(err));
+        } else {
+            cyxwiz_transport_set_peer_callback(wifi_transport, on_peer_discovered, NULL);
+            cyxwiz_transport_set_recv_callback(wifi_transport, on_data_received, NULL);
+            primary_transport = wifi_transport;
+        }
     }
 #endif
 
     /* Create discovery context */
-    if (wifi_transport != NULL) {
-        err = cyxwiz_discovery_create(&g_discovery, peer_table, wifi_transport, &local_id);
+    if (primary_transport != NULL) {
+        err = cyxwiz_discovery_create(&g_discovery, peer_table, primary_transport, &local_id);
         if (err != CYXWIZ_OK) {
             CYXWIZ_ERROR("Failed to create discovery context: %s", cyxwiz_strerror(err));
         } else {
@@ -288,7 +313,7 @@ int main(int argc, char *argv[])
         }
 
         /* Create router */
-        err = cyxwiz_router_create(&g_router, peer_table, wifi_transport, &local_id);
+        err = cyxwiz_router_create(&g_router, peer_table, primary_transport, &local_id);
         if (err != CYXWIZ_OK) {
             CYXWIZ_ERROR("Failed to create router: %s", cyxwiz_strerror(err));
         } else {
@@ -354,8 +379,11 @@ int main(int argc, char *argv[])
 #endif
 
         /* Poll all transports */
+        if (udp_transport != NULL) {
+            udp_transport->ops->poll(udp_transport, 50);
+        }
         if (wifi_transport != NULL) {
-            wifi_transport->ops->poll(wifi_transport, 100);
+            wifi_transport->ops->poll(wifi_transport, 50);
         }
 
         /* TODO: MPC key refresh */
@@ -388,6 +416,9 @@ int main(int argc, char *argv[])
         g_discovery = NULL;
     }
 
+    if (udp_transport != NULL) {
+        cyxwiz_transport_destroy(udp_transport);
+    }
     if (wifi_transport != NULL) {
         cyxwiz_transport_destroy(wifi_transport);
     }
