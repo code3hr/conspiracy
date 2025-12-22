@@ -1,5 +1,5 @@
 # CyxWiz Protocol
-
+WE OWN NOTHING
 **The Decentralized Compute Protocol for a Truly Free Internet**
 
 ```
