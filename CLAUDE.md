@@ -44,9 +44,19 @@ cmake -B build -DCYXWIZ_TRANSPORT_WIFI=OFF
 cmake -B build -DCYXWIZ_TRANSPORT_BLUETOOTH=OFF
 cmake -B build -DCYXWIZ_TRANSPORT_LORA=OFF
 
+# Disable crypto (if libsodium not available)
+cmake -B build -DCYXWIZ_HAS_CRYPTO=OFF
+
 # Disable tests
 cmake -B build -DCYXWIZ_BUILD_TESTS=OFF
 ```
+
+### Dependencies
+
+- **libsodium** (required for crypto module) - Install via:
+  - Windows: `vcpkg install libsodium` or download from https://libsodium.org
+  - Linux: `apt install libsodium-dev`
+  - macOS: `brew install libsodium`
 
 ## Code Structure
 
@@ -54,6 +64,7 @@ cmake -B build -DCYXWIZ_BUILD_TESTS=OFF
 include/cyxwiz/       Public headers
   types.h             Error codes, node ID, message types, constants
   transport.h         Transport abstraction interface
+  crypto.h            MPC crypto (secret sharing, encryption, MACs)
   memory.h            Secure memory (zeroing, constant-time compare)
   log.h               Logging
 
@@ -63,6 +74,11 @@ src/
     wifi_direct.c     WiFi Direct driver (stub)
     bluetooth.c       Bluetooth mesh driver (stub)
     lora.c            LoRa driver (stub)
+  crypto/             SPDZ-based MPC crypto
+    crypto.c          Context management
+    primitives.c      libsodium wrappers (encrypt, hash, random)
+    sharing.c         Secret sharing (additive + threshold)
+    mac.c             Information-theoretic MACs
   util/
     memory.c          Secure memory implementation
     log.c             Logging implementation
@@ -80,6 +96,46 @@ All transports implement `cyxwiz_transport_ops_t`:
 - `max_packet_size` - critical for LoRa compatibility
 
 Protocol layer calls these without knowing underlying transport.
+
+## Crypto Module (SPDZ-based MPC)
+
+SPDZ protocol implementation for secure multi-party computation:
+
+### Key Types
+- `cyxwiz_share_t` - Secret share with MAC (49 bytes, fits in LoRa packets)
+- `cyxwiz_crypto_ctx_t` - Crypto context (MAC keys, threshold config)
+
+### Core Operations
+```c
+// Initialize libsodium
+cyxwiz_crypto_init();
+
+// Create 3-of-5 MPC context
+cyxwiz_crypto_create(&ctx, 3, 5, my_party_id);
+
+// Split secret into shares
+cyxwiz_crypto_share_secret(ctx, secret, 32, shares, &num_shares);
+
+// Reconstruct from threshold shares
+cyxwiz_crypto_reconstruct_secret(ctx, shares, num_shares, secret_out, 32);
+
+// Local operations (no communication)
+cyxwiz_crypto_share_add(a, b, result);      // result = a + b
+cyxwiz_crypto_share_scalar_mul(share, scalar, result);
+
+// Verify share integrity
+cyxwiz_crypto_verify_share(ctx, share);
+
+// Symmetric encryption (XChaCha20-Poly1305)
+cyxwiz_crypto_encrypt(plaintext, len, key, ciphertext, &ct_len);
+cyxwiz_crypto_decrypt(ciphertext, len, key, plaintext, &pt_len);
+```
+
+### Constants
+- `CYXWIZ_KEY_SIZE` = 32 (256-bit keys)
+- `CYXWIZ_MAC_SIZE` = 16 (128-bit MACs)
+- `CYXWIZ_DEFAULT_THRESHOLD` = 3
+- `CYXWIZ_DEFAULT_PARTIES` = 5
 
 ## Architecture Layers
 

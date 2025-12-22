@@ -10,6 +10,10 @@
 #include "cyxwiz/log.h"
 #include "cyxwiz/memory.h"
 
+#ifdef CYXWIZ_HAS_CRYPTO
+#include "cyxwiz/crypto.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,9 +95,30 @@ int main(int argc, char *argv[])
 
     CYXWIZ_INFO("Starting CyxWiz node daemon...");
 
+    cyxwiz_error_t err;
+
+    /* Initialize crypto subsystem */
+#ifdef CYXWIZ_HAS_CRYPTO
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to initialize crypto: %s", cyxwiz_strerror(err));
+        return 1;
+    }
+
+    /* Create crypto context (3-of-5 MPC, party 1) */
+    cyxwiz_crypto_ctx_t *crypto_ctx = NULL;
+    err = cyxwiz_crypto_create(&crypto_ctx,
+                               CYXWIZ_DEFAULT_THRESHOLD,
+                               CYXWIZ_DEFAULT_PARTIES,
+                               1);  /* TODO: Get party ID from config */
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to create crypto context: %s", cyxwiz_strerror(err));
+        return 1;
+    }
+#endif
+
     /* Create transports */
     cyxwiz_transport_t *wifi_transport = NULL;
-    cyxwiz_error_t err;
 
 #ifdef CYXWIZ_HAS_WIFI
     err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &wifi_transport);
@@ -130,6 +155,12 @@ int main(int argc, char *argv[])
     if (wifi_transport != NULL) {
         cyxwiz_transport_destroy(wifi_transport);
     }
+
+#ifdef CYXWIZ_HAS_CRYPTO
+    if (crypto_ctx != NULL) {
+        cyxwiz_crypto_destroy(crypto_ctx);
+    }
+#endif
 
     CYXWIZ_INFO("Goodbye.");
     return 0;
