@@ -88,9 +88,53 @@ CyxWiz works over multiple physical transports - if internet infrastructure fail
 
 The protocol is designed for LoRa's constraints (250-byte packets), ensuring it works everywhere.
 
-### MPC Cryptography (SPDZ Protocol)
+### What is MPC (Multi-Party Computation)?
 
-We use Multi-Party Computation so that:
+MPC lets multiple parties compute on data **without anyone seeing the actual data**.
+
+**Simple Example:** 5 people want to calculate their average salary without revealing individual salaries:
+
+```
+❌ Traditional: Everyone shares salary → Privacy gone
+
+✅ MPC way:
+   1. Each person splits salary into 5 random pieces
+   2. Pieces distributed (each person gets 1 piece from everyone)
+   3. Everyone computes on their pieces
+   4. Combine results → Average revealed, individual salaries stay secret
+```
+
+**In CyxWiz:**
+
+```
+Your secret data
+       │
+       ▼
+┌──────────────────────────────────────┐
+│     Split into 5 encrypted shares    │
+└──────────────────────────────────────┘
+       │
+   ┌───┴───┬───────┬───────┬───────┐
+   ▼       ▼       ▼       ▼       ▼
+┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐
+│Node1│ │Node2│ │Node3│ │Node4│ │Node5│  ← Each sees random garbage
+└─────┘ └─────┘ └─────┘ └─────┘ └─────┘
+   │       │       │       │       │
+   └───────┴───────┴───────┴───────┘
+                   │
+                   ▼
+         Combine 3-of-5 shares → Only YOU can reconstruct
+```
+
+| Without MPC | With MPC |
+|-------------|----------|
+| Cloud sees your data | Cloud sees encrypted garbage |
+| One hack = all leaked | Need to hack 3+ nodes |
+| Trust the server | Trust no one |
+
+### SPDZ Protocol
+
+We use SPDZ (pronounced "Speedz"), an MPC protocol that provides:
 - **Keys are never in one place** - Split across multiple nodes
 - **Compute on encrypted data** - Nodes can't see what they're processing
 - **Threshold security** - Need 3-of-5 nodes to decrypt (configurable)
