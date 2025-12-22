@@ -187,6 +187,10 @@ if(CYXWIZ_BUILD_TESTS)
     target_link_libraries(test_routing PRIVATE cyxwiz)
     add_test(NAME test_routing COMMAND test_routing)
 
+    add_executable(test_routing_multihop tests/test_routing_multihop.c)
+    target_link_libraries(test_routing_multihop PRIVATE cyxwiz)
+    add_test(NAME test_routing_multihop COMMAND test_routing_multihop)
+
     if(CYXWIZ_TRANSPORT_UDP)
         add_executable(test_udp tests/test_udp.c)
         target_link_libraries(test_udp PRIVATE cyxwiz)

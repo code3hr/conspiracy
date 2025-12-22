@@ -979,6 +979,36 @@ static cyxwiz_error_t udp_shutdown(cyxwiz_transport_t *transport)
     return CYXWIZ_OK;
 }
 
+/* Check if node ID is broadcast address (all 0xFF) */
+static bool is_broadcast_id(const cyxwiz_node_id_t *id)
+{
+    for (size_t i = 0; i < sizeof(cyxwiz_node_id_t); i++) {
+        if (id->bytes[i] != 0xFF) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Send wrapped data packet to a specific peer */
+static cyxwiz_error_t send_data_to_peer(cyxwiz_transport_t *transport,
+                                        cyxwiz_udp_state_t *state,
+                                        cyxwiz_udp_peer_t *peer,
+                                        const uint8_t *data,
+                                        size_t len)
+{
+    /* Build data packet */
+    size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
+    uint8_t msg[CYXWIZ_MAX_PACKET_SIZE + 64];
+
+    cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
+    pkt->type = CYXWIZ_UDP_DATA;
+    memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
+    memcpy(pkt->data, data, len);
+
+    return send_to_endpoint(state, &peer->public_addr, msg, msg_len);
+}
+
 static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
                                const cyxwiz_node_id_t *to,
                                const uint8_t *data,
@@ -990,27 +1020,40 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
         return CYXWIZ_ERR_NOT_INITIALIZED;
     }
 
-    /* Find peer endpoint */
-    cyxwiz_udp_peer_t *peer = find_peer(state, to);
-    if (peer == NULL || !peer->connected) {
-        return CYXWIZ_ERR_PEER_NOT_FOUND;
-    }
-
     /* Check size */
     if (len + CYXWIZ_UDP_DATA_HDR_SIZE > CYXWIZ_MAX_PACKET_SIZE) {
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
-    /* Build data packet */
-    size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
-    uint8_t msg[CYXWIZ_MAX_PACKET_SIZE + 64];
+    /* Check for broadcast destination (all 0xFF) */
+    if (is_broadcast_id(to)) {
+        /* Send to ALL connected peers */
+        cyxwiz_error_t last_err = CYXWIZ_OK;
+        size_t sent_count = 0;
 
-    cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
-    pkt->type = CYXWIZ_UDP_DATA;
-    memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
-    memcpy(pkt->data, data, len);
+        for (size_t i = 0; i < CYXWIZ_MAX_UDP_PEERS; i++) {
+            if (state->peers[i].active && state->peers[i].connected) {
+                cyxwiz_error_t err = send_data_to_peer(
+                    transport, state, &state->peers[i], data, len);
+                if (err == CYXWIZ_OK) {
+                    sent_count++;
+                } else {
+                    last_err = err;
+                }
+            }
+        }
 
-    return send_to_endpoint(state, &peer->public_addr, msg, msg_len);
+        CYXWIZ_DEBUG("Broadcast to %zu peers", sent_count);
+        return (sent_count > 0) ? CYXWIZ_OK : last_err;
+    }
+
+    /* Unicast: Find peer endpoint */
+    cyxwiz_udp_peer_t *peer = find_peer(state, to);
+    if (peer == NULL || !peer->connected) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    return send_data_to_peer(transport, state, peer, data, len);
 }
 
 static cyxwiz_error_t udp_discover(cyxwiz_transport_t *transport)

@@ -293,7 +293,7 @@ cyxwiz/
 - [x] UDP/Internet transport with NAT traversal
 - [x] Bootstrap node for peer discovery
 - [x] Onion routing implementation
-- [ ] Message routing (multi-hop)
+- [x] Message routing (multi-hop)
 - [ ] SPDZ online computation (Beaver triples)
 - [ ] Full threshold reconstruction
 
