@@ -20,18 +20,22 @@ option(CYXWIZ_HAS_CRYPTO "Enable crypto module (requires libsodium)" ON)
 
 # Find libsodium
 if(CYXWIZ_HAS_CRYPTO)
-    # Try pkg-config first (Linux/macOS)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(SODIUM QUIET libsodium)
+    # Try vcpkg first (find_package with CONFIG)
+    find_package(unofficial-sodium QUIET CONFIG)
+    if(unofficial-sodium_FOUND)
+        set(SODIUM_FOUND TRUE)
+        set(SODIUM_TARGET unofficial-sodium::sodium)
+        message(STATUS "Found libsodium via vcpkg")
     endif()
 
-    # If pkg-config didn't find it, try find_package (vcpkg, manual install)
+    # Try pkg-config (Linux/macOS)
     if(NOT SODIUM_FOUND)
-        find_package(unofficial-sodium QUIET CONFIG)
-        if(unofficial-sodium_FOUND)
-            set(SODIUM_FOUND TRUE)
-            set(SODIUM_LIBRARIES unofficial-sodium::sodium)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(SODIUM QUIET libsodium)
+            if(SODIUM_FOUND)
+                set(SODIUM_TARGET ${SODIUM_LIBRARIES})
+            endif()
         endif()
     endif()
 
@@ -42,6 +46,7 @@ if(CYXWIZ_HAS_CRYPTO)
                 "$ENV{SODIUM_ROOT}/include"
                 "$ENV{PROGRAMFILES}/libsodium/include"
                 "C:/libsodium/include"
+                "C:/vcpkg/installed/x64-windows/include"
         )
         find_library(SODIUM_LIBRARY
             NAMES sodium libsodium
@@ -49,11 +54,12 @@ if(CYXWIZ_HAS_CRYPTO)
                 "$ENV{SODIUM_ROOT}/lib"
                 "$ENV{PROGRAMFILES}/libsodium/lib"
                 "C:/libsodium/lib"
+                "C:/vcpkg/installed/x64-windows/lib"
         )
         if(SODIUM_INCLUDE_DIR AND SODIUM_LIBRARY)
             set(SODIUM_FOUND TRUE)
             set(SODIUM_INCLUDE_DIRS ${SODIUM_INCLUDE_DIR})
-            set(SODIUM_LIBRARIES ${SODIUM_LIBRARY})
+            set(SODIUM_TARGET ${SODIUM_LIBRARY})
         endif()
     endif()
 
@@ -61,7 +67,7 @@ if(CYXWIZ_HAS_CRYPTO)
         message(WARNING "libsodium not found, disabling crypto module")
         set(CYXWIZ_HAS_CRYPTO OFF)
     else()
-        message(STATUS "Found libsodium: ${SODIUM_LIBRARIES}")
+        message(STATUS "Found libsodium: ${SODIUM_TARGET}")
     endif()
 endif()
 
@@ -95,7 +101,15 @@ endif()
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
     src/core/discovery.c
+    src/core/routing.c
 )
+
+# Onion routing (requires crypto)
+if(CYXWIZ_HAS_CRYPTO)
+    list(APPEND CYXWIZ_SOURCES
+        src/core/onion.c
+    )
+endif()
 
 # Crypto module (conditional on libsodium)
 if(CYXWIZ_HAS_CRYPTO)
@@ -117,7 +131,7 @@ if(CYXWIZ_HAS_CRYPTO)
     if(SODIUM_INCLUDE_DIRS)
         target_include_directories(cyxwiz PUBLIC ${SODIUM_INCLUDE_DIRS})
     endif()
-    target_link_libraries(cyxwiz PUBLIC ${SODIUM_LIBRARIES})
+    target_link_libraries(cyxwiz PUBLIC ${SODIUM_TARGET})
 endif()
 
 # Daemon executable
@@ -136,11 +150,19 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_crypto tests/test_crypto.c)
         target_link_libraries(test_crypto PRIVATE cyxwiz)
         add_test(NAME test_crypto COMMAND test_crypto)
+
+        add_executable(test_onion tests/test_onion.c)
+        target_link_libraries(test_onion PRIVATE cyxwiz)
+        add_test(NAME test_onion COMMAND test_onion)
     endif()
 
     add_executable(test_peer tests/test_peer.c)
     target_link_libraries(test_peer PRIVATE cyxwiz)
     add_test(NAME test_peer COMMAND test_peer)
+
+    add_executable(test_routing tests/test_routing.c)
+    target_link_libraries(test_routing PRIVATE cyxwiz)
+    add_test(NAME test_routing COMMAND test_routing)
 endif()
 
 # Install

@@ -65,6 +65,8 @@ include/cyxwiz/       Public headers
   types.h             Error codes, node ID, message types, constants
   transport.h         Transport abstraction interface
   peer.h              Peer table and discovery protocol
+  routing.h           Mesh routing (route discovery, source routing)
+  onion.h             Onion routing (layered encryption, circuits)
   crypto.h            MPC crypto (secret sharing, encryption, MACs)
   memory.h            Secure memory (zeroing, constant-time compare)
   log.h               Logging
@@ -72,7 +74,9 @@ include/cyxwiz/       Public headers
 src/
   core/               Core protocol modules
     peer.c            Peer table management
-    discovery.c       Peer discovery protocol
+    discovery.c       Peer discovery protocol (with X25519 key exchange)
+    routing.c         Mesh routing implementation
+    onion.c           Onion routing implementation
   transport/          Transport drivers
     transport.c       Transport manager (create/destroy)
     wifi_direct.c     WiFi Direct driver (stub)
@@ -191,6 +195,126 @@ cyxwiz_discovery_stop(discovery);
 - `CYXWIZ_DISC_GOODBYE` - Graceful disconnect
 
 All messages fit in 37 bytes or less (LoRa-compatible).
+
+## Routing Module
+
+Hybrid mesh routing with on-demand route discovery and source routing:
+
+### Key Types
+- `cyxwiz_router_t` - Router context
+- `cyxwiz_route_t` - Cached route (destination, hops, latency)
+- `cyxwiz_route_req_t` - Route request message (broadcast flood)
+- `cyxwiz_route_reply_t` - Route reply message (unicast back)
+- `cyxwiz_routed_data_t` - Data packet with source route header
+
+### Routing Algorithm
+1. **Direct peer check** - If destination is a direct neighbor, send directly
+2. **Cache lookup** - Use cached route if available and not expired
+3. **Route discovery** - Broadcast ROUTE_REQ, destination replies with ROUTE_REPLY
+4. **Source routing** - Sender embeds full path in packet header
+
+### Core Operations
+```c
+// Create router
+cyxwiz_router_create(&router, peer_table, transport, &local_id);
+cyxwiz_router_set_callback(router, on_data_received, user_data);
+
+// Lifecycle
+cyxwiz_router_start(router);
+cyxwiz_router_poll(router, current_time_ms);  // Call in main loop
+cyxwiz_router_stop(router);
+
+// Sending (discovers route if needed, queues while waiting)
+cyxwiz_router_send(router, &destination, data, len);
+
+// Route info
+cyxwiz_router_has_route(router, &destination);
+cyxwiz_router_get_route(router, &destination);
+cyxwiz_router_invalidate_route(router, &destination);
+```
+
+### Constants
+- `CYXWIZ_MAX_HOPS` = 5 (fits in 250-byte LoRa packet)
+- `CYXWIZ_MAX_ROUTES` = 32 (cached routes)
+- `CYXWIZ_MAX_PENDING` = 8 (messages awaiting route discovery)
+- `CYXWIZ_MAX_ROUTED_PAYLOAD` = 48 bytes
+- `CYXWIZ_ROUTE_TIMEOUT_MS` = 60000 (route cache expires after 60s)
+- `CYXWIZ_ROUTE_REQ_TIMEOUT_MS` = 5000 (route discovery timeout)
+
+### Routing Messages (0x20-0x2F)
+- `CYXWIZ_MSG_ROUTE_REQ` (0x20) - Route request (broadcast)
+- `CYXWIZ_MSG_ROUTE_REPLY` (0x21) - Route reply (unicast)
+- `CYXWIZ_MSG_ROUTE_DATA` (0x22) - Routed data packet
+- `CYXWIZ_MSG_ROUTE_ERROR` (0x23) - Route error notification
+- `CYXWIZ_MSG_ONION_DATA` (0x24) - Onion-encrypted data packet
+
+All messages fit within 250-byte LoRa limit.
+
+## Onion Routing Module
+
+Layered encryption for anonymous routing. Each hop only knows the previous and next hop, not the full path.
+
+### Key Types
+- `cyxwiz_onion_ctx_t` - Onion context (X25519 keypair, circuits, peer keys)
+- `cyxwiz_circuit_t` - Onion circuit (hop list, per-hop keys)
+- `cyxwiz_peer_key_t` - Shared secret with peer (from DH exchange)
+- `cyxwiz_onion_data_t` - Onion-routed data packet
+- `cyxwiz_onion_layer_t` - Decrypted layer (next_hop + inner data)
+
+### How It Works
+1. **Key Exchange** - Discovery announces include X25519 public keys
+2. **Shared Secrets** - Each peer computes DH shared secret
+3. **Per-Hop Keys** - Derived from shared secret with domain separation
+4. **Onion Wrapping** - Sender encrypts layers from inside out
+5. **Onion Peeling** - Each hop decrypts its layer, sees only next hop
+
+### Payload Capacity
+Due to XChaCha20-Poly1305 overhead (40 bytes/layer) + node ID (32 bytes):
+- 1-hop: 173 bytes
+- 2-hop: 101 bytes
+- 3-hop: 29 bytes (max hops due to 250-byte LoRa limit)
+
+### Core Operations
+```c
+// Create onion context (generates X25519 keypair)
+cyxwiz_onion_create(&ctx, router, &local_id);
+
+// Get public key for announcements
+cyxwiz_onion_get_pubkey(ctx, pubkey);
+
+// Add peer's public key (computes shared secret)
+cyxwiz_onion_add_peer_key(ctx, &peer_id, peer_pubkey);
+
+// Build circuit through hops
+cyxwiz_onion_build_circuit(ctx, hops, hop_count, &circuit);
+
+// Send via circuit
+cyxwiz_onion_send(ctx, circuit, data, len);
+
+// Set delivery callback
+cyxwiz_onion_set_callback(ctx, on_delivery, user_data);
+
+// Poll (expires old circuits)
+cyxwiz_onion_poll(ctx, current_time_ms);
+
+// Low-level wrap/unwrap
+cyxwiz_onion_wrap(payload, len, hops, keys, hop_count, out, &out_len);
+cyxwiz_onion_unwrap(onion, len, key, &next_hop, inner, &inner_len);
+```
+
+### Constants
+- `CYXWIZ_MAX_ONION_HOPS` = 3
+- `CYXWIZ_ONION_OVERHEAD` = 40 (nonce 24 + auth tag 16)
+- `CYXWIZ_PUBKEY_SIZE` = 32
+- `CYXWIZ_MAX_CIRCUITS` = 16
+- `CYXWIZ_CIRCUIT_TIMEOUT_MS` = 60000
+
+### Privacy Properties
+| Property | With Onion | Without |
+|----------|------------|---------|
+| Path visibility | Hidden | Full path visible |
+| Source anonymity | Yes (with circuit) | No |
+| Content privacy | End-to-end encrypted | Plaintext |
 
 ## Architecture Layers
 

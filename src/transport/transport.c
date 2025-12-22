@@ -139,6 +139,11 @@ const char *cyxwiz_strerror(cyxwiz_error_t err)
         case CYXWIZ_ERR_NOT_INITIALIZED: return "Not initialized";
         case CYXWIZ_ERR_ALREADY_INIT:    return "Already initialized";
         case CYXWIZ_ERR_PACKET_TOO_LARGE:return "Packet exceeds transport MTU";
+        case CYXWIZ_ERR_NO_ROUTE:        return "No route to destination";
+        case CYXWIZ_ERR_QUEUE_FULL:      return "Pending queue full";
+        case CYXWIZ_ERR_TTL_EXPIRED:     return "TTL expired";
+        case CYXWIZ_ERR_NO_KEY:          return "No shared key with peer";
+        case CYXWIZ_ERR_CIRCUIT_FULL:    return "Circuit table full";
         default:                         return "Unknown error";
     }
 }

@@ -122,9 +122,10 @@ cyxwiz_error_t cyxwiz_crypto_reconstruct_secret(
 /*
  * Add two shares (result = a + b)
  * This is a local operation - no communication needed
- * MACs are combined: MAC(a+b) = MAC(a) + MAC(b)
+ * Context is needed to recompute the MAC for the result
  */
 cyxwiz_error_t cyxwiz_crypto_share_add(
+    cyxwiz_crypto_ctx_t *ctx,
     const cyxwiz_share_t *a,
     const cyxwiz_share_t *b,
     cyxwiz_share_t *result
@@ -132,8 +133,10 @@ cyxwiz_error_t cyxwiz_crypto_share_add(
 
 /*
  * Subtract shares (result = a - b)
+ * Context is needed to recompute the MAC for the result
  */
 cyxwiz_error_t cyxwiz_crypto_share_sub(
+    cyxwiz_crypto_ctx_t *ctx,
     const cyxwiz_share_t *a,
     const cyxwiz_share_t *b,
     cyxwiz_share_t *result

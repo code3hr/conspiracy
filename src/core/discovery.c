@@ -27,6 +27,14 @@ struct cyxwiz_discovery {
     bool running;
     uint64_t last_announce;
     uint64_t last_cleanup;
+
+    /* X25519 public key for onion routing */
+    uint8_t pubkey[CYXWIZ_PUBKEY_SIZE];
+    bool has_pubkey;
+
+    /* Key exchange callback */
+    cyxwiz_key_exchange_cb_t key_callback;
+    void *key_user_data;
 };
 
 /*
@@ -55,6 +63,12 @@ cyxwiz_error_t cyxwiz_discovery_create(
     d->last_announce = 0;
     d->last_cleanup = 0;
 
+    /* Initialize key exchange fields */
+    memset(d->pubkey, 0, sizeof(d->pubkey));
+    d->has_pubkey = false;
+    d->key_callback = NULL;
+    d->key_user_data = NULL;
+
     *discovery = d;
 
     char hex_id[65];
@@ -82,6 +96,36 @@ void cyxwiz_discovery_destroy(cyxwiz_discovery_t *discovery)
 }
 
 /*
+ * Set key exchange callback
+ */
+void cyxwiz_discovery_set_key_callback(
+    cyxwiz_discovery_t *discovery,
+    cyxwiz_key_exchange_cb_t callback,
+    void *user_data)
+{
+    if (discovery == NULL) {
+        return;
+    }
+    discovery->key_callback = callback;
+    discovery->key_user_data = user_data;
+}
+
+/*
+ * Set public key for announcements
+ */
+void cyxwiz_discovery_set_pubkey(
+    cyxwiz_discovery_t *discovery,
+    const uint8_t *pubkey)
+{
+    if (discovery == NULL || pubkey == NULL) {
+        return;
+    }
+    memcpy(discovery->pubkey, pubkey, CYXWIZ_PUBKEY_SIZE);
+    discovery->has_pubkey = true;
+    CYXWIZ_DEBUG("Set X25519 public key for discovery");
+}
+
+/*
  * Send announcement message
  */
 static cyxwiz_error_t send_announce(cyxwiz_discovery_t *discovery)
@@ -94,6 +138,11 @@ static cyxwiz_error_t send_announce(cyxwiz_discovery_t *discovery)
     memcpy(&msg.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
     msg.capabilities = discovery->capabilities;
     msg.port = 0;  /* Not used for mesh transports */
+
+    /* Include X25519 public key if available */
+    if (discovery->has_pubkey) {
+        memcpy(msg.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
+    }
 
     /* Broadcast to all (use zero ID for broadcast) */
     cyxwiz_node_id_t broadcast_id;
@@ -193,6 +242,22 @@ static cyxwiz_error_t handle_announce(
         msg->capabilities
     );
 
+    /* Notify key exchange callback if pubkey present */
+    if (discovery->key_callback != NULL) {
+        /* Check if pubkey is not all zeros */
+        bool has_pubkey = false;
+        for (size_t i = 0; i < CYXWIZ_PUBKEY_SIZE; i++) {
+            if (msg->pubkey[i] != 0) {
+                has_pubkey = true;
+                break;
+            }
+        }
+        if (has_pubkey) {
+            discovery->key_callback(&msg->node_id, msg->pubkey,
+                                   discovery->key_user_data);
+        }
+    }
+
     /* Send acknowledgment (our own announcement) */
     cyxwiz_disc_announce_t ack;
     memset(&ack, 0, sizeof(ack));
@@ -201,6 +266,11 @@ static cyxwiz_error_t handle_announce(
     memcpy(&ack.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
     ack.capabilities = discovery->capabilities;
     ack.port = 0;
+
+    /* Include our X25519 public key if available */
+    if (discovery->has_pubkey) {
+        memcpy(ack.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
+    }
 
     discovery->transport->ops->send(
         discovery->transport,
@@ -248,6 +318,21 @@ static cyxwiz_error_t handle_announce_ack(
             &msg->node_id,
             CYXWIZ_PEER_STATE_CONNECTED
         );
+
+        /* Notify key exchange callback if pubkey present */
+        if (discovery->key_callback != NULL) {
+            bool has_pubkey = false;
+            for (size_t i = 0; i < CYXWIZ_PUBKEY_SIZE; i++) {
+                if (msg->pubkey[i] != 0) {
+                    has_pubkey = true;
+                    break;
+                }
+            }
+            if (has_pubkey) {
+                discovery->key_callback(&msg->node_id, msg->pubkey,
+                                       discovery->key_user_data);
+            }
+        }
     }
 
     return err;

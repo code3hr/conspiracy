@@ -11,6 +11,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef CYXWIZ_HAS_CRYPTO
+extern void cyxwiz_crypto_random(uint8_t *buf, size_t len);
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -72,7 +76,6 @@ void cyxwiz_node_id_random(cyxwiz_node_id_t *id)
 {
     /* Use crypto random if available, otherwise fall back */
 #ifdef CYXWIZ_HAS_CRYPTO
-    extern void cyxwiz_crypto_random(uint8_t *buf, size_t len);
     cyxwiz_crypto_random(id->bytes, CYXWIZ_NODE_ID_LEN);
 #else
     /* Simple fallback - not cryptographically secure */

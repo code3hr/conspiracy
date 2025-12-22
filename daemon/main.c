@@ -8,11 +8,13 @@
 #include "cyxwiz/types.h"
 #include "cyxwiz/transport.h"
 #include "cyxwiz/peer.h"
+#include "cyxwiz/routing.h"
 #include "cyxwiz/log.h"
 #include "cyxwiz/memory.h"
 
 #ifdef CYXWIZ_HAS_CRYPTO
 #include "cyxwiz/crypto.h"
+#include "cyxwiz/onion.h"
 #endif
 
 #include <stdio.h>
@@ -37,8 +39,12 @@ static void signal_handler(int sig)
     g_running = false;
 }
 
-/* Forward declaration for discovery */
+/* Forward declarations */
 static cyxwiz_discovery_t *g_discovery = NULL;
+static cyxwiz_router_t *g_router = NULL;
+#ifdef CYXWIZ_HAS_CRYPTO
+static cyxwiz_onion_ctx_t *g_onion = NULL;
+#endif
 
 static void on_peer_discovered(
     cyxwiz_transport_t *transport,
@@ -80,11 +86,105 @@ static void on_data_received(
     CYXWIZ_UNUSED(user_data);
     CYXWIZ_DEBUG("Received %zu bytes", len);
 
-    /* Forward to discovery module for protocol messages */
-    if (g_discovery != NULL && len > 0) {
-        cyxwiz_discovery_handle_message(g_discovery, from, data, len);
+    if (len == 0) {
+        return;
+    }
+
+    /* Dispatch by message type */
+    uint8_t msg_type = data[0];
+
+    if (msg_type >= 0x20 && msg_type <= 0x2F) {
+        /* Routing messages (ROUTE_REQ, ROUTE_REPLY, ROUTE_DATA, ROUTE_ERROR) */
+        if (g_router != NULL) {
+            cyxwiz_router_handle_message(g_router, from, data, len);
+        }
+    } else if (msg_type >= 0x01 && msg_type <= 0x0F) {
+        /* Discovery messages (ANNOUNCE, ANNOUNCE_ACK) */
+        if (g_discovery != NULL) {
+            cyxwiz_discovery_handle_message(g_discovery, from, data, len);
+        }
+    } else {
+        CYXWIZ_DEBUG("Unknown message type: 0x%02X", msg_type);
     }
 }
+
+static void on_routed_data(
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len,
+    void *user_data)
+{
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(user_data);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(from, hex_id);
+    CYXWIZ_INFO("Received %zu bytes via route from %.16s...", len, hex_id);
+
+    /* TODO: Process application data */
+}
+
+#ifdef CYXWIZ_HAS_CRYPTO
+/* Called when discovery receives a peer's public key */
+static void on_peer_key_exchange(
+    const cyxwiz_node_id_t *peer_id,
+    const uint8_t *peer_pubkey,
+    void *user_data)
+{
+    CYXWIZ_UNUSED(user_data);
+
+    if (g_onion == NULL) {
+        return;
+    }
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(peer_id, hex_id);
+    CYXWIZ_DEBUG("Received public key from %.16s...", hex_id);
+
+    /* Add peer's public key to onion context (computes shared secret) */
+    cyxwiz_error_t err = cyxwiz_onion_add_peer_key(g_onion, peer_id, peer_pubkey);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to add peer key: %s", cyxwiz_strerror(err));
+    }
+}
+
+/* Called when router receives an onion message */
+static void on_onion_message(
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len,
+    void *user_data)
+{
+    CYXWIZ_UNUSED(user_data);
+
+    if (g_onion == NULL) {
+        return;
+    }
+
+    /* Forward to onion layer for decryption/routing */
+    cyxwiz_error_t err = cyxwiz_onion_handle_message(g_onion, from, data, len);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_DEBUG("Onion message handling failed: %s", cyxwiz_strerror(err));
+    }
+}
+
+/* Called when onion data reaches us (final destination) */
+static void on_onion_delivery(
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len,
+    void *user_data)
+{
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(user_data);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(from, hex_id);
+    CYXWIZ_INFO("Received %zu bytes via onion from %.16s...", len, hex_id);
+
+    /* TODO: Process application data received via onion routing */
+}
+#endif
 
 static void print_banner(void)
 {
@@ -186,6 +286,48 @@ int main(int argc, char *argv[])
                 CYXWIZ_ERROR("Failed to start discovery: %s", cyxwiz_strerror(err));
             }
         }
+
+        /* Create router */
+        err = cyxwiz_router_create(&g_router, peer_table, wifi_transport, &local_id);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to create router: %s", cyxwiz_strerror(err));
+        } else {
+            cyxwiz_router_set_callback(g_router, on_routed_data, NULL);
+
+            /* Start router */
+            err = cyxwiz_router_start(g_router);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to start router: %s", cyxwiz_strerror(err));
+            }
+
+#ifdef CYXWIZ_HAS_CRYPTO
+            /* Create onion routing context */
+            err = cyxwiz_onion_create(&g_onion, g_router, &local_id);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to create onion context: %s", cyxwiz_strerror(err));
+            } else {
+                /* Set onion delivery callback */
+                cyxwiz_onion_set_callback(g_onion, on_onion_delivery, NULL);
+
+                /* Set router's onion callback to forward messages to onion layer */
+                cyxwiz_router_set_onion_callback(g_router, on_onion_message, NULL);
+
+                /* Set discovery's key callback to add peer keys to onion context */
+                if (g_discovery != NULL) {
+                    cyxwiz_discovery_set_key_callback(g_discovery, on_peer_key_exchange, NULL);
+
+                    /* Set our public key for announcements */
+                    uint8_t pubkey[CYXWIZ_PUBKEY_SIZE];
+                    err = cyxwiz_onion_get_pubkey(g_onion, pubkey);
+                    if (err == CYXWIZ_OK) {
+                        cyxwiz_discovery_set_pubkey(g_discovery, pubkey);
+                    }
+                }
+
+                CYXWIZ_INFO("Onion routing enabled");
+            }
+#endif
+        }
     }
 
     CYXWIZ_INFO("Node running. Press Ctrl+C to stop.");
@@ -199,13 +341,23 @@ int main(int argc, char *argv[])
             cyxwiz_discovery_poll(g_discovery, now);
         }
 
+        /* Poll router (handles route discovery, pending sends, route expiry) */
+        if (g_router != NULL) {
+            cyxwiz_router_poll(g_router, now);
+        }
+
+#ifdef CYXWIZ_HAS_CRYPTO
+        /* Poll onion context (expires old circuits) */
+        if (g_onion != NULL) {
+            cyxwiz_onion_poll(g_onion, now);
+        }
+#endif
+
         /* Poll all transports */
         if (wifi_transport != NULL) {
             wifi_transport->ops->poll(wifi_transport, 100);
         }
 
-        /* TODO: Process routing table updates */
-        /* TODO: Handle pending messages */
         /* TODO: MPC key refresh */
 
         sleep_ms(100);
@@ -213,6 +365,21 @@ int main(int argc, char *argv[])
 
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
+
+#ifdef CYXWIZ_HAS_CRYPTO
+    /* Destroy onion context (before router) */
+    if (g_onion != NULL) {
+        cyxwiz_onion_destroy(g_onion);
+        g_onion = NULL;
+    }
+#endif
+
+    /* Stop and destroy router */
+    if (g_router != NULL) {
+        cyxwiz_router_stop(g_router);
+        cyxwiz_router_destroy(g_router);
+        g_router = NULL;
+    }
 
     /* Stop and destroy discovery */
     if (g_discovery != NULL) {

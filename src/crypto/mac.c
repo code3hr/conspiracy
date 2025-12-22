@@ -18,6 +18,9 @@
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
+/* Forward declaration for crypto.c function */
+extern const uint8_t *cyxwiz_crypto_get_mac_key(const cyxwiz_crypto_ctx_t *ctx);
+
 #include <sodium.h>
 #include <string.h>
 
@@ -92,7 +95,6 @@ cyxwiz_error_t cyxwiz_crypto_compute_mac(
     }
 
     /* Get MAC key from context (defined in crypto.c) */
-    extern const uint8_t *cyxwiz_crypto_get_mac_key(const cyxwiz_crypto_ctx_t *ctx);
     const uint8_t *mac_key = cyxwiz_crypto_get_mac_key(ctx);
 
     if (mac_key == NULL) {

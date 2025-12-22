@@ -174,6 +174,33 @@ size_t cyxwiz_peer_table_cleanup(
 typedef struct cyxwiz_discovery cyxwiz_discovery_t;
 
 /*
+ * Key exchange callback - called when a peer's public key is received
+ */
+typedef void (*cyxwiz_key_exchange_cb_t)(
+    const cyxwiz_node_id_t *peer_id,
+    const uint8_t *peer_pubkey,
+    void *user_data
+);
+
+/*
+ * Set key exchange callback for discovery
+ * Called when peer's X25519 public key is received via ANNOUNCE
+ */
+void cyxwiz_discovery_set_key_callback(
+    cyxwiz_discovery_t *discovery,
+    cyxwiz_key_exchange_cb_t callback,
+    void *user_data
+);
+
+/*
+ * Set this node's X25519 public key for announcements
+ */
+void cyxwiz_discovery_set_pubkey(
+    cyxwiz_discovery_t *discovery,
+    const uint8_t *pubkey
+);
+
+/*
  * Create discovery context
  * Attaches to a peer table and transport
  */
@@ -233,9 +260,12 @@ typedef enum {
     CYXWIZ_DISC_GOODBYE = 0x05     /* Graceful disconnect */
 } cyxwiz_disc_msg_type_t;
 
+/* X25519 public key size */
+#define CYXWIZ_PUBKEY_SIZE 32
+
 /*
  * Announcement message (broadcast to find peers)
- * Total: 37 bytes (fits easily in LoRa)
+ * Total: 69 bytes (fits easily in LoRa)
  */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
@@ -246,6 +276,7 @@ typedef struct {
     cyxwiz_node_id_t node_id;        /* Our node ID (32 bytes) */
     uint8_t capabilities;            /* What we can do */
     uint16_t port;                   /* Optional port (0 if N/A) */
+    uint8_t pubkey[CYXWIZ_PUBKEY_SIZE]; /* X25519 public key for onion routing */
 }
 #ifdef __GNUC__
 __attribute__((packed))

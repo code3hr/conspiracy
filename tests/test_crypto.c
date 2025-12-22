@@ -291,7 +291,7 @@ static int test_share_add(void)
     /* Add shares locally */
     cyxwiz_share_t shares_sum[3];
     for (size_t i = 0; i < 3; i++) {
-        err = cyxwiz_crypto_share_add(&shares_a[i], &shares_b[i], &shares_sum[i]);
+        err = cyxwiz_crypto_share_add(ctx, &shares_a[i], &shares_b[i], &shares_sum[i]);
         if (err != CYXWIZ_OK) {
             cyxwiz_crypto_destroy(ctx);
             return 0;

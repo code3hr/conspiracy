@@ -191,19 +191,23 @@ cyxwiz_error_t cyxwiz_crypto_reconstruct_secret(
  * Add two shares: result = a + b
  */
 cyxwiz_error_t cyxwiz_crypto_share_add(
+    cyxwiz_crypto_ctx_t *ctx,
     const cyxwiz_share_t *a,
     const cyxwiz_share_t *b,
     cyxwiz_share_t *result)
 {
-    if (a == NULL || b == NULL || result == NULL) {
+    if (ctx == NULL || a == NULL || b == NULL || result == NULL) {
         return CYXWIZ_ERR_INVALID;
     }
 
     /* Add values */
     field_add(result->value, a->value, b->value);
 
-    /* Add MACs (homomorphic property) */
-    cyxwiz_mac_add(a->mac, b->mac, result->mac);
+    /* Compute fresh MAC for the result value */
+    cyxwiz_error_t err = cyxwiz_crypto_compute_mac(ctx, result->value, result->mac);
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
 
     /* Result belongs to same party as first operand */
     result->party_id = a->party_id;
@@ -215,19 +219,23 @@ cyxwiz_error_t cyxwiz_crypto_share_add(
  * Subtract shares: result = a - b
  */
 cyxwiz_error_t cyxwiz_crypto_share_sub(
+    cyxwiz_crypto_ctx_t *ctx,
     const cyxwiz_share_t *a,
     const cyxwiz_share_t *b,
     cyxwiz_share_t *result)
 {
-    if (a == NULL || b == NULL || result == NULL) {
+    if (ctx == NULL || a == NULL || b == NULL || result == NULL) {
         return CYXWIZ_ERR_INVALID;
     }
 
     /* Subtract values (same as add in GF(2^n)) */
     field_sub(result->value, a->value, b->value);
 
-    /* Subtract MACs (same as add) */
-    cyxwiz_mac_add(a->mac, b->mac, result->mac);
+    /* Compute fresh MAC for the result value */
+    cyxwiz_error_t err = cyxwiz_crypto_compute_mac(ctx, result->value, result->mac);
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
 
     result->party_id = a->party_id;
 
