@@ -374,6 +374,164 @@ static int test_invalidate_route(void)
     return 1;
 }
 
+/* Test anonymous route request message format */
+static int test_anon_route_req_format(void)
+{
+    cyxwiz_anon_route_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    req.type = CYXWIZ_MSG_ANON_ROUTE_REQ;
+    req.version = CYXWIZ_ANON_VERSION;
+    req.ttl = CYXWIZ_DEFAULT_TTL;
+
+    /* Verify type field is first byte */
+    uint8_t *bytes = (uint8_t *)&req;
+    if (bytes[0] != CYXWIZ_MSG_ANON_ROUTE_REQ) {
+        return 0;
+    }
+
+    /* Verify size fits in LoRa packet (should be ~219 bytes) */
+    if (sizeof(cyxwiz_anon_route_req_t) > CYXWIZ_MAX_PACKET_SIZE) {
+        printf("anon_route_req too large: %zu > %d", sizeof(cyxwiz_anon_route_req_t), CYXWIZ_MAX_PACKET_SIZE);
+        return 0;
+    }
+
+    /* Verify expected size range */
+    if (sizeof(cyxwiz_anon_route_req_t) < 200 || sizeof(cyxwiz_anon_route_req_t) > 230) {
+        printf("unexpected size: %zu", sizeof(cyxwiz_anon_route_req_t));
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test anonymous route reply message format */
+static int test_anon_route_reply_format(void)
+{
+    cyxwiz_anon_route_reply_t reply;
+    memset(&reply, 0, sizeof(reply));
+
+    reply.type = CYXWIZ_MSG_ANON_ROUTE_REPLY;
+
+    /* Verify type field is first byte */
+    uint8_t *bytes = (uint8_t *)&reply;
+    if (bytes[0] != CYXWIZ_MSG_ANON_ROUTE_REPLY) {
+        return 0;
+    }
+
+    /* Verify size fits in LoRa packet (should be ~193 bytes) */
+    if (sizeof(cyxwiz_anon_route_reply_t) > CYXWIZ_MAX_PACKET_SIZE) {
+        printf("anon_route_reply too large: %zu > %d", sizeof(cyxwiz_anon_route_reply_t), CYXWIZ_MAX_PACKET_SIZE);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test SURB structure format */
+static int test_surb_format(void)
+{
+    cyxwiz_surb_t surb;
+    memset(&surb, 0, sizeof(surb));
+
+    /* Verify SURB size is as expected (120 bytes = 32 first_hop + 88 onion_header) */
+    if (sizeof(cyxwiz_surb_t) != CYXWIZ_SURB_SIZE) {
+        printf("surb size mismatch: %zu != %d", sizeof(cyxwiz_surb_t), CYXWIZ_SURB_SIZE);
+        return 0;
+    }
+
+    /* Verify first_hop is at start */
+    if (sizeof(surb.first_hop) != CYXWIZ_NODE_ID_LEN) {
+        return 0;
+    }
+
+    /* Verify onion_header size */
+    if (sizeof(surb.onion_header) != CYXWIZ_SURB_HEADER_SIZE) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test anonymous reply payload format */
+static int test_anon_reply_payload_format(void)
+{
+    cyxwiz_anon_reply_payload_t payload;
+    memset(&payload, 0, sizeof(payload));
+
+    /* Verify payload fields exist and are properly sized */
+    if (sizeof(payload.request_nonce) != CYXWIZ_REQUEST_NONCE_SIZE) {
+        return 0;
+    }
+
+    if (sizeof(payload.responder_id) != sizeof(cyxwiz_node_id_t)) {
+        return 0;
+    }
+
+    if (sizeof(payload.responder_pubkey) != 32) {
+        return 0;
+    }
+
+    /* Verify payload structure is compact (~81 bytes) */
+    if (sizeof(cyxwiz_anon_reply_payload_t) > 100) {
+        printf("payload too large: %zu (expected ~81)", sizeof(cyxwiz_anon_reply_payload_t));
+        return 0;
+    }
+
+    /* Verify payload fits in reply's onion_payload */
+    if (sizeof(cyxwiz_anon_reply_payload_t) > CYXWIZ_ANON_REPLY_PAYLOAD_SIZE) {
+        printf("payload too large: %zu > %d", sizeof(cyxwiz_anon_reply_payload_t), CYXWIZ_ANON_REPLY_PAYLOAD_SIZE);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test anonymous discovery pending */
+static int test_anon_discovery_pending(void)
+{
+    cyxwiz_peer_table_t *peer_table = NULL;
+    cyxwiz_transport_t *transport = NULL;
+    cyxwiz_router_t *router = NULL;
+    cyxwiz_node_id_t local_id, dest_id;
+
+    cyxwiz_peer_table_create(&peer_table);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_node_id_random(&local_id);
+    cyxwiz_node_id_random(&dest_id);
+    cyxwiz_router_create(&router, peer_table, transport, &local_id);
+    cyxwiz_router_start(router);
+
+    /* Initially no discovery pending */
+    if (cyxwiz_router_anon_discovery_pending(router, &dest_id)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    /* NULL checks */
+    if (cyxwiz_router_anon_discovery_pending(NULL, &dest_id)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    if (cyxwiz_router_anon_discovery_pending(router, NULL)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    cyxwiz_router_destroy(router);
+    cyxwiz_transport_destroy(transport);
+    cyxwiz_peer_table_destroy(peer_table);
+
+    return 1;
+}
+
 /* Test payload size limit */
 static int test_payload_size_limit(void)
 {
@@ -440,6 +598,13 @@ int main(void)
     TEST(send_to_self);
     TEST(invalidate_route);
     TEST(payload_size_limit);
+
+    /* Anonymous routing tests */
+    TEST(anon_route_req_format);
+    TEST(anon_route_reply_format);
+    TEST(surb_format);
+    TEST(anon_reply_payload_format);
+    TEST(anon_discovery_pending);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

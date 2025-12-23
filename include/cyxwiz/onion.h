@@ -189,6 +189,21 @@ cyxwiz_error_t cyxwiz_onion_derive_hop_key(
     uint8_t *key_out
 );
 
+/*
+ * Compute ECDH shared secret with an ephemeral public key
+ * Uses this node's private key with the provided public key
+ *
+ * @param ctx           Onion context
+ * @param peer_pubkey   Peer's X25519 public key (32 bytes)
+ * @param secret_out    Output shared secret (32 bytes)
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_compute_ecdh(
+    cyxwiz_onion_ctx_t *ctx,
+    const uint8_t *peer_pubkey,
+    uint8_t *secret_out
+);
+
 /* ============ Circuit Management ============ */
 
 /*

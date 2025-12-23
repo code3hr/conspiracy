@@ -278,6 +278,27 @@ cyxwiz_error_t cyxwiz_onion_derive_hop_key(
 #endif
 }
 
+cyxwiz_error_t cyxwiz_onion_compute_ecdh(
+    cyxwiz_onion_ctx_t *ctx,
+    const uint8_t *peer_pubkey,
+    uint8_t *secret_out)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || peer_pubkey == NULL || secret_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* X25519 scalar multiplication: shared = our_sk * peer_pk */
+    if (crypto_scalarmult(secret_out, ctx->secret_key, peer_pubkey) != 0) {
+        return CYXWIZ_ERR_CRYPTO;
+    }
+
+    return CYXWIZ_OK;
+#endif
+}
+
 /* ============ Circuit Management ============ */
 
 cyxwiz_error_t cyxwiz_onion_build_circuit(

@@ -158,6 +158,15 @@ void cyxwiz_peer_table_iterate(
 );
 
 /*
+ * Get peer by index (for random selection/iteration)
+ * Returns NULL if index out of range or slot empty
+ */
+const cyxwiz_peer_t *cyxwiz_peer_table_get_peer(
+    const cyxwiz_peer_table_t *table,
+    size_t index
+);
+
+/*
  * Clean up stale peers (not seen within timeout)
  * Returns number of peers removed
  */

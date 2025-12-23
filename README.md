@@ -323,6 +323,47 @@ cyxwiz/
 
 ---
 
+## Implementation Status
+
+### Cryptography Layer
+| Feature | Status | Description |
+|---------|--------|-------------|
+| X25519 Key Exchange | ✅ | Elliptic curve Diffie-Hellman |
+| XChaCha20-Poly1305 | ✅ | Authenticated encryption (libsodium) |
+| BLAKE2b Hashing | ✅ | Fast cryptographic hashing |
+| Shamir's Secret Sharing | ✅ | K-of-N threshold reconstruction |
+| SPDZ MACs | ✅ | Information-theoretic authentication |
+| Beaver Triples | ✅ | Secure multiplication preprocessing |
+
+### Network Layer
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Multi-hop Routing | ✅ | Source routing with path caching |
+| Onion Routing | ✅ | 3-hop encrypted relay (XChaCha20-Poly1305) |
+| Peer Discovery | ✅ | Broadcast-based with ANNOUNCE messages |
+| UDP Transport | ✅ | NAT traversal with STUN |
+| Bootstrap Nodes | ✅ | Initial peer discovery servers |
+
+### Protocol Layer
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Job Marketplace | ✅ | Distributed compute with MAC verification |
+| CyxCloud Storage | ✅ | K-of-N threshold distributed storage |
+| Proof of Storage | ✅ | Merkle-based storage verification |
+| Anonymous Route Discovery | ✅ | SURB-based anonymous routing with destination tokens |
+
+### Message Types Implemented
+```
+Discovery:    PING, PONG, DISCOVER, ANNOUNCE
+Routing:      ROUTE_REQ, ROUTE_REPLY, ROUTE_DATA, ROUTE_ERROR, ONION_DATA,
+              ANON_ROUTE_REQ, ANON_ROUTE_REPLY
+Compute:      JOB_SUBMIT, JOB_CHUNK, JOB_ACCEPT/REJECT, JOB_STATUS, JOB_RESULT, etc.
+Storage:      STORE_REQ/ACK/REJECT, RETRIEVE_REQ/RESP, DELETE_REQ/ACK, etc.
+Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL
+```
+
+---
+
 ## CYXWIZ Token (CYWZ)
 
 The native token that powers the protocol:

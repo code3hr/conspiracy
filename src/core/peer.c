@@ -335,6 +335,16 @@ void cyxwiz_peer_table_iterate(
     }
 }
 
+const cyxwiz_peer_t *cyxwiz_peer_table_get_peer(
+    const cyxwiz_peer_table_t *table,
+    size_t index)
+{
+    if (table == NULL || index >= CYXWIZ_MAX_PEERS || index >= table->count) {
+        return NULL;
+    }
+    return &table->peers[index];
+}
+
 size_t cyxwiz_peer_table_cleanup(
     cyxwiz_peer_table_t *table,
     uint64_t timeout_ms)

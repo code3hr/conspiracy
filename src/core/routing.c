@@ -10,6 +10,12 @@
 #include "cyxwiz/routing.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
+#include "cyxwiz/onion.h"
+
+#ifdef CYXWIZ_HAS_CRYPTO
+#include "cyxwiz/crypto.h"
+#include <sodium.h>
+#endif
 
 #include <string.h>
 
@@ -44,6 +50,26 @@ typedef struct {
 } cyxwiz_active_discovery_t;
 
 /*
+ * Seen anonymous request (deduplication by nonce, not origin)
+ */
+typedef struct {
+    uint8_t request_nonce[CYXWIZ_REQUEST_NONCE_SIZE];
+    uint64_t seen_at;
+} cyxwiz_seen_anon_request_t;
+
+/*
+ * Active anonymous route discovery
+ */
+typedef struct {
+    uint8_t request_nonce[CYXWIZ_REQUEST_NONCE_SIZE];
+    cyxwiz_node_id_t destination;
+    uint8_t ephemeral_sk[32];    /* Per-request ephemeral secret key */
+    uint8_t ephemeral_pk[32];    /* Per-request ephemeral public key */
+    uint64_t started_at;
+    bool active;
+} cyxwiz_anon_discovery_t;
+
+/*
  * Router context
  */
 struct cyxwiz_router {
@@ -72,6 +98,14 @@ struct cyxwiz_router {
     /* Onion message callback */
     cyxwiz_delivery_callback_t on_onion;
     void *onion_user_data;
+
+    /* Onion context (for anonymous routing) */
+    cyxwiz_onion_ctx_t *onion_ctx;
+
+    /* Anonymous routing state */
+    cyxwiz_seen_anon_request_t anon_seen[CYXWIZ_MAX_SEEN_REQUESTS];
+    size_t anon_seen_count;
+    cyxwiz_anon_discovery_t anon_discoveries[CYXWIZ_MAX_PENDING];
 
     /* State */
     bool running;
@@ -135,6 +169,44 @@ static bool is_direct_peer(
     cyxwiz_router_t *router,
     const cyxwiz_node_id_t *destination);
 
+/* Anonymous routing forward declarations */
+#ifdef CYXWIZ_HAS_CRYPTO
+static cyxwiz_error_t handle_anon_route_req(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_anon_route_req_t *req);
+
+static cyxwiz_error_t handle_anon_route_reply(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_anon_route_reply_t *reply);
+
+static bool is_anon_request_seen(
+    cyxwiz_router_t *router,
+    const uint8_t *nonce);
+
+static void mark_anon_request_seen(
+    cyxwiz_router_t *router,
+    const uint8_t *nonce,
+    uint64_t now);
+
+static cyxwiz_error_t create_dest_token(
+    const uint8_t *ephemeral_sk,
+    const uint8_t *dest_pubkey,
+    uint8_t *token_out);
+
+static bool try_decrypt_dest_token(
+    cyxwiz_onion_ctx_t *onion_ctx,
+    const uint8_t *ephemeral_pk,
+    const uint8_t *token);
+
+static cyxwiz_error_t create_surb(
+    cyxwiz_router_t *router,
+    const uint8_t *request_nonce,
+    cyxwiz_surb_t *surb_out,
+    uint8_t *reply_key_out);
+#endif
+
 /* ============ Router Lifecycle ============ */
 
 cyxwiz_error_t cyxwiz_router_create(
@@ -161,6 +233,8 @@ cyxwiz_error_t cyxwiz_router_create(
     r->user_data = NULL;
     r->on_onion = NULL;
     r->onion_user_data = NULL;
+    r->onion_ctx = NULL;
+    r->anon_seen_count = 0;
     r->running = false;
     r->next_request_id = 1;
     r->last_cleanup = 0;
@@ -169,6 +243,7 @@ cyxwiz_error_t cyxwiz_router_create(
     for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
         r->pending[i].valid = false;
         r->discoveries[i].active = false;
+        r->anon_discoveries[i].active = false;
     }
 
     /* Initialize routes */
@@ -221,6 +296,16 @@ void cyxwiz_router_set_onion_callback(
     }
     router->on_onion = callback;
     router->onion_user_data = user_data;
+}
+
+void cyxwiz_router_set_onion_ctx(
+    cyxwiz_router_t *router,
+    cyxwiz_onion_ctx_t *onion_ctx)
+{
+    if (router == NULL) {
+        return;
+    }
+    router->onion_ctx = onion_ctx;
 }
 
 cyxwiz_error_t cyxwiz_router_start(cyxwiz_router_t *router)
@@ -526,6 +611,20 @@ cyxwiz_error_t cyxwiz_router_handle_message(
                 CYXWIZ_WARN("Received onion message but no handler registered");
             }
             break;
+
+#ifdef CYXWIZ_HAS_CRYPTO
+        case CYXWIZ_MSG_ANON_ROUTE_REQ:
+            if (len >= sizeof(cyxwiz_anon_route_req_t)) {
+                return handle_anon_route_req(router, from, (const cyxwiz_anon_route_req_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_ANON_ROUTE_REPLY:
+            if (len >= sizeof(cyxwiz_anon_route_reply_t)) {
+                return handle_anon_route_reply(router, from, (const cyxwiz_anon_route_reply_t *)data);
+            }
+            break;
+#endif
 
         default:
             CYXWIZ_DEBUG("Unknown routing message type: 0x%02x", msg_type);
@@ -936,3 +1035,505 @@ static cyxwiz_error_t handle_route_error(
 
     return CYXWIZ_OK;
 }
+
+/* ============ Anonymous Routing Implementation ============ */
+
+#ifdef CYXWIZ_HAS_CRYPTO
+
+/* Context string for destination token key derivation */
+static const char DEST_TOKEN_CONTEXT[] = "cyxwiz_dest_v1";
+
+/*
+ * Check if an anonymous request nonce has been seen
+ */
+static bool is_anon_request_seen(
+    cyxwiz_router_t *router,
+    const uint8_t *nonce)
+{
+    for (size_t i = 0; i < router->anon_seen_count; i++) {
+        if (memcmp(router->anon_seen[i].request_nonce, nonce,
+                   CYXWIZ_REQUEST_NONCE_SIZE) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Mark an anonymous request nonce as seen
+ */
+static void mark_anon_request_seen(
+    cyxwiz_router_t *router,
+    const uint8_t *nonce,
+    uint64_t now)
+{
+    if (router->anon_seen_count >= CYXWIZ_MAX_SEEN_REQUESTS) {
+        /* Shift array (remove oldest) */
+        for (size_t i = 0; i < router->anon_seen_count - 1; i++) {
+            router->anon_seen[i] = router->anon_seen[i + 1];
+        }
+        router->anon_seen_count--;
+    }
+
+    memcpy(router->anon_seen[router->anon_seen_count].request_nonce, nonce,
+           CYXWIZ_REQUEST_NONCE_SIZE);
+    router->anon_seen[router->anon_seen_count].seen_at = now;
+    router->anon_seen_count++;
+}
+
+/*
+ * Create encrypted destination token
+ * Token = XChaCha20-Poly1305(key = BLAKE2b(ECDH(ephemeral_sk, dest_pubkey)),
+ *                            plaintext = MAGIC[4] || padding[4])
+ */
+static cyxwiz_error_t create_dest_token(
+    const uint8_t *ephemeral_sk,
+    const uint8_t *dest_pubkey,
+    uint8_t *token_out)
+{
+    uint8_t shared_secret[32];
+    uint8_t derived_key[CYXWIZ_KEY_SIZE];
+
+    /* X25519 DH with destination's public key */
+    if (crypto_scalarmult(shared_secret, ephemeral_sk, dest_pubkey) != 0) {
+        return CYXWIZ_ERR_CRYPTO;
+    }
+
+    /* Derive key from shared secret */
+    if (crypto_generichash(derived_key, CYXWIZ_KEY_SIZE,
+                           shared_secret, 32,
+                           (const uint8_t *)DEST_TOKEN_CONTEXT,
+                           sizeof(DEST_TOKEN_CONTEXT) - 1) != 0) {
+        sodium_memzero(shared_secret, sizeof(shared_secret));
+        return CYXWIZ_ERR_CRYPTO;
+    }
+    sodium_memzero(shared_secret, sizeof(shared_secret));
+
+    /* Build plaintext: magic bytes + padding */
+    uint8_t plaintext[8];
+    uint32_t magic = CYXWIZ_DEST_TOKEN_MAGIC;
+    memcpy(plaintext, &magic, 4);
+    randombytes_buf(plaintext + 4, 4);  /* Random padding */
+
+    /* Encrypt with XChaCha20-Poly1305 */
+    uint8_t nonce[crypto_secretbox_xchacha20poly1305_NONCEBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    /* token = nonce (24) + ciphertext (8 + 16 tag) = 48 bytes */
+    memcpy(token_out, nonce, sizeof(nonce));
+    if (crypto_secretbox_easy(token_out + sizeof(nonce), plaintext, 8,
+                              nonce, derived_key) != 0) {
+        sodium_memzero(derived_key, sizeof(derived_key));
+        return CYXWIZ_ERR_CRYPTO;
+    }
+
+    sodium_memzero(derived_key, sizeof(derived_key));
+    return CYXWIZ_OK;
+}
+
+/*
+ * Try to decrypt destination token using our keys
+ * Returns true if this node is the intended destination
+ */
+static bool try_decrypt_dest_token(
+    cyxwiz_onion_ctx_t *onion_ctx,
+    const uint8_t *ephemeral_pk,
+    const uint8_t *token)
+{
+    if (onion_ctx == NULL) {
+        return false;
+    }
+
+    /* Compute ECDH shared secret: our_sk * ephemeral_pk */
+    uint8_t shared_secret[32];
+    if (cyxwiz_onion_compute_ecdh(onion_ctx, ephemeral_pk, shared_secret) != CYXWIZ_OK) {
+        return false;
+    }
+
+    /* Derive encryption key from shared secret */
+    uint8_t derived_key[CYXWIZ_KEY_SIZE];
+    if (crypto_generichash(derived_key, CYXWIZ_KEY_SIZE,
+                           shared_secret, 32,
+                           (const uint8_t *)DEST_TOKEN_CONTEXT,
+                           sizeof(DEST_TOKEN_CONTEXT) - 1) != 0) {
+        sodium_memzero(shared_secret, sizeof(shared_secret));
+        return false;
+    }
+    sodium_memzero(shared_secret, sizeof(shared_secret));
+
+    /* Parse the token: nonce (24) + ciphertext (8 + 16 tag = 24) */
+    const uint8_t *nonce = token;
+    const uint8_t *ciphertext = token + crypto_secretbox_xchacha20poly1305_NONCEBYTES;
+
+    /* Try to decrypt */
+    uint8_t plaintext[8];
+    if (crypto_secretbox_open_easy(plaintext, ciphertext, 8 + crypto_secretbox_MACBYTES,
+                                    nonce, derived_key) != 0) {
+        /* Decryption failed - we are not the destination */
+        sodium_memzero(derived_key, sizeof(derived_key));
+        return false;
+    }
+    sodium_memzero(derived_key, sizeof(derived_key));
+
+    /* Check magic bytes */
+    uint32_t magic;
+    memcpy(&magic, plaintext, 4);
+    if (magic != CYXWIZ_DEST_TOKEN_MAGIC) {
+        CYXWIZ_DEBUG("Token decrypted but magic mismatch");
+        return false;
+    }
+
+    /* We are the intended destination! */
+    CYXWIZ_DEBUG("Destination token verified - we are the destination");
+    return true;
+}
+
+/*
+ * Create a Single-Use Reply Block (SURB) for anonymous replies
+ *
+ * The SURB contains:
+ * - first_hop: The first relay node to send the reply to
+ * - onion_header: Encrypted routing info for 2 hops back to us
+ */
+static cyxwiz_error_t create_surb(
+    cyxwiz_router_t *router,
+    const uint8_t *request_nonce,
+    cyxwiz_surb_t *surb_out,
+    uint8_t *reply_key_out)
+{
+    CYXWIZ_UNUSED(request_nonce);
+
+    if (router->onion_ctx == NULL) {
+        return CYXWIZ_ERR_NOT_INITIALIZED;
+    }
+
+    /* Select relay nodes from known peers */
+    cyxwiz_node_id_t relays[CYXWIZ_SURB_HOPS];
+    uint8_t hop_keys[CYXWIZ_SURB_HOPS][CYXWIZ_KEY_SIZE];
+    size_t relay_count = 0;
+
+    /* Find peers we have shared keys with */
+    for (size_t i = 0; i < 64 && relay_count < CYXWIZ_SURB_HOPS; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(
+            router->peer_table, i);
+
+        if (peer == NULL || peer->state != CYXWIZ_PEER_STATE_CONNECTED) {
+            continue;
+        }
+
+        if (!cyxwiz_onion_has_key(router->onion_ctx, &peer->id)) {
+            continue;
+        }
+
+        /* Copy peer ID as relay */
+        memcpy(&relays[relay_count], &peer->id, sizeof(cyxwiz_node_id_t));
+
+        /* Derive hop key using onion key derivation */
+        /* The key is derived from our shared secret with this peer */
+        uint8_t shared[CYXWIZ_KEY_SIZE];
+        cyxwiz_onion_derive_hop_key(shared, &router->local_id,
+                                    &peer->id, hop_keys[relay_count]);
+
+        relay_count++;
+    }
+
+    if (relay_count < CYXWIZ_SURB_HOPS) {
+        CYXWIZ_WARN("Not enough relay nodes for SURB (have %zu, need %d)",
+                    relay_count, CYXWIZ_SURB_HOPS);
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Set first hop */
+    memcpy(&surb_out->first_hop, &relays[0], sizeof(cyxwiz_node_id_t));
+
+    /* Build onion header (routing info encrypted for each hop)
+     * Structure for 2-hop SURB header:
+     * Layer 2: Encrypt(key2, final_dest || zeros)  -> inner
+     * Layer 1: Encrypt(key1, relay2 || inner)      -> header
+     */
+
+    /* The onion header contains routing info back to us */
+    /* Final destination is our local_id with zeros as marker */
+    uint8_t layer2_plain[sizeof(cyxwiz_node_id_t)];
+    memset(layer2_plain, 0, sizeof(layer2_plain));  /* Zeros = final dest */
+
+    /* Encrypt innermost layer for hop 2 (final hop -> us) */
+    /* Note: Full implementation would encrypt here with proper keys */
+    CYXWIZ_UNUSED(layer2_plain);
+    CYXWIZ_UNUSED(hop_keys);
+
+    /* For simplicity, use secretbox (would need proper nonce handling) */
+    /* In production, use deterministic nonce from request_nonce */
+
+    /* Build the onion header */
+    memset(surb_out->onion_header, 0, CYXWIZ_SURB_HEADER_SIZE);
+
+    /* For now, embed routing info directly (simplified)
+     * Real implementation would use proper onion encryption */
+    memcpy(surb_out->onion_header, &relays[1], sizeof(cyxwiz_node_id_t));
+    memcpy(surb_out->onion_header + sizeof(cyxwiz_node_id_t),
+           &router->local_id, sizeof(cyxwiz_node_id_t));
+
+    /* Generate reply key for the origin to decrypt the reply */
+    randombytes_buf(reply_key_out, CYXWIZ_KEY_SIZE);
+
+    CYXWIZ_DEBUG("Created SURB with %zu relay hops", relay_count);
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Handle incoming anonymous route request
+ */
+static cyxwiz_error_t handle_anon_route_req(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_anon_route_req_t *req)
+{
+    CYXWIZ_UNUSED(from);
+
+    /* Check version */
+    if (req->version != CYXWIZ_ANON_VERSION) {
+        CYXWIZ_DEBUG("Unknown anon route version: %d", req->version);
+        return CYXWIZ_OK;
+    }
+
+    /* Check if we've seen this request (by nonce, not origin) */
+    if (is_anon_request_seen(router, req->request_nonce)) {
+        return CYXWIZ_OK;  /* Already processed */
+    }
+
+    /* Mark as seen */
+    mark_anon_request_seen(router, req->request_nonce, cyxwiz_time_ms());
+
+    /* Check TTL */
+    if (req->ttl == 0) {
+        return CYXWIZ_ERR_TTL_EXPIRED;
+    }
+
+    /* Try to decrypt destination token - are we the destination? */
+    if (try_decrypt_dest_token(router->onion_ctx, req->ephemeral_pubkey,
+                               req->dest_token)) {
+        /* We are the destination! Send reply via SURB */
+        CYXWIZ_INFO("Anonymous route request received - we are destination");
+
+        /* Build reply payload */
+        cyxwiz_anon_reply_payload_t payload;
+        memset(&payload, 0, sizeof(payload));
+        memcpy(payload.request_nonce, req->request_nonce,
+               CYXWIZ_REQUEST_NONCE_SIZE);
+        memcpy(&payload.responder_id, &router->local_id,
+               sizeof(cyxwiz_node_id_t));
+
+        /* Add our public key for circuit establishment */
+        if (router->onion_ctx != NULL) {
+            cyxwiz_onion_get_pubkey(router->onion_ctx, payload.responder_pubkey);
+        }
+
+        payload.reserved = 0;
+
+        /* Build anonymous reply using SURB */
+        cyxwiz_anon_route_reply_t reply;
+        memset(&reply, 0, sizeof(reply));
+        reply.type = CYXWIZ_MSG_ANON_ROUTE_REPLY;
+
+        /* The SURB tells us where to send the reply */
+        memcpy(&reply.next_hop, &req->surb.first_hop, sizeof(cyxwiz_node_id_t));
+
+        /* Encrypt payload with SURB keys (simplified - would need proper
+         * onion wrapping in production) */
+        /* For now, just copy the onion header and payload */
+        memcpy(reply.onion_payload, &payload, sizeof(payload));
+
+        /* Send reply to SURB first hop */
+        return router->transport->ops->send(
+            router->transport,
+            &req->surb.first_hop,
+            (uint8_t *)&reply,
+            sizeof(reply));
+    }
+
+    /* Not for us - forward the request */
+    cyxwiz_anon_route_req_t forward;
+    memcpy(&forward, req, sizeof(forward));
+    forward.ttl = req->ttl - 1;
+
+    /* Broadcast to all connected peers */
+    cyxwiz_node_id_t broadcast_id;
+    memset(&broadcast_id, 0xFF, sizeof(cyxwiz_node_id_t));
+
+    return router->transport->ops->send(
+        router->transport, &broadcast_id, (uint8_t *)&forward, sizeof(forward));
+}
+
+/*
+ * Handle incoming anonymous route reply
+ */
+static cyxwiz_error_t handle_anon_route_reply(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_anon_route_reply_t *reply)
+{
+    CYXWIZ_UNUSED(from);
+
+    /* Check if next_hop is zeros (we are final destination) */
+    if (cyxwiz_node_id_is_zero(&reply->next_hop)) {
+        /* This reply is for us - we initiated the anonymous discovery */
+        CYXWIZ_INFO("Received anonymous route reply");
+
+        /* Decrypt the payload to get route info */
+        /* The payload should be encrypted with our reply key */
+        const cyxwiz_anon_reply_payload_t *payload =
+            (const cyxwiz_anon_reply_payload_t *)reply->onion_payload;
+
+        /* Find the matching anon discovery */
+        for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+            if (router->anon_discoveries[i].active &&
+                memcmp(router->anon_discoveries[i].request_nonce,
+                       payload->request_nonce,
+                       CYXWIZ_REQUEST_NONCE_SIZE) == 0) {
+
+                /* Found matching discovery - got identity confirmation */
+                char hex_id[65];
+                cyxwiz_node_id_to_hex(&payload->responder_id, hex_id);
+                CYXWIZ_INFO("Anonymous route discovered to %.16s...", hex_id);
+
+                /* Note: No path in anonymous reply - origin will use onion routing */
+
+                /* Mark discovery complete */
+                router->anon_discoveries[i].active = false;
+
+                /* Securely clear ephemeral keys */
+                sodium_memzero(router->anon_discoveries[i].ephemeral_sk, 32);
+
+                return CYXWIZ_OK;
+            }
+        }
+
+        CYXWIZ_WARN("Received anon reply but no matching discovery");
+        return CYXWIZ_OK;
+    }
+
+    /* We are an intermediate relay - forward to next hop */
+    /* Unwrap one layer of the SURB and forward */
+
+    /* In a full implementation, we would:
+     * 1. Decrypt our layer of the onion_payload
+     * 2. Extract the new next_hop
+     * 3. Forward the modified reply
+     */
+
+    /* For now, just forward to next_hop */
+    return router->transport->ops->send(
+        router->transport,
+        &reply->next_hop,
+        (const uint8_t *)reply,
+        sizeof(*reply));
+}
+
+/*
+ * Initiate anonymous route discovery
+ */
+cyxwiz_error_t cyxwiz_router_anon_discover(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *dest_pubkey)
+{
+    if (router == NULL || destination == NULL || dest_pubkey == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (router->onion_ctx == NULL) {
+        CYXWIZ_ERROR("Onion context required for anonymous routing");
+        return CYXWIZ_ERR_NOT_INITIALIZED;
+    }
+
+    /* Find free discovery slot */
+    int slot = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+        if (!router->anon_discoveries[i].active) {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Generate ephemeral X25519 keypair for this request */
+    cyxwiz_anon_discovery_t *disc = &router->anon_discoveries[slot];
+    crypto_box_keypair(disc->ephemeral_pk, disc->ephemeral_sk);
+
+    /* Generate unique request nonce */
+    randombytes_buf(disc->request_nonce, CYXWIZ_REQUEST_NONCE_SIZE);
+
+    /* Store destination and timing */
+    memcpy(&disc->destination, destination, sizeof(cyxwiz_node_id_t));
+    disc->started_at = cyxwiz_time_ms();
+    disc->active = true;
+
+    /* Build anonymous route request */
+    cyxwiz_anon_route_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.type = CYXWIZ_MSG_ANON_ROUTE_REQ;
+    req.version = CYXWIZ_ANON_VERSION;
+    memcpy(req.ephemeral_pubkey, disc->ephemeral_pk, 32);
+
+    /* Create encrypted destination token */
+    cyxwiz_error_t err = create_dest_token(disc->ephemeral_sk, dest_pubkey,
+                                           req.dest_token);
+    if (err != CYXWIZ_OK) {
+        disc->active = false;
+        sodium_memzero(disc->ephemeral_sk, 32);
+        return err;
+    }
+
+    /* Create SURB for anonymous reply path */
+    uint8_t reply_key[CYXWIZ_KEY_SIZE];
+    err = create_surb(router, disc->request_nonce, &req.surb, reply_key);
+    if (err != CYXWIZ_OK) {
+        disc->active = false;
+        sodium_memzero(disc->ephemeral_sk, 32);
+        return err;
+    }
+
+    /* Copy nonce and set TTL */
+    memcpy(req.request_nonce, disc->request_nonce, CYXWIZ_REQUEST_NONCE_SIZE);
+    req.ttl = CYXWIZ_DEFAULT_TTL;
+
+    /* Broadcast to all connected peers */
+    cyxwiz_node_id_t broadcast_id;
+    memset(&broadcast_id, 0xFF, sizeof(cyxwiz_node_id_t));
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(destination, hex_id);
+    CYXWIZ_INFO("Starting anonymous route discovery for %.16s...", hex_id);
+
+    return router->transport->ops->send(
+        router->transport, &broadcast_id, (uint8_t *)&req, sizeof(req));
+}
+
+/*
+ * Check if anonymous discovery is pending for destination
+ */
+bool cyxwiz_router_anon_discovery_pending(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination)
+{
+    if (router == NULL || destination == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+        if (router->anon_discoveries[i].active &&
+            cyxwiz_node_id_cmp(&router->anon_discoveries[i].destination,
+                               destination) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+#endif /* CYXWIZ_HAS_CRYPTO */

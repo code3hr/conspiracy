@@ -155,6 +155,109 @@ cyxwiz_route_error_t;
 #pragma pack(pop)
 #endif
 
+/* ============ Anonymous Routing Constants ============ */
+
+#define CYXWIZ_ANON_VERSION 1            /* Protocol version */
+#define CYXWIZ_DEST_TOKEN_SIZE 48        /* Encrypted destination marker */
+#define CYXWIZ_SURB_HEADER_SIZE 88       /* Onion header in SURB */
+#define CYXWIZ_SURB_SIZE 120             /* Total SURB size (32 + 88) */
+#define CYXWIZ_REQUEST_NONCE_SIZE 16     /* Request deduplication nonce */
+#define CYXWIZ_ANON_REPLY_PAYLOAD_SIZE 128 /* Encrypted reply data (payload + MAC) */
+#define CYXWIZ_SURB_HOPS 2               /* Number of hops in SURB */
+#define CYXWIZ_DEST_TOKEN_MAGIC 0x43595857 /* "CYXW" magic bytes */
+
+/* ============ Single-Use Reply Block (SURB) ============ */
+
+/*
+ * SURB - enables anonymous replies without revealing origin
+ * Origin builds this with onion-encrypted routing back to itself
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    cyxwiz_node_id_t first_hop;          /* Where to send reply (32 bytes) */
+    uint8_t onion_header[CYXWIZ_SURB_HEADER_SIZE]; /* Encrypted routing info */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_surb_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/* ============ Anonymous Route Request ============ */
+
+/*
+ * Anonymous route request - hides origin and destination
+ * Total size: 219 bytes (fits 250-byte LoRa MTU)
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                        /* CYXWIZ_MSG_ANON_ROUTE_REQ (0x25) */
+    uint8_t version;                     /* Protocol version */
+    uint8_t ephemeral_pubkey[32];        /* X25519 per-request public key */
+    uint8_t dest_token[CYXWIZ_DEST_TOKEN_SIZE]; /* Encrypted destination marker */
+    cyxwiz_surb_t surb;                  /* Reply path back to origin */
+    uint8_t request_nonce[CYXWIZ_REQUEST_NONCE_SIZE]; /* Deduplication */
+    uint8_t ttl;                         /* Time-to-live */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_anon_route_req_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/* ============ Anonymous Route Reply ============ */
+
+/*
+ * Anonymous route reply - travels via SURB path
+ * Total size: 193 bytes
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                        /* CYXWIZ_MSG_ANON_ROUTE_REPLY (0x26) */
+    cyxwiz_node_id_t next_hop;           /* From SURB unwrap (or zeros if final) */
+    uint8_t onion_payload[CYXWIZ_ANON_REPLY_PAYLOAD_SIZE]; /* Encrypted reply */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_anon_route_reply_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/*
+ * Reply payload (decrypted at origin)
+ * Note: Path is NOT included - revealing path defeats anonymity.
+ * Origin establishes onion circuit to communicate with destination.
+ * Total size: 16 + 32 + 32 + 1 = 81 bytes
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t request_nonce[CYXWIZ_REQUEST_NONCE_SIZE]; /* Echo request nonce */
+    cyxwiz_node_id_t responder_id;       /* Destination's node ID */
+    uint8_t responder_pubkey[32];        /* For circuit establishment */
+    uint8_t reserved;                    /* Reserved for future use */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_anon_reply_payload_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
 /* ============ Router Lifecycle ============ */
 
 /*
@@ -264,6 +367,43 @@ cyxwiz_error_t cyxwiz_router_handle_message(
     const cyxwiz_node_id_t *from,
     const uint8_t *data,
     size_t len
+);
+
+/* ============ Anonymous Routing ============ */
+
+/* Forward declaration for onion context */
+typedef struct cyxwiz_onion_ctx cyxwiz_onion_ctx_t;
+
+/*
+ * Set onion context for anonymous routing
+ * Required for SURB creation and destination token crypto
+ */
+void cyxwiz_router_set_onion_ctx(
+    cyxwiz_router_t *router,
+    cyxwiz_onion_ctx_t *onion_ctx
+);
+
+/*
+ * Initiate anonymous route discovery
+ * Hides both origin and destination from intermediate nodes
+ *
+ * @param router        Router context
+ * @param destination   Destination node ID
+ * @param dest_pubkey   Destination's X25519 public key
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_router_anon_discover(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *dest_pubkey
+);
+
+/*
+ * Check if anonymous discovery is pending for destination
+ */
+bool cyxwiz_router_anon_discovery_pending(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination
 );
 
 /* ============ Statistics ============ */

@@ -49,6 +49,7 @@ typedef enum {
     CYXWIZ_ERR_POS_INVALID_PROOF = -28, /* Proof verification failed */
     CYXWIZ_ERR_POS_CHALLENGE_PENDING = -29, /* Challenge already in progress */
     CYXWIZ_ERR_POS_INVALID_BLOCK = -30, /* Block index out of range */
+    CYXWIZ_ERR_INSUFFICIENT_RELAYS = -31, /* Not enough relay nodes for SURB */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -79,6 +80,8 @@ typedef enum {
     CYXWIZ_MSG_ROUTE_DATA = 0x22,     /* Routed data packet */
     CYXWIZ_MSG_ROUTE_ERROR = 0x23,    /* Route error notification */
     CYXWIZ_MSG_ONION_DATA = 0x24,     /* Onion-encrypted data packet */
+    CYXWIZ_MSG_ANON_ROUTE_REQ = 0x25, /* Anonymous route request */
+    CYXWIZ_MSG_ANON_ROUTE_REPLY = 0x26, /* Anonymous route reply */
 
     /* Compute messages (0x30-0x3F) */
     CYXWIZ_MSG_JOB_SUBMIT = 0x30,     /* Submit job to worker */
