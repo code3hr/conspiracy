@@ -532,6 +532,101 @@ static int test_anon_discovery_pending(void)
     return 1;
 }
 
+/* Test anonymous send requires onion context */
+static int test_anon_send_requires_onion_ctx(void)
+{
+    cyxwiz_peer_table_t *peer_table = NULL;
+    cyxwiz_transport_t *transport = NULL;
+    cyxwiz_router_t *router = NULL;
+    cyxwiz_node_id_t local_id, dest_id;
+
+    cyxwiz_peer_table_create(&peer_table);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_node_id_random(&local_id);
+    cyxwiz_node_id_random(&dest_id);
+    cyxwiz_router_create(&router, peer_table, transport, &local_id);
+    cyxwiz_router_start(router);
+
+    /* Without onion context, anonymous send should fail */
+    uint8_t data[] = "anonymous test";
+    cyxwiz_error_t err = cyxwiz_router_send_anonymous(router, &dest_id, data, sizeof(data));
+
+    /* Should fail with CYXWIZ_ERR_NOT_INITIALIZED */
+    if (err != CYXWIZ_ERR_NOT_INITIALIZED) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    cyxwiz_router_destroy(router);
+    cyxwiz_transport_destroy(transport);
+    cyxwiz_peer_table_destroy(peer_table);
+
+    return 1;
+}
+
+/* Test anonymous route check */
+static int test_has_anonymous_route(void)
+{
+    cyxwiz_peer_table_t *peer_table = NULL;
+    cyxwiz_transport_t *transport = NULL;
+    cyxwiz_router_t *router = NULL;
+    cyxwiz_node_id_t local_id, dest_id;
+
+    cyxwiz_peer_table_create(&peer_table);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_node_id_random(&local_id);
+    cyxwiz_node_id_random(&dest_id);
+    cyxwiz_router_create(&router, peer_table, transport, &local_id);
+    cyxwiz_router_start(router);
+
+    /* Without onion context, should return false */
+    if (cyxwiz_router_has_anonymous_route(router, &dest_id)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    /* NULL checks */
+    if (cyxwiz_router_has_anonymous_route(NULL, &dest_id)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    if (cyxwiz_router_has_anonymous_route(router, NULL)) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    cyxwiz_router_destroy(router);
+    cyxwiz_transport_destroy(transport);
+    cyxwiz_peer_table_destroy(peer_table);
+
+    return 1;
+}
+
+/* Test anonymous send parameter validation */
+static int test_anon_send_validation(void)
+{
+    cyxwiz_node_id_t dest_id;
+    cyxwiz_node_id_random(&dest_id);
+    uint8_t data[] = "test";
+
+    /* NULL router should fail */
+    cyxwiz_error_t err = cyxwiz_router_send_anonymous(NULL, &dest_id, data, sizeof(data));
+    if (err == CYXWIZ_OK) {
+        return 0;
+    }
+
+    return 1;
+}
+
 /* Test payload size limit */
 static int test_payload_size_limit(void)
 {
@@ -605,6 +700,9 @@ int main(void)
     TEST(surb_format);
     TEST(anon_reply_payload_format);
     TEST(anon_discovery_pending);
+    TEST(anon_send_requires_onion_ctx);
+    TEST(has_anonymous_route);
+    TEST(anon_send_validation);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

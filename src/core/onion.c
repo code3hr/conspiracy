@@ -724,6 +724,193 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
 #endif
 }
 
+/* ============ Send To Destination ============ */
+
+/*
+ * Find circuit that routes to destination
+ */
+cyxwiz_circuit_t *cyxwiz_onion_find_circuit_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination)
+{
+    if (ctx == NULL || destination == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        if (ctx->circuits[i].active && ctx->circuits[i].hop_count > 0) {
+            /* Last hop is the destination */
+            const cyxwiz_node_id_t *last_hop =
+                &ctx->circuits[i].hops[ctx->circuits[i].hop_count - 1];
+            if (memcmp(last_hop, destination, sizeof(cyxwiz_node_id_t)) == 0) {
+                return &ctx->circuits[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Check if circuit exists to destination
+ */
+bool cyxwiz_onion_has_circuit_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination)
+{
+    return cyxwiz_onion_find_circuit_to(ctx, destination) != NULL;
+}
+
+/*
+ * Select random relay nodes for circuit building
+ * Excludes destination from relay selection
+ */
+static size_t select_random_relays(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination,
+    cyxwiz_node_id_t *relays_out,
+    size_t max_relays)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(destination);
+    CYXWIZ_UNUSED(relays_out);
+    CYXWIZ_UNUSED(max_relays);
+    return 0;
+#else
+    /* Collect all valid peer keys (potential relays) */
+    cyxwiz_node_id_t candidates[CYXWIZ_MAX_PEERS];
+    size_t candidate_count = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS && candidate_count < CYXWIZ_MAX_PEERS; i++) {
+        if (!ctx->peer_keys[i].valid) {
+            continue;
+        }
+
+        /* Don't use destination as relay */
+        if (memcmp(&ctx->peer_keys[i].peer_id, destination,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        /* Don't use self as relay */
+        if (memcmp(&ctx->peer_keys[i].peer_id, &ctx->local_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        memcpy(&candidates[candidate_count], &ctx->peer_keys[i].peer_id,
+               sizeof(cyxwiz_node_id_t));
+        candidate_count++;
+    }
+
+    if (candidate_count == 0) {
+        return 0;
+    }
+
+    /* Shuffle candidates using Fisher-Yates */
+    for (size_t i = candidate_count - 1; i > 0; i--) {
+        uint32_t j;
+        randombytes_buf(&j, sizeof(j));
+        j = j % (i + 1);
+
+        cyxwiz_node_id_t tmp;
+        memcpy(&tmp, &candidates[i], sizeof(cyxwiz_node_id_t));
+        memcpy(&candidates[i], &candidates[j], sizeof(cyxwiz_node_id_t));
+        memcpy(&candidates[j], &tmp, sizeof(cyxwiz_node_id_t));
+    }
+
+    /* Take up to max_relays */
+    size_t count = (candidate_count < max_relays) ? candidate_count : max_relays;
+    for (size_t i = 0; i < count; i++) {
+        memcpy(&relays_out[i], &candidates[i], sizeof(cyxwiz_node_id_t));
+    }
+
+    return count;
+#endif
+}
+
+/*
+ * Build circuit to destination with automatic relay selection
+ */
+static cyxwiz_error_t build_circuit_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination,
+    cyxwiz_circuit_t **circuit_out)
+{
+    /* Check if we have a key with the destination */
+    if (!cyxwiz_onion_has_key(ctx, destination)) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(destination, hex_id);
+        CYXWIZ_WARN("No shared key with destination %.16s...", hex_id);
+        return CYXWIZ_ERR_NO_KEY;
+    }
+
+    /* Select relay nodes (prefer 1 relay for better payload capacity) */
+    cyxwiz_node_id_t relays[CYXWIZ_MAX_ONION_HOPS - 1];
+    size_t relay_count = select_random_relays(ctx, destination, relays, 1);
+
+    /* Build path: [relay(s)...] + destination */
+    cyxwiz_node_id_t path[CYXWIZ_MAX_ONION_HOPS];
+    uint8_t hop_count = 0;
+
+    /* Add relays to path */
+    for (size_t i = 0; i < relay_count; i++) {
+        memcpy(&path[hop_count++], &relays[i], sizeof(cyxwiz_node_id_t));
+    }
+
+    /* Add destination as final hop */
+    memcpy(&path[hop_count++], destination, sizeof(cyxwiz_node_id_t));
+
+    CYXWIZ_DEBUG("Building %u-hop circuit to destination", hop_count);
+
+    return cyxwiz_onion_build_circuit(ctx, path, hop_count, circuit_out);
+}
+
+/*
+ * Send data to destination via onion routing
+ * Automatically builds circuit if needed
+ */
+cyxwiz_error_t cyxwiz_onion_send_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(destination);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || destination == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find existing circuit to destination */
+    cyxwiz_circuit_t *circuit = cyxwiz_onion_find_circuit_to(ctx, destination);
+
+    /* Build new circuit if none exists */
+    if (circuit == NULL) {
+        cyxwiz_error_t err = build_circuit_to(ctx, destination, &circuit);
+        if (err != CYXWIZ_OK) {
+            return err;
+        }
+    }
+
+    /* Check payload size */
+    size_t max_payload = cyxwiz_onion_max_payload(circuit->hop_count);
+    if (len > max_payload) {
+        CYXWIZ_WARN("Payload too large for %u-hop circuit: %zu > %zu",
+                    circuit->hop_count, len, max_payload);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Send via the circuit */
+    return cyxwiz_onion_send(ctx, circuit, data, len);
+#endif
+}
+
 /* ============ Statistics ============ */
 
 size_t cyxwiz_onion_circuit_count(const cyxwiz_onion_ctx_t *ctx)

@@ -261,6 +261,41 @@ cyxwiz_error_t cyxwiz_onion_send(
  */
 size_t cyxwiz_onion_max_payload(uint8_t hop_count);
 
+/*
+ * Send data to destination via onion routing
+ * Automatically builds circuit if needed
+ *
+ * @param ctx           Onion context
+ * @param destination   Destination node ID
+ * @param data          Data to send
+ * @param len           Data length
+ * @return              CYXWIZ_OK on success
+ *                      CYXWIZ_ERR_NO_ROUTE if insufficient peers for circuit
+ *                      CYXWIZ_ERR_PACKET_TOO_LARGE if data exceeds max payload
+ */
+cyxwiz_error_t cyxwiz_onion_send_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Check if circuit exists to destination
+ */
+bool cyxwiz_onion_has_circuit_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination
+);
+
+/*
+ * Find circuit to destination (returns NULL if none)
+ */
+cyxwiz_circuit_t *cyxwiz_onion_find_circuit_to(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination
+);
+
 /* ============ Message Handling ============ */
 
 /*

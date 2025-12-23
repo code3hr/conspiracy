@@ -1536,4 +1536,63 @@ bool cyxwiz_router_anon_discovery_pending(
     return false;
 }
 
+/*
+ * Send data anonymously via onion routing
+ * Hides sender identity from all intermediate nodes and destination
+ */
+cyxwiz_error_t cyxwiz_router_send_anonymous(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len)
+{
+    if (router == NULL || destination == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Require onion context for anonymous sending */
+    if (router->onion_ctx == NULL) {
+        CYXWIZ_ERROR("Onion context required for anonymous sending");
+        return CYXWIZ_ERR_NOT_INITIALIZED;
+    }
+
+    /* Check payload size (2-hop onion max = 101 bytes) */
+    size_t max_payload = cyxwiz_onion_max_payload(2);
+    if (len > max_payload) {
+        CYXWIZ_WARN("Payload too large for anonymous send: %zu > %zu",
+                    len, max_payload);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Delegate to onion layer which handles circuit building */
+    cyxwiz_error_t err = cyxwiz_onion_send_to(
+        router->onion_ctx, destination, data, len);
+
+    if (err == CYXWIZ_OK) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(destination, hex_id);
+        CYXWIZ_DEBUG("Sent %zu bytes anonymously to %.16s...", len, hex_id);
+    }
+
+    return err;
+}
+
+/*
+ * Check if anonymous route (circuit) exists to destination
+ */
+bool cyxwiz_router_has_anonymous_route(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination)
+{
+    if (router == NULL || destination == NULL) {
+        return false;
+    }
+
+    if (router->onion_ctx == NULL) {
+        return false;
+    }
+
+    return cyxwiz_onion_has_circuit_to(router->onion_ctx, destination);
+}
+
 #endif /* CYXWIZ_HAS_CRYPTO */

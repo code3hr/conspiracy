@@ -406,6 +406,38 @@ bool cyxwiz_router_anon_discovery_pending(
     const cyxwiz_node_id_t *destination
 );
 
+/* ============ Anonymous Data Sending ============ */
+
+/*
+ * Send data anonymously via onion routing
+ * Hides sender identity from all intermediate nodes and destination
+ *
+ * Requires onion context to be set on router via cyxwiz_router_set_onion_ctx()
+ *
+ * @param router        Router context
+ * @param destination   Destination node ID
+ * @param data          Data to send
+ * @param len           Data length (max depends on hop count, typically 101 bytes)
+ * @return              CYXWIZ_OK on success
+ *                      CYXWIZ_ERR_NOT_INITIALIZED if onion context not set
+ *                      CYXWIZ_ERR_PACKET_TOO_LARGE if data exceeds max payload
+ *                      CYXWIZ_ERR_NO_ROUTE if no peers available for circuit
+ */
+cyxwiz_error_t cyxwiz_router_send_anonymous(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Check if anonymous route (circuit) exists to destination
+ */
+bool cyxwiz_router_has_anonymous_route(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination
+);
+
 /* ============ Statistics ============ */
 
 /*

@@ -501,6 +501,54 @@ static int test_invalid_hop_count(void)
     return 1;
 }
 
+/* Test circuit finding functions */
+static int test_find_circuit_to(void)
+{
+    cyxwiz_node_id_t local_id;
+    random_node_id(&local_id);
+
+    /* We need a mock router - test with NULL should return NULL */
+    cyxwiz_circuit_t *circuit = cyxwiz_onion_find_circuit_to(NULL, &local_id);
+    if (circuit != NULL) {
+        return 0;
+    }
+
+    /* NULL destination should return NULL */
+    /* Note: can't test with real ctx without router, so test just the NULL cases */
+
+    return 1;
+}
+
+/* Test has_circuit_to */
+static int test_has_circuit_to(void)
+{
+    cyxwiz_node_id_t destination;
+    random_node_id(&destination);
+
+    /* NULL ctx should return false */
+    if (cyxwiz_onion_has_circuit_to(NULL, &destination)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test send_to parameter validation */
+static int test_send_to_validation(void)
+{
+    cyxwiz_node_id_t destination;
+    random_node_id(&destination);
+    uint8_t data[] = "test data";
+
+    /* NULL ctx should return error */
+    cyxwiz_error_t err = cyxwiz_onion_send_to(NULL, &destination, data, sizeof(data));
+    if (err == CYXWIZ_OK) {
+        return 0;
+    }
+
+    return 1;
+}
+
 int main(void)
 {
     /* Initialize crypto */
@@ -525,6 +573,9 @@ int main(void)
     TEST(node_id_zero);
     TEST(payload_too_large);
     TEST(invalid_hop_count);
+    TEST(find_circuit_to);
+    TEST(has_circuit_to);
+    TEST(send_to_validation);
 
     printf("\n==========================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

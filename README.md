@@ -247,6 +247,108 @@ Output:
 [INFO] Node running. Press Ctrl+C to stop.
 ```
 
+### Quick Start: Using the Library
+
+**1. Initialize a Node**
+```c
+#include "cyxwiz/types.h"
+#include "cyxwiz/transport.h"
+#include "cyxwiz/peer.h"
+#include "cyxwiz/routing.h"
+#include "cyxwiz/onion.h"
+#include "cyxwiz/crypto.h"
+
+// Initialize crypto
+cyxwiz_crypto_init();
+
+// Create transport (UDP for internet, or WiFi/BT/LoRa for mesh)
+cyxwiz_transport_t *transport;
+cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
+
+// Create peer table and router
+cyxwiz_peer_table_t *peers;
+cyxwiz_peer_table_create(&peers);
+
+cyxwiz_node_id_t my_id;
+cyxwiz_node_id_random(&my_id);
+
+cyxwiz_router_t *router;
+cyxwiz_router_create(&router, peers, transport, &my_id);
+cyxwiz_router_start(router);
+```
+
+**2. Discover Peers**
+```c
+#include "cyxwiz/peer.h"
+
+// Start peer discovery
+cyxwiz_discovery_t *discovery;
+cyxwiz_discovery_create(&discovery, peers, transport, &my_id);
+cyxwiz_discovery_start(discovery);
+
+// Poll in your main loop
+while (running) {
+    cyxwiz_discovery_poll(discovery, cyxwiz_time_ms());
+    cyxwiz_router_poll(router, cyxwiz_time_ms());
+}
+```
+
+**3. Send Anonymous Messages**
+```c
+#include "cyxwiz/onion.h"
+
+// Create onion context for anonymous routing
+cyxwiz_onion_ctx_t *onion;
+cyxwiz_onion_create(&onion, router, &my_id);
+
+// Build 3-hop circuit to destination
+cyxwiz_node_id_t hops[3] = {relay1, relay2, destination};
+cyxwiz_circuit_t *circuit;
+cyxwiz_onion_build_circuit(onion, hops, 3, &circuit);
+
+// Send encrypted message through circuit
+uint8_t message[] = "Hello, anonymous world!";
+cyxwiz_onion_send(onion, circuit, message, sizeof(message));
+```
+
+**4. Store Data Across Network**
+```c
+#include "cyxwiz/storage.h"
+
+// Create storage client (3-of-5 threshold)
+cyxwiz_storage_client_t *storage;
+cyxwiz_storage_client_create(&storage, router, 3, 5);
+
+// Store data - automatically splits into shares
+uint8_t data[] = "Secret document contents...";
+cyxwiz_storage_id_t storage_id;
+cyxwiz_storage_store(storage, data, sizeof(data), 3600, &storage_id);
+
+// Retrieve data - reconstructs from any 3 shares
+uint8_t retrieved[256];
+size_t retrieved_len;
+cyxwiz_storage_retrieve(storage, &storage_id, retrieved, &retrieved_len);
+```
+
+**5. Submit Compute Jobs**
+```c
+#include "cyxwiz/compute.h"
+
+// Create compute client
+cyxwiz_compute_client_t *compute;
+cyxwiz_compute_client_create(&compute, router);
+
+// Submit job to network workers
+cyxwiz_job_t job = {
+    .type = CYXWIZ_JOB_TYPE_WASM,
+    .payload = wasm_bytecode,
+    .payload_len = bytecode_len
+};
+cyxwiz_compute_submit(compute, &job);
+
+// Results delivered via callback with MAC verification
+```
+
 ---
 
 ## Project Structure
@@ -386,25 +488,93 @@ The native token that powers the protocol:
 
 ---
 
-## Use Cases
+## What You Can Build Today
+
+The protocol is functional for these real-world applications **right now**:
+
+### 1. Anonymous Mesh Messenger
+Build a censorship-resistant chat application:
+```
+✅ Peer discovery over UDP/WiFi/Bluetooth/LoRa
+✅ End-to-end encryption (XChaCha20-Poly1305)
+✅ Onion routing hides who talks to whom
+✅ Anonymous route discovery - find users without revealing yourself
+✅ Works offline via LoRa in remote areas
+```
+**Use case:** Journalists, activists, disaster response teams
+
+### 2. Distributed File Storage (CyxCloud)
+Store files across the network with redundancy:
+```
+✅ K-of-N threshold storage (e.g., 3-of-5 nodes must survive)
+✅ Shamir secret sharing splits data cryptographically
+✅ Proof of Storage verifies nodes actually store your data
+✅ No single node sees complete files
+```
+**Use case:** Backup critical documents, censorship-resistant publishing
+
+### 3. Distributed Compute Network
+Offload computation to network nodes:
+```
+✅ Job marketplace with worker discovery
+✅ MAC verification ensures correct results
+✅ Chunked transfer for large payloads
+✅ Multi-party computation ready (SPDZ/Beaver triples)
+```
+**Use case:** Render farms, ML inference, batch processing
+
+### 4. Emergency Communication Network
+Maintain connectivity when infrastructure fails:
+```
+✅ Multi-transport: UDP → WiFi Direct → Bluetooth → LoRa
+✅ Multi-hop routing extends range
+✅ 250-byte packets fit LoRa constraints
+✅ No central servers required
+```
+**Use case:** Natural disasters, remote expeditions, off-grid communities
+
+### 5. Privacy-Preserving IoT Network
+Connect sensors without exposing data:
+```
+✅ Lightweight protocol fits embedded devices
+✅ Onion routing hides sensor locations
+✅ Threshold storage for distributed sensor logs
+✅ Compute offloading for resource-constrained nodes
+```
+**Use case:** Environmental monitoring, smart agriculture, asset tracking
+
+---
+
+## Example: Simple Anonymous Message
+
+```c
+#include "cyxwiz/routing.h"
+#include "cyxwiz/onion.h"
+
+// Send anonymous message to destination
+cyxwiz_router_anon_discover(router, &dest_id, dest_pubkey);
+// ... wait for route discovery ...
+cyxwiz_onion_send(onion_ctx, circuit, message, len);
+```
+
+---
+
+## Future Use Cases (Roadmap)
 
 ### For Individuals
 - Rent GPU power for video editing without buying hardware
 - Browse the web without being tracked
 - Earn crypto by sharing idle compute
-- Secure storage with zero-knowledge encryption
 
 ### For Developers
 - Deploy anonymous applications
 - Run CI/CD without vendor lock-in
 - Access global compute on demand
-- Build privacy-first products
 
 ### For Organizations
 - Distributed computing without cloud monopolies
 - Privacy compliance by design (GDPR, CCPA)
-- No vendor surveillance
-- Cost-effective scaling
+- Cost-effective scaling without vendor lock-in
 
 ---
 
