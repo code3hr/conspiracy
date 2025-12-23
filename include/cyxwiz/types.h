@@ -39,6 +39,12 @@ typedef enum {
     CYXWIZ_ERR_JOB_INVALID = -18,     /* Invalid job format */
     CYXWIZ_ERR_WORKER_BUSY = -19,     /* Worker at capacity */
     CYXWIZ_ERR_MAC_INVALID = -20,     /* MAC verification failed */
+    CYXWIZ_ERR_STORAGE_NOT_FOUND = -21, /* Storage ID not found */
+    CYXWIZ_ERR_STORAGE_EXPIRED = -22,   /* Data has expired */
+    CYXWIZ_ERR_STORAGE_FULL = -23,      /* Provider storage is full */
+    CYXWIZ_ERR_STORAGE_UNAUTHORIZED = -24, /* Not authorized to access */
+    CYXWIZ_ERR_INSUFFICIENT_SHARES = -25, /* Not enough shares for reconstruction */
+    CYXWIZ_ERR_STORAGE_CORRUPTED = -26, /* Share verification failed */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -81,7 +87,20 @@ typedef enum {
     CYXWIZ_MSG_JOB_ACK = 0x37,        /* Acknowledge result */
     CYXWIZ_MSG_JOB_CANCEL = 0x38,     /* Cancel job */
     CYXWIZ_MSG_JOB_QUERY = 0x39,      /* Query workers */
-    CYXWIZ_MSG_JOB_ANNOUNCE = 0x3A    /* Worker availability */
+    CYXWIZ_MSG_JOB_ANNOUNCE = 0x3A,   /* Worker availability */
+
+    /* Storage messages (0x40-0x4F) */
+    CYXWIZ_MSG_STORE_REQ = 0x40,      /* Store share on provider */
+    CYXWIZ_MSG_STORE_CHUNK = 0x41,    /* Encrypted data chunk */
+    CYXWIZ_MSG_STORE_ACK = 0x42,      /* Provider confirms storage */
+    CYXWIZ_MSG_STORE_REJECT = 0x43,   /* Provider rejects storage */
+    CYXWIZ_MSG_RETRIEVE_REQ = 0x44,   /* Request share retrieval */
+    CYXWIZ_MSG_RETRIEVE_RESP = 0x45,  /* Provider returns share */
+    CYXWIZ_MSG_RETRIEVE_CHUNK = 0x46, /* Retrieved data chunk */
+    CYXWIZ_MSG_DELETE_REQ = 0x47,     /* Delete stored data */
+    CYXWIZ_MSG_DELETE_ACK = 0x48,     /* Deletion confirmed */
+    CYXWIZ_MSG_STORAGE_QUERY = 0x49,  /* Query for providers */
+    CYXWIZ_MSG_STORAGE_ANNOUNCE = 0x4A /* Provider availability */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

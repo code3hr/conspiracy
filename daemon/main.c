@@ -21,6 +21,10 @@
 #include "cyxwiz/compute.h"
 #endif
 
+#ifdef CYXWIZ_HAS_STORAGE
+#include "cyxwiz/storage.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +55,9 @@ static cyxwiz_onion_ctx_t *g_onion = NULL;
 #endif
 #ifdef CYXWIZ_HAS_COMPUTE
 static cyxwiz_compute_ctx_t *g_compute = NULL;
+#endif
+#ifdef CYXWIZ_HAS_STORAGE
+static cyxwiz_storage_ctx_t *g_storage = NULL;
 #endif
 
 static void on_peer_discovered(
@@ -117,6 +124,13 @@ static void on_data_received(
             cyxwiz_compute_handle_message(g_compute, from, data, len);
         }
 #endif
+#ifdef CYXWIZ_HAS_STORAGE
+    } else if (msg_type >= 0x40 && msg_type <= 0x4F) {
+        /* Storage messages (STORE_REQ, RETRIEVE_REQ, etc.) */
+        if (g_storage != NULL) {
+            cyxwiz_storage_handle_message(g_storage, from, data, len);
+        }
+#endif
     } else {
         CYXWIZ_DEBUG("Unknown message type: 0x%02X", msg_type);
     }
@@ -139,6 +153,16 @@ static void on_routed_data(
     if (len > 0 && data[0] >= 0x30 && data[0] <= 0x3F) {
         if (g_compute != NULL) {
             cyxwiz_compute_handle_message(g_compute, from, data, len);
+        }
+        return;
+    }
+#endif
+
+#ifdef CYXWIZ_HAS_STORAGE
+    /* Dispatch storage messages received via routing */
+    if (len > 0 && data[0] >= 0x40 && data[0] <= 0x4F) {
+        if (g_storage != NULL) {
+            cyxwiz_storage_handle_message(g_storage, from, data, len);
         }
         return;
     }
@@ -387,6 +411,18 @@ int main(int argc, char *argv[])
                 CYXWIZ_INFO("Compute protocol enabled (worker mode)");
             }
 #endif
+
+#ifdef CYXWIZ_HAS_STORAGE
+            /* Create storage context */
+            err = cyxwiz_storage_create(&g_storage, g_router, peer_table, crypto_ctx, &local_id);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to create storage context: %s", cyxwiz_strerror(err));
+            } else {
+                /* Enable storage provider mode by default (1MB, 24hr TTL) */
+                cyxwiz_storage_enable_provider(g_storage, 1024 * 1024, 86400);
+                CYXWIZ_INFO("Storage protocol enabled (provider mode)");
+            }
+#endif
         }
     }
 
@@ -420,6 +456,13 @@ int main(int argc, char *argv[])
         }
 #endif
 
+#ifdef CYXWIZ_HAS_STORAGE
+        /* Poll storage context (handles timeouts and TTL expiry) */
+        if (g_storage != NULL) {
+            cyxwiz_storage_poll(g_storage, now);
+        }
+#endif
+
         /* Poll all transports */
         if (udp_transport != NULL) {
             udp_transport->ops->poll(udp_transport, 50);
@@ -435,6 +478,14 @@ int main(int argc, char *argv[])
 
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
+
+#ifdef CYXWIZ_HAS_STORAGE
+    /* Destroy storage context */
+    if (g_storage != NULL) {
+        cyxwiz_storage_destroy(g_storage);
+        g_storage = NULL;
+    }
+#endif
 
 #ifdef CYXWIZ_HAS_COMPUTE
     /* Destroy compute context */

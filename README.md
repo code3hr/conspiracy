@@ -258,6 +258,7 @@ cyxwiz/
 │   ├── transport.h          # Transport abstraction
 │   ├── crypto.h             # MPC crypto API
 │   ├── compute.h            # Job marketplace API
+│   ├── storage.h            # Distributed storage API
 │   ├── memory.h             # Secure memory utilities
 │   └── log.h                # Logging
 │
@@ -272,7 +273,8 @@ cyxwiz/
 │   │   ├── discovery.c      # Peer discovery
 │   │   ├── routing.c        # Multi-hop message routing
 │   │   ├── onion.c          # Onion routing
-│   │   └── compute.c        # Job marketplace
+│   │   ├── compute.c        # Job marketplace
+│   │   └── storage.c        # Distributed storage
 │   ├── crypto/              # SPDZ MPC implementation
 │   │   ├── crypto.c         # Context management
 │   │   ├── sharing.c        # Secret sharing
@@ -307,7 +309,7 @@ cyxwiz/
 
 ### Phase 3: Protocol Layer
 - [x] Compute protocol (job marketplace with MAC verification)
-- [ ] Storage protocol (CyxCloud)
+- [x] Storage protocol (CyxCloud distributed storage with K-of-N threshold)
 - [ ] Privacy protocol (zero-knowledge proofs)
 - [ ] Consensus mechanism
 
