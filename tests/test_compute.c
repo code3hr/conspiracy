@@ -58,6 +58,43 @@ cyxwiz_error_t cyxwiz_router_send(
     return CYXWIZ_OK;
 }
 
+/* Mock for SURB-based send (anonymous jobs) */
+cyxwiz_error_t cyxwiz_router_send_via_surb(
+    cyxwiz_router_t *router,
+    const cyxwiz_surb_t *surb,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(router);
+    /* Copy SURB first_hop as destination for tracking */
+    memcpy(&g_last_send_to, &surb->first_hop, sizeof(cyxwiz_node_id_t));
+    if (len <= sizeof(g_last_send_data)) {
+        memcpy(g_last_send_data, data, len);
+    }
+    g_last_send_len = len;
+    g_send_count++;
+    return CYXWIZ_OK;
+}
+
+/* Mock for SURB creation (always succeeds for testing) */
+cyxwiz_error_t cyxwiz_router_create_surb(
+    cyxwiz_router_t *router,
+    cyxwiz_surb_t *surb_out)
+{
+    CYXWIZ_UNUSED(router);
+    /* Create a mock SURB with a recognizable first_hop */
+    memset(surb_out, 0, sizeof(cyxwiz_surb_t));
+    memset(surb_out->first_hop.bytes, 0xAA, CYXWIZ_NODE_ID_LEN);
+    return CYXWIZ_OK;
+}
+
+/* Mock for SURB capability check */
+bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router)
+{
+    CYXWIZ_UNUSED(router);
+    return true;  /* Always can create SURB for testing */
+}
+
 /* Test context creation */
 static int test_context_create(void)
 {
@@ -526,6 +563,161 @@ static int test_poll_timeout(void)
     return 1;
 }
 
+/* Test anonymous job submission */
+static int test_anonymous_submit(void)
+{
+    cyxwiz_compute_ctx_t *ctx = NULL;
+    cyxwiz_node_id_t local_id, worker_id;
+    memset(&local_id, 0x42, sizeof(local_id));
+    memset(&worker_id, 0x99, sizeof(worker_id));
+
+    cyxwiz_error_t err = cyxwiz_compute_create(&ctx, (cyxwiz_router_t *)&g_mock_router, NULL, NULL, &local_id);
+    if (err != CYXWIZ_OK || ctx == NULL) {
+        return 0;
+    }
+
+    /* Check that anonymous submission is possible (mock always returns true) */
+    if (!cyxwiz_compute_can_submit_anonymous(ctx)) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Reset send counter */
+    g_send_count = 0;
+
+    /* Submit anonymous job */
+    cyxwiz_job_id_t job_id;
+    uint8_t payload[] = {0x01, 0x02, 0x03, 0x04};
+    err = cyxwiz_compute_submit_anonymous(ctx, &worker_id, CYXWIZ_JOB_TYPE_HASH,
+                                           payload, sizeof(payload), &job_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify a message was sent */
+    if (g_send_count != 1) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify message type is anonymous submit (0x3B) */
+    if (g_last_send_data[0] != CYXWIZ_MSG_JOB_SUBMIT_ANON) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify job was tracked */
+    if (cyxwiz_compute_job_count(ctx) != 1) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_compute_destroy(ctx);
+    return 1;
+}
+
+/* Test anonymous job submission with payload too large */
+static int test_anonymous_submit_too_large(void)
+{
+    cyxwiz_compute_ctx_t *ctx = NULL;
+    cyxwiz_node_id_t local_id, worker_id;
+    memset(&local_id, 0x42, sizeof(local_id));
+    memset(&worker_id, 0x99, sizeof(worker_id));
+
+    cyxwiz_error_t err = cyxwiz_compute_create(&ctx, (cyxwiz_router_t *)&g_mock_router, NULL, NULL, &local_id);
+    if (err != CYXWIZ_OK || ctx == NULL) {
+        return 0;
+    }
+
+    /* Try to submit with payload exceeding anonymous limit */
+    cyxwiz_job_id_t job_id;
+    uint8_t large_payload[200];  /* > CYXWIZ_JOB_ANON_MAX_PAYLOAD (118) */
+    memset(large_payload, 0xAB, sizeof(large_payload));
+
+    err = cyxwiz_compute_submit_anonymous(ctx, &worker_id, CYXWIZ_JOB_TYPE_HASH,
+                                           large_payload, sizeof(large_payload), &job_id);
+
+    /* Should fail with packet too large error */
+    if (err != CYXWIZ_ERR_PACKET_TOO_LARGE) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_compute_destroy(ctx);
+    return 1;
+}
+
+/* Test worker receiving anonymous job */
+static int test_handle_anonymous_job(void)
+{
+    cyxwiz_compute_ctx_t *ctx = NULL;
+    cyxwiz_node_id_t local_id, submitter_id;
+    memset(&local_id, 0x42, sizeof(local_id));
+    memset(&submitter_id, 0x11, sizeof(submitter_id));
+
+    cyxwiz_error_t err = cyxwiz_compute_create(&ctx, (cyxwiz_router_t *)&g_mock_router, NULL, NULL, &local_id);
+    if (err != CYXWIZ_OK || ctx == NULL) {
+        return 0;
+    }
+
+    /* Enable worker mode */
+    err = cyxwiz_compute_enable_worker(ctx, 4);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Build anonymous job submit message */
+    uint8_t msg_buf[256];
+    cyxwiz_job_submit_anon_msg_t *msg = (cyxwiz_job_submit_anon_msg_t *)msg_buf;
+    msg->type = CYXWIZ_MSG_JOB_SUBMIT_ANON;
+    memset(msg->job_id, 0x55, CYXWIZ_JOB_ID_SIZE);
+    msg->job_type = CYXWIZ_JOB_TYPE_HASH;
+    msg->total_chunks = 0;
+    msg->payload_len = 4;
+
+    /* Set up a recognizable SURB */
+    memset(&msg->reply_surb, 0, sizeof(cyxwiz_surb_t));
+    memset(msg->reply_surb.first_hop.bytes, 0xBB, CYXWIZ_NODE_ID_LEN);
+
+    /* Add small payload */
+    msg_buf[sizeof(cyxwiz_job_submit_anon_msg_t)] = 0x01;
+    msg_buf[sizeof(cyxwiz_job_submit_anon_msg_t) + 1] = 0x02;
+    msg_buf[sizeof(cyxwiz_job_submit_anon_msg_t) + 2] = 0x03;
+    msg_buf[sizeof(cyxwiz_job_submit_anon_msg_t) + 3] = 0x04;
+
+    size_t msg_len = sizeof(cyxwiz_job_submit_anon_msg_t) + 4;
+
+    /* Reset send counter */
+    g_send_count = 0;
+
+    /* Handle the message (submitter_id not used for anonymous - SURB is used) */
+    err = cyxwiz_compute_handle_message(ctx, &submitter_id, msg_buf, msg_len);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Worker should have sent accept and result via SURB */
+    /* Accept and result should be sent (HASH job executes immediately) */
+    if (g_send_count < 1) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify the destination was the SURB first_hop (0xBB pattern) */
+    uint8_t expected_hop[CYXWIZ_NODE_ID_LEN];
+    memset(expected_hop, 0xBB, CYXWIZ_NODE_ID_LEN);
+    if (memcmp(g_last_send_to.bytes, expected_hop, CYXWIZ_NODE_ID_LEN) != 0) {
+        cyxwiz_compute_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_compute_destroy(ctx);
+    return 1;
+}
+
 int main(void)
 {
     cyxwiz_log_init(CYXWIZ_LOG_WARN);
@@ -543,6 +735,11 @@ int main(void)
     TEST(handle_job_submit);
     TEST(reject_not_worker);
     TEST(poll_timeout);
+
+    /* Anonymous compute job tests */
+    TEST(anonymous_submit);
+    TEST(anonymous_submit_too_large);
+    TEST(handle_anonymous_job);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

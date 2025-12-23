@@ -59,9 +59,11 @@ static cyxwiz_error_t send_job_reject(cyxwiz_compute_ctx_t *ctx, const cyxwiz_no
 static cyxwiz_error_t send_job_result(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job);
 static cyxwiz_error_t send_job_ack(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *to,
                                     const cyxwiz_job_id_t *job_id);
+static cyxwiz_error_t send_job_accept_via_surb(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job);
+static cyxwiz_error_t send_job_result_via_surb(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job);
 
 static cyxwiz_error_t handle_job_submit(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
-                                         const uint8_t *data, size_t len);
+                                         const uint8_t *data, size_t len, bool is_anonymous);
 static cyxwiz_error_t handle_job_chunk(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
                                         const uint8_t *data, size_t len);
 static cyxwiz_error_t handle_job_accept(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
@@ -305,7 +307,8 @@ cyxwiz_error_t cyxwiz_compute_submit(
     /* Initialize job */
     job->type = type;
     job->state = CYXWIZ_JOB_STATE_PENDING;
-    memcpy(&job->submitter, &ctx->local_id, sizeof(cyxwiz_node_id_t));
+    job->is_anonymous = false;
+    memcpy(&job->submitter.direct_id, &ctx->local_id, sizeof(cyxwiz_node_id_t));
     memcpy(&job->worker, worker, sizeof(cyxwiz_node_id_t));
     job->is_submitter = true;
 
@@ -372,6 +375,109 @@ cyxwiz_error_t cyxwiz_compute_cancel(
     return CYXWIZ_OK;
 }
 
+/* Forward declaration for anonymous submit helper */
+static cyxwiz_error_t send_job_submit_anonymous(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job);
+
+/*
+ * Submit a job anonymously - worker cannot identify submitter
+ */
+cyxwiz_error_t cyxwiz_compute_submit_anonymous(
+    cyxwiz_compute_ctx_t *ctx,
+    const cyxwiz_node_id_t *worker,
+    cyxwiz_job_type_t type,
+    const uint8_t *payload,
+    size_t payload_len,
+    cyxwiz_job_id_t *job_id_out)
+{
+    if (ctx == NULL || worker == NULL || job_id_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (payload_len > 0 && payload == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check payload fits within anonymous job limits */
+    if (payload_len > CYXWIZ_JOB_ANON_MAX_PAYLOAD) {
+        CYXWIZ_ERROR("Payload too large for anonymous job: %zu > %d",
+                     payload_len, CYXWIZ_JOB_ANON_MAX_PAYLOAD);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Verify SURB creation is possible */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        CYXWIZ_ERROR("Cannot create SURB - insufficient relay peers");
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Allocate job slot */
+    cyxwiz_job_t *job = alloc_job(ctx);
+    if (job == NULL) {
+        CYXWIZ_ERROR("Job table full");
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Generate job ID */
+    cyxwiz_crypto_random(job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+
+    /* Initialize job as anonymous */
+    job->type = type;
+    job->state = CYXWIZ_JOB_STATE_PENDING;
+    job->is_anonymous = true;
+    memcpy(&job->worker, worker, sizeof(cyxwiz_node_id_t));
+    job->is_submitter = true;
+
+    /* Create SURB for anonymous reply */
+    cyxwiz_error_t err = cyxwiz_router_create_surb(ctx->router, &job->submitter.reply_surb);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to create SURB: %s", cyxwiz_strerror(err));
+        free_job(job);
+        ctx->job_count--;
+        return err;
+    }
+
+    /* Copy payload */
+    if (payload_len > 0) {
+        memcpy(job->payload, payload, payload_len);
+    }
+    job->payload_len = payload_len;
+
+    /* Anonymous jobs are single-packet only (due to SURB overhead) */
+    job->total_chunks = 0;
+
+    job->submitted_at = cyxwiz_time_ms();
+
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job->id, hex_id);
+    CYXWIZ_DEBUG("Submitting anonymous job %s (type=%d, payload=%zu bytes)",
+                 hex_id, type, payload_len);
+
+    /* Send anonymous job submission */
+    err = send_job_submit_anonymous(ctx, job);
+    if (err != CYXWIZ_OK) {
+        free_job(job);
+        ctx->job_count--;
+        return err;
+    }
+
+    /* Output job ID */
+    memcpy(job_id_out, &job->id, sizeof(cyxwiz_job_id_t));
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Check if context supports anonymous job submission
+ */
+bool cyxwiz_compute_can_submit_anonymous(const cyxwiz_compute_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return false;
+    }
+
+    return cyxwiz_router_can_create_surb(ctx->router);
+}
+
 /* ============ Send Functions ============ */
 
 static cyxwiz_error_t send_job_submit(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
@@ -427,6 +533,40 @@ static cyxwiz_error_t send_job_submit(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *j
     return CYXWIZ_OK;
 }
 
+static cyxwiz_error_t send_job_submit_anonymous(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
+{
+    uint8_t buf[CYXWIZ_MAX_PACKET_SIZE];
+    cyxwiz_job_submit_anon_msg_t *msg = (cyxwiz_job_submit_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_JOB_SUBMIT_ANON;
+    memcpy(msg->job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+    msg->job_type = (uint8_t)job->type;
+    msg->total_chunks = 0;  /* Anonymous jobs are always single-packet */
+    msg->payload_len = (uint8_t)job->payload_len;
+
+    /* Copy the SURB for anonymous reply */
+    memcpy(&msg->reply_surb, &job->submitter.reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Copy payload after header */
+    size_t msg_len = sizeof(cyxwiz_job_submit_anon_msg_t);
+    if (job->payload_len > 0) {
+        memcpy(buf + sizeof(cyxwiz_job_submit_anon_msg_t), job->payload, job->payload_len);
+        msg_len += job->payload_len;
+    }
+
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job->id, hex_id);
+    CYXWIZ_DEBUG("Sending anonymous JOB_SUBMIT %s (%zu bytes)", hex_id, msg_len);
+
+    /* Send to worker */
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &job->worker, buf, msg_len);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to send anonymous JOB_SUBMIT: %s", cyxwiz_strerror(err));
+    }
+
+    return err;
+}
+
 static cyxwiz_error_t send_job_chunk(
     cyxwiz_compute_ctx_t *ctx,
     const cyxwiz_node_id_t *to,
@@ -476,6 +616,11 @@ static cyxwiz_error_t send_job_reject(
 
 static cyxwiz_error_t send_job_result(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
 {
+    /* Use SURB for anonymous jobs */
+    if (job->is_anonymous) {
+        return send_job_result_via_surb(ctx, job);
+    }
+
     uint8_t buf[CYXWIZ_MAX_PACKET_SIZE];
     cyxwiz_job_result_msg_t *msg = (cyxwiz_job_result_msg_t *)buf;
 
@@ -495,7 +640,7 @@ static cyxwiz_error_t send_job_result(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *j
 
     size_t msg_len = sizeof(cyxwiz_job_result_msg_t) + job->result_len;
 
-    return cyxwiz_router_send(ctx->router, &job->submitter, buf, msg_len);
+    return cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, msg_len);
 }
 
 static cyxwiz_error_t send_job_ack(
@@ -508,6 +653,54 @@ static cyxwiz_error_t send_job_ack(
     memcpy(msg.job_id, job_id->bytes, CYXWIZ_JOB_ID_SIZE);
 
     return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+/*
+ * Send job accept via SURB for anonymous jobs
+ */
+static cyxwiz_error_t send_job_accept_via_surb(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
+{
+    cyxwiz_job_accept_msg_t msg;
+    msg.type = CYXWIZ_MSG_JOB_ACCEPT;
+    memcpy(msg.job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job->id, hex_id);
+    CYXWIZ_DEBUG("Sending anonymous JOB_ACCEPT for %s via SURB", hex_id);
+
+    return cyxwiz_router_send_via_surb(ctx->router, &job->submitter.reply_surb,
+                                       (uint8_t *)&msg, sizeof(msg));
+}
+
+/*
+ * Send job result via SURB for anonymous jobs
+ */
+static cyxwiz_error_t send_job_result_via_surb(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
+{
+    uint8_t buf[CYXWIZ_MAX_PACKET_SIZE];
+    cyxwiz_job_result_msg_t *msg = (cyxwiz_job_result_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_JOB_RESULT;
+    memcpy(msg->job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+    msg->state = (uint8_t)job->state;
+    msg->total_chunks = 0;
+    msg->result_len = (uint8_t)job->result_len;
+
+    /* Compute MAC over job_id || result */
+    cyxwiz_compute_result_mac(ctx, &job->id, job->result, job->result_len, msg->mac);
+
+    /* Copy result */
+    if (job->result_len > 0) {
+        memcpy(buf + sizeof(cyxwiz_job_result_msg_t), job->result, job->result_len);
+    }
+
+    size_t msg_len = sizeof(cyxwiz_job_result_msg_t) + job->result_len;
+
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job->id, hex_id);
+    CYXWIZ_DEBUG("Sending anonymous JOB_RESULT for %s via SURB (%zu bytes)", hex_id, msg_len);
+
+    return cyxwiz_router_send_via_surb(ctx->router, &job->submitter.reply_surb, buf, msg_len);
 }
 
 /* ============ Message Handling ============ */
@@ -526,7 +719,9 @@ cyxwiz_error_t cyxwiz_compute_handle_message(
 
     switch (msg_type) {
         case CYXWIZ_MSG_JOB_SUBMIT:
-            return handle_job_submit(ctx, from, data, len);
+            return handle_job_submit(ctx, from, data, len, false);
+        case CYXWIZ_MSG_JOB_SUBMIT_ANON:
+            return handle_job_submit(ctx, from, data, len, true);
         case CYXWIZ_MSG_JOB_CHUNK:
             return handle_job_chunk(ctx, from, data, len);
         case CYXWIZ_MSG_JOB_ACCEPT:
@@ -549,15 +744,40 @@ static cyxwiz_error_t handle_job_submit(
     cyxwiz_compute_ctx_t *ctx,
     const cyxwiz_node_id_t *from,
     const uint8_t *data,
-    size_t len)
+    size_t len,
+    bool is_anonymous)
 {
-    if (len < sizeof(cyxwiz_job_submit_msg_t)) {
+    /* Validate minimum message length */
+    size_t min_len = is_anonymous ? sizeof(cyxwiz_job_submit_anon_msg_t)
+                                  : sizeof(cyxwiz_job_submit_msg_t);
+    if (len < min_len) {
         return CYXWIZ_ERR_INVALID;
     }
 
-    const cyxwiz_job_submit_msg_t *msg = (const cyxwiz_job_submit_msg_t *)data;
+    /* Extract job ID and type from appropriate message format */
     cyxwiz_job_id_t job_id;
-    memcpy(job_id.bytes, msg->job_id, CYXWIZ_JOB_ID_SIZE);
+    cyxwiz_job_type_t job_type;
+    uint8_t total_chunks;
+    const cyxwiz_surb_t *reply_surb = NULL;
+    const uint8_t *payload_data;
+    size_t payload_len;
+
+    if (is_anonymous) {
+        const cyxwiz_job_submit_anon_msg_t *msg = (const cyxwiz_job_submit_anon_msg_t *)data;
+        memcpy(job_id.bytes, msg->job_id, CYXWIZ_JOB_ID_SIZE);
+        job_type = (cyxwiz_job_type_t)msg->job_type;
+        total_chunks = msg->total_chunks;  /* Always 0 for anonymous */
+        reply_surb = &msg->reply_surb;
+        payload_data = data + sizeof(cyxwiz_job_submit_anon_msg_t);
+        payload_len = len - sizeof(cyxwiz_job_submit_anon_msg_t);
+    } else {
+        const cyxwiz_job_submit_msg_t *msg = (const cyxwiz_job_submit_msg_t *)data;
+        memcpy(job_id.bytes, msg->job_id, CYXWIZ_JOB_ID_SIZE);
+        job_type = (cyxwiz_job_type_t)msg->job_type;
+        total_chunks = msg->total_chunks;
+        payload_data = data + sizeof(cyxwiz_job_submit_msg_t);
+        payload_len = len - sizeof(cyxwiz_job_submit_msg_t);
+    }
 
     char hex_id[17];
     cyxwiz_job_id_to_hex(&job_id, hex_id);
@@ -565,14 +785,19 @@ static cyxwiz_error_t handle_job_submit(
     /* Check if we're a worker */
     if (!ctx->is_worker) {
         CYXWIZ_DEBUG("Received job %s but not in worker mode", hex_id);
-        send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_UNSUPPORTED);
+        /* Note: For anonymous jobs, we can't send reject back easily */
+        if (!is_anonymous) {
+            send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_UNSUPPORTED);
+        }
         return CYXWIZ_OK;
     }
 
     /* Check capacity */
     if (ctx->active_worker_jobs >= ctx->max_concurrent) {
         CYXWIZ_DEBUG("Rejecting job %s - at capacity", hex_id);
-        send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_BUSY);
+        if (!is_anonymous) {
+            send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_BUSY);
+        }
         return CYXWIZ_OK;
     }
 
@@ -586,48 +811,75 @@ static cyxwiz_error_t handle_job_submit(
     /* Allocate job slot */
     cyxwiz_job_t *job = alloc_job(ctx);
     if (job == NULL) {
-        send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_BUSY);
+        if (!is_anonymous) {
+            send_job_reject(ctx, from, &job_id, CYXWIZ_REJECT_BUSY);
+        }
         return CYXWIZ_ERR_QUEUE_FULL;
     }
 
     /* Initialize job */
     memcpy(&job->id, &job_id, sizeof(cyxwiz_job_id_t));
-    job->type = (cyxwiz_job_type_t)msg->job_type;
+    job->type = job_type;
     job->state = CYXWIZ_JOB_STATE_PENDING;
-    memcpy(&job->submitter, from, sizeof(cyxwiz_node_id_t));
+    job->is_anonymous = is_anonymous;
+
+    /* Store submitter identity or SURB */
+    if (is_anonymous) {
+        memcpy(&job->submitter.reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+        CYXWIZ_DEBUG("Received anonymous job %s (type=%d, payload=%zu)",
+                     hex_id, job->type, payload_len);
+    } else {
+        memcpy(&job->submitter.direct_id, from, sizeof(cyxwiz_node_id_t));
+    }
+
     memcpy(&job->worker, &ctx->local_id, sizeof(cyxwiz_node_id_t));
     job->is_submitter = false;
-    job->total_chunks = msg->total_chunks;
+    job->total_chunks = total_chunks;
 
-    if (msg->total_chunks == 0) {
+    if (total_chunks == 0) {
         /* Single packet - payload is inline */
-        size_t payload_len = len - sizeof(cyxwiz_job_submit_msg_t);
         if (payload_len > CYXWIZ_JOB_MAX_PAYLOAD) {
             payload_len = CYXWIZ_JOB_MAX_PAYLOAD;
         }
         if (payload_len > 0) {
-            memcpy(job->payload, data + sizeof(cyxwiz_job_submit_msg_t), payload_len);
+            memcpy(job->payload, payload_data, payload_len);
         }
         job->payload_len = payload_len;
         job->received_chunks = 0;
         job->chunk_bitmap = 0;
 
-        CYXWIZ_DEBUG("Received single-packet job %s (type=%d, payload=%zu)",
-                     hex_id, job->type, job->payload_len);
+        if (!is_anonymous) {
+            CYXWIZ_DEBUG("Received single-packet job %s (type=%d, payload=%zu)",
+                         hex_id, job->type, job->payload_len);
+        }
 
         /* Accept and execute immediately */
-        send_job_accept(ctx, from, &job_id);
+        /* For anonymous jobs, accept goes via SURB */
+        if (is_anonymous) {
+            send_job_accept_via_surb(ctx, job);
+        } else {
+            send_job_accept(ctx, from, &job_id);
+        }
         ctx->active_worker_jobs++;
         return execute_job(ctx, job);
     } else {
         /* Chunked job - wait for chunks */
+        /* Note: Anonymous jobs don't support chunking */
+        if (is_anonymous) {
+            CYXWIZ_WARN("Anonymous job %s uses chunking - not supported", hex_id);
+            free_job(job);
+            ctx->job_count--;
+            return CYXWIZ_ERR_INVALID;
+        }
+
+        const cyxwiz_job_submit_msg_t *msg = (const cyxwiz_job_submit_msg_t *)data;
         job->payload_len = msg->payload_len;  /* Expected total length */
         job->received_chunks = 0;
         job->chunk_bitmap = 0;
         job->submitted_at = cyxwiz_time_ms();
 
         CYXWIZ_DEBUG("Received chunked job %s (type=%d, chunks=%d, total=%zu)",
-                     hex_id, job->type, msg->total_chunks, job->payload_len);
+                     hex_id, job->type, total_chunks, job->payload_len);
 
         /* Don't accept yet - wait for all chunks */
         return CYXWIZ_OK;
@@ -692,8 +944,8 @@ static cyxwiz_error_t handle_job_chunk(
     if (job->received_chunks == job->total_chunks) {
         CYXWIZ_DEBUG("All chunks received for job %s", hex_id);
 
-        /* Accept and execute */
-        send_job_accept(ctx, &job->submitter, &job->id);
+        /* Accept and execute (chunked jobs are never anonymous) */
+        send_job_accept(ctx, &job->submitter.direct_id, &job->id);
         ctx->active_worker_jobs++;
         return execute_job(ctx, job);
     }

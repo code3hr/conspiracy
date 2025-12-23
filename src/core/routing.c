@@ -1595,4 +1595,114 @@ bool cyxwiz_router_has_anonymous_route(
     return cyxwiz_onion_has_circuit_to(router->onion_ctx, destination);
 }
 
+/*
+ * Send data via SURB (Single-Use Reply Block)
+ * Used by compute layer for anonymous job result delivery
+ */
+cyxwiz_error_t cyxwiz_router_send_via_surb(
+    cyxwiz_router_t *router,
+    const cyxwiz_surb_t *surb,
+    const uint8_t *data,
+    size_t len)
+{
+    if (router == NULL || surb == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check payload size (must fit in onion_payload minus MAC) */
+    size_t max_payload = CYXWIZ_ANON_REPLY_PAYLOAD_SIZE - CYXWIZ_MAC_SIZE;
+    if (len > max_payload) {
+        CYXWIZ_WARN("Payload too large for SURB send: %zu > %zu", len, max_payload);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Build anonymous reply message to carry the data */
+    cyxwiz_anon_route_reply_t reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.type = CYXWIZ_MSG_ANON_ROUTE_REPLY;
+
+    /* SURB onion_header encodes the next_hop for relay nodes
+     * The first_hop knows how to unwrap and forward */
+    /* For the first hop, extract next_hop from onion_header if needed
+     * For simplicity, we put zeros in next_hop and let first_hop handle routing */
+    memset(&reply.next_hop, 0, sizeof(reply.next_hop));
+
+    /* Copy the SURB onion header into the first part of onion_payload
+     * This allows relay nodes to unwrap and forward */
+    memcpy(reply.onion_payload, surb->onion_header, CYXWIZ_SURB_HEADER_SIZE);
+
+    /* Append the actual payload data after the header */
+    size_t offset = CYXWIZ_SURB_HEADER_SIZE;
+    if (offset + len <= CYXWIZ_ANON_REPLY_PAYLOAD_SIZE) {
+        memcpy(reply.onion_payload + offset, data, len);
+    }
+
+    /* Send to SURB's first hop - they will unwrap and forward */
+    char hex_hop[65];
+    cyxwiz_node_id_to_hex(&surb->first_hop, hex_hop);
+    CYXWIZ_DEBUG("Sending %zu bytes via SURB to first_hop %.16s...", len, hex_hop);
+
+    return router->transport->ops->send(
+        router->transport,
+        &surb->first_hop,
+        (uint8_t *)&reply,
+        sizeof(reply));
+}
+
+/*
+ * Create a SURB for anonymous reply (public wrapper)
+ */
+cyxwiz_error_t cyxwiz_router_create_surb(
+    cyxwiz_router_t *router,
+    cyxwiz_surb_t *surb_out)
+{
+    if (router == NULL || surb_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Generate a random nonce for SURB creation */
+    uint8_t nonce[CYXWIZ_REQUEST_NONCE_SIZE];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    /* Reply key is not needed externally for compute jobs
+     * (results are MACed with job-specific key) */
+    uint8_t reply_key[CYXWIZ_KEY_SIZE];
+
+    cyxwiz_error_t err = create_surb(router, nonce, surb_out, reply_key);
+
+    /* Clear reply key - not needed for compute SURB */
+    sodium_memzero(reply_key, sizeof(reply_key));
+
+    return err;
+}
+
+/*
+ * Check if SURB creation is possible
+ */
+bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router)
+{
+    if (router == NULL || router->onion_ctx == NULL) {
+        return false;
+    }
+
+    /* Count peers with shared keys */
+    size_t relay_count = 0;
+    for (size_t i = 0; i < 64 && relay_count < CYXWIZ_SURB_HOPS; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(
+            router->peer_table, i);
+
+        if (peer == NULL || peer->state != CYXWIZ_PEER_STATE_CONNECTED) {
+            continue;
+        }
+
+        if (!cyxwiz_onion_has_key(router->onion_ctx, &peer->id)) {
+            continue;
+        }
+
+        relay_count++;
+    }
+
+    return relay_count >= CYXWIZ_SURB_HOPS;
+}
+
 #endif /* CYXWIZ_HAS_CRYPTO */

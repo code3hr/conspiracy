@@ -95,6 +95,7 @@ typedef enum {
     CYXWIZ_MSG_JOB_CANCEL = 0x38,     /* Cancel job */
     CYXWIZ_MSG_JOB_QUERY = 0x39,      /* Query workers */
     CYXWIZ_MSG_JOB_ANNOUNCE = 0x3A,   /* Worker availability */
+    CYXWIZ_MSG_JOB_SUBMIT_ANON = 0x3B, /* Anonymous job submit (with SURB) */
 
     /* Storage messages (0x40-0x4F) */
     CYXWIZ_MSG_STORE_REQ = 0x40,      /* Store share on provider */

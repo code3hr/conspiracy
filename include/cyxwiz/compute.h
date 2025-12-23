@@ -27,6 +27,10 @@
 #define CYXWIZ_JOB_CHUNK_SIZE 48        /* Payload per chunk */
 #define CYXWIZ_JOB_MAX_TOTAL_PAYLOAD (CYXWIZ_JOB_MAX_CHUNKS * CYXWIZ_JOB_CHUNK_SIZE)
 
+/* Anonymous job limits (SURB adds 120 bytes overhead) */
+#define CYXWIZ_JOB_ANON_HEADER_SIZE 132 /* 12 base + 120 SURB */
+#define CYXWIZ_JOB_ANON_MAX_PAYLOAD (CYXWIZ_MAX_PACKET_SIZE - CYXWIZ_JOB_ANON_HEADER_SIZE)
+
 /* Capacity limits */
 #define CYXWIZ_MAX_ACTIVE_JOBS 16       /* Max concurrent jobs tracked */
 #define CYXWIZ_DEFAULT_WORKER_CAPACITY 4 /* Default concurrent jobs for worker */
@@ -76,8 +80,14 @@ typedef struct {
     cyxwiz_job_id_t id;                 /* Unique job identifier */
     cyxwiz_job_type_t type;             /* Type of computation */
     cyxwiz_job_state_t state;           /* Current state */
-    cyxwiz_node_id_t submitter;         /* Who submitted the job */
     cyxwiz_node_id_t worker;            /* Assigned worker (if any) */
+
+    /* Submitter identity (anonymous or direct) */
+    bool is_anonymous;                  /* True if anonymous submission */
+    union {
+        cyxwiz_node_id_t direct_id;     /* Direct submitter ID */
+        cyxwiz_surb_t reply_surb;       /* Anonymous reply path (SURB) */
+    } submitter;
 
     /* Payload (assembled from chunks if needed) */
     uint8_t payload[CYXWIZ_JOB_MAX_TOTAL_PAYLOAD];
@@ -118,6 +128,21 @@ typedef struct {
     uint8_t payload_len;                /* Length of inline payload */
     /* uint8_t payload[] follows if total_chunks == 0 */
 } cyxwiz_job_submit_msg_t;
+
+/*
+ * Anonymous job submit message (0x3B)
+ * Includes SURB for anonymous reply - worker cannot identify submitter
+ * Total: 132 + payload bytes
+ */
+typedef struct {
+    uint8_t type;                       /* CYXWIZ_MSG_JOB_SUBMIT_ANON */
+    uint8_t job_id[CYXWIZ_JOB_ID_SIZE]; /* 8 bytes */
+    uint8_t job_type;                   /* cyxwiz_job_type_t */
+    uint8_t total_chunks;               /* 0 = payload in this packet */
+    uint8_t payload_len;                /* Length of inline payload */
+    cyxwiz_surb_t reply_surb;           /* 120 bytes - anonymous reply path */
+    /* uint8_t payload[] follows if total_chunks == 0 */
+} cyxwiz_job_submit_anon_msg_t;
 
 /*
  * Job chunk message (0x31)
@@ -370,6 +395,39 @@ cyxwiz_error_t cyxwiz_compute_submit(
     size_t payload_len,
     cyxwiz_job_id_t *job_id_out
 );
+
+/*
+ * Submit a job anonymously - worker cannot identify submitter
+ * Uses SURB (Single-Use Reply Block) for anonymous result delivery.
+ * Maximum payload is CYXWIZ_JOB_ANON_MAX_PAYLOAD (118 bytes).
+ *
+ * @param ctx           Compute context
+ * @param worker        Worker node ID
+ * @param type          Job type
+ * @param payload       Job payload data
+ * @param payload_len   Length of payload (max 118 bytes)
+ * @param job_id_out    Output: assigned job ID
+ * @return              CYXWIZ_OK on success
+ *                      CYXWIZ_ERR_PACKET_TOO_LARGE if payload exceeds anonymous limit
+ *                      CYXWIZ_ERR_INSUFFICIENT_RELAYS if not enough peers for SURB
+ */
+cyxwiz_error_t cyxwiz_compute_submit_anonymous(
+    cyxwiz_compute_ctx_t *ctx,
+    const cyxwiz_node_id_t *worker,
+    cyxwiz_job_type_t type,
+    const uint8_t *payload,
+    size_t payload_len,
+    cyxwiz_job_id_t *job_id_out
+);
+
+/*
+ * Check if context supports anonymous job submission
+ * Requires at least CYXWIZ_SURB_HOPS relay peers for SURB creation.
+ *
+ * @param ctx           Compute context
+ * @return              true if anonymous submission is possible
+ */
+bool cyxwiz_compute_can_submit_anonymous(const cyxwiz_compute_ctx_t *ctx);
 
 /*
  * Cancel a pending or running job

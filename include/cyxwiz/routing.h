@@ -438,6 +438,52 @@ bool cyxwiz_router_has_anonymous_route(
     const cyxwiz_node_id_t *destination
 );
 
+/*
+ * Send data via SURB (Single-Use Reply Block)
+ * Used by compute layer for anonymous job result delivery
+ *
+ * The SURB contains pre-computed onion routing to the original requester.
+ * The sender (worker) cannot identify the final destination.
+ *
+ * @param router        Router context
+ * @param surb          SURB from anonymous request
+ * @param data          Data to send
+ * @param len           Data length (max CYXWIZ_ANON_REPLY_PAYLOAD_SIZE - 16)
+ * @return              CYXWIZ_OK on success
+ *                      CYXWIZ_ERR_NOT_INITIALIZED if onion context not set
+ *                      CYXWIZ_ERR_PACKET_TOO_LARGE if data exceeds max payload
+ */
+cyxwiz_error_t cyxwiz_router_send_via_surb(
+    cyxwiz_router_t *router,
+    const cyxwiz_surb_t *surb,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Create a SURB for anonymous reply
+ * Used by compute layer for anonymous job submission
+ *
+ * @param router        Router context
+ * @param surb_out      Output SURB structure
+ * @return              CYXWIZ_OK on success
+ *                      CYXWIZ_ERR_NOT_INITIALIZED if onion context not set
+ *                      CYXWIZ_ERR_INSUFFICIENT_RELAYS if not enough relay peers
+ */
+cyxwiz_error_t cyxwiz_router_create_surb(
+    cyxwiz_router_t *router,
+    cyxwiz_surb_t *surb_out
+);
+
+/*
+ * Check if SURB creation is possible
+ * Requires onion context and at least CYXWIZ_SURB_HOPS relay peers with keys
+ *
+ * @param router        Router context
+ * @return              true if SURB can be created
+ */
+bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router);
+
 /* ============ Statistics ============ */
 
 /*
