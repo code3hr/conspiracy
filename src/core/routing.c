@@ -471,9 +471,12 @@ cyxwiz_error_t cyxwiz_router_send(
         size_t header_size = sizeof(cyxwiz_routed_data_t);
         memcpy(packet + header_size, data, len);
 
+        /* Pad to MTU for traffic analysis prevention */
+        cyxwiz_pad_message(packet, header_size + len, CYXWIZ_PADDED_SIZE);
+
         /* Send to first hop */
         return router->transport->ops->send(
-            router->transport, &route->hops[0], packet, header_size + len);
+            router->transport, &route->hops[0], packet, CYXWIZ_PADDED_SIZE);
     }
 
     /* No route - queue message and start discovery */

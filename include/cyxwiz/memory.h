@@ -45,4 +45,14 @@ void cyxwiz_free(void *ptr, size_t size);
  */
 int cyxwiz_secure_compare(const void *a, const void *b, size_t len);
 
+/*
+ * Pad message buffer with random bytes for traffic analysis prevention
+ * Fills buffer from msg_len to target_len with random data
+ *
+ * @param buf        Message buffer (must have space for target_len bytes)
+ * @param msg_len    Current message length
+ * @param target_len Target padded length (typically CYXWIZ_PADDED_SIZE)
+ */
+void cyxwiz_pad_message(uint8_t *buf, size_t msg_len, size_t target_len);
+
 #endif /* CYXWIZ_MEMORY_H */

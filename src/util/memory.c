@@ -3,6 +3,7 @@
  */
 
 #include "cyxwiz/memory.h"
+#include "cyxwiz/crypto.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,4 +75,17 @@ int cyxwiz_secure_compare(const void *a, const void *b, size_t len)
     }
 
     return diff;
+}
+
+/*
+ * Pad message buffer with random bytes for traffic analysis prevention
+ */
+void cyxwiz_pad_message(uint8_t *buf, size_t msg_len, size_t target_len)
+{
+    if (buf == NULL || msg_len >= target_len) {
+        return;
+    }
+
+    /* Fill padding with random bytes to prevent pattern detection */
+    cyxwiz_crypto_random(buf + msg_len, target_len - msg_len);
 }

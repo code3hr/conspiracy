@@ -505,8 +505,11 @@ static cyxwiz_error_t send_job_submit(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *j
         msg_len = sizeof(cyxwiz_job_submit_msg_t);
     }
 
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
     /* Send submit message */
-    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &job->worker, buf, msg_len);
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &job->worker, buf, CYXWIZ_PADDED_SIZE);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to send JOB_SUBMIT: %s", cyxwiz_strerror(err));
         return err;
@@ -558,8 +561,11 @@ static cyxwiz_error_t send_job_submit_anonymous(cyxwiz_compute_ctx_t *ctx, cyxwi
     cyxwiz_job_id_to_hex(&job->id, hex_id);
     CYXWIZ_DEBUG("Sending anonymous JOB_SUBMIT %s (%zu bytes)", hex_id, msg_len);
 
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
     /* Send to worker */
-    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &job->worker, buf, msg_len);
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &job->worker, buf, CYXWIZ_PADDED_SIZE);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to send anonymous JOB_SUBMIT: %s", cyxwiz_strerror(err));
     }
@@ -584,8 +590,12 @@ static cyxwiz_error_t send_job_chunk(
     msg->chunk_len = (uint8_t)len;
     memcpy(buf + sizeof(cyxwiz_job_chunk_msg_t), data, len);
 
-    return cyxwiz_router_send(ctx->router, to, buf,
-                             sizeof(cyxwiz_job_chunk_msg_t) + len);
+    size_t msg_len = sizeof(cyxwiz_job_chunk_msg_t) + len;
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
 }
 
 static cyxwiz_error_t send_job_accept(
@@ -640,7 +650,10 @@ static cyxwiz_error_t send_job_result(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *j
 
     size_t msg_len = sizeof(cyxwiz_job_result_msg_t) + job->result_len;
 
-    return cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, msg_len);
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, CYXWIZ_PADDED_SIZE);
 }
 
 static cyxwiz_error_t send_job_ack(
@@ -700,7 +713,10 @@ static cyxwiz_error_t send_job_result_via_surb(cyxwiz_compute_ctx_t *ctx, cyxwiz
     cyxwiz_job_id_to_hex(&job->id, hex_id);
     CYXWIZ_DEBUG("Sending anonymous JOB_RESULT for %s via SURB (%zu bytes)", hex_id, msg_len);
 
-    return cyxwiz_router_send_via_surb(ctx->router, &job->submitter.reply_surb, buf, msg_len);
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, &job->submitter.reply_surb, buf, CYXWIZ_PADDED_SIZE);
 }
 
 /* ============ Message Handling ============ */

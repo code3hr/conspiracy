@@ -62,6 +62,9 @@ typedef struct {
 /* Maximum packet size (constrained by LoRa) */
 #define CYXWIZ_MAX_PACKET_SIZE 250
 
+/* Padded message size for traffic analysis prevention */
+#define CYXWIZ_PADDED_SIZE CYXWIZ_MAX_PACKET_SIZE
+
 /* Message types */
 typedef enum {
     /* Discovery messages (0x01-0x0F) */

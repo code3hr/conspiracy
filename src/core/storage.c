@@ -1259,7 +1259,10 @@ static cyxwiz_error_t send_store_req(
         offset += op->encrypted_len;
     }
 
-    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, to, buf, offset);
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, offset, CYXWIZ_PADDED_SIZE);
+
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
 
     /* If chunked, send chunks */
     if (err == CYXWIZ_OK && op->total_chunks > 0) {
@@ -1299,8 +1302,12 @@ static cyxwiz_error_t send_store_chunk(
 
     memcpy(buf + sizeof(cyxwiz_store_chunk_msg_t), data, len);
 
-    return cyxwiz_router_send(ctx->router, to, buf,
-                               sizeof(cyxwiz_store_chunk_msg_t) + len);
+    size_t msg_len = sizeof(cyxwiz_store_chunk_msg_t) + len;
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
 }
 
 static cyxwiz_error_t send_store_ack(
@@ -1369,7 +1376,10 @@ static cyxwiz_error_t send_retrieve_resp(
         offset += item->encrypted_len;
     }
 
-    return cyxwiz_router_send(ctx->router, to, buf, offset);
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, offset, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
 }
 
 static cyxwiz_error_t send_delete_req(
