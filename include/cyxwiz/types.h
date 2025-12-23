@@ -45,6 +45,10 @@ typedef enum {
     CYXWIZ_ERR_STORAGE_UNAUTHORIZED = -24, /* Not authorized to access */
     CYXWIZ_ERR_INSUFFICIENT_SHARES = -25, /* Not enough shares for reconstruction */
     CYXWIZ_ERR_STORAGE_CORRUPTED = -26, /* Share verification failed */
+    CYXWIZ_ERR_POS_NO_COMMITMENT = -27, /* No PoS commitment stored */
+    CYXWIZ_ERR_POS_INVALID_PROOF = -28, /* Proof verification failed */
+    CYXWIZ_ERR_POS_CHALLENGE_PENDING = -29, /* Challenge already in progress */
+    CYXWIZ_ERR_POS_INVALID_BLOCK = -30, /* Block index out of range */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -100,7 +104,15 @@ typedef enum {
     CYXWIZ_MSG_DELETE_REQ = 0x47,     /* Delete stored data */
     CYXWIZ_MSG_DELETE_ACK = 0x48,     /* Deletion confirmed */
     CYXWIZ_MSG_STORAGE_QUERY = 0x49,  /* Query for providers */
-    CYXWIZ_MSG_STORAGE_ANNOUNCE = 0x4A /* Provider availability */
+    CYXWIZ_MSG_STORAGE_ANNOUNCE = 0x4A, /* Provider availability */
+
+    /* Proof of Storage messages (0x50-0x5F) */
+    CYXWIZ_MSG_POS_COMMITMENT = 0x50,     /* Provider sends commitment after store */
+    CYXWIZ_MSG_POS_CHALLENGE = 0x51,      /* Owner challenges provider */
+    CYXWIZ_MSG_POS_PROOF = 0x52,          /* Provider responds with proof */
+    CYXWIZ_MSG_POS_VERIFY_OK = 0x53,      /* Owner confirms proof valid */
+    CYXWIZ_MSG_POS_VERIFY_FAIL = 0x54,    /* Owner reports proof invalid */
+    CYXWIZ_MSG_POS_REQUEST_COMMIT = 0x55  /* Owner requests commitment (retry) */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

@@ -364,14 +364,15 @@ static int test_handle_store_req(void)
         return 0;
     }
 
-    /* Should have sent STORE_ACK */
-    if (g_mock_router.send_count != 1) {
+    /* Should have sent STORE_ACK and POS_COMMITMENT */
+    if (g_mock_router.send_count != 2) {
         cyxwiz_storage_destroy(ctx);
         cyxwiz_crypto_destroy(crypto);
         return 0;
     }
 
-    if (g_mock_router.last_data[0] != CYXWIZ_MSG_STORE_ACK) {
+    /* Last message should be POS_COMMITMENT (after STORE_ACK) */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_COMMITMENT) {
         cyxwiz_storage_destroy(ctx);
         cyxwiz_crypto_destroy(crypto);
         return 0;
@@ -666,11 +667,599 @@ static int test_delete_submit(void)
     return 1;
 }
 
+/* ============ Proof of Storage Tests ============ */
+
+/* Test: PoS commitment computation */
+static int test_pos_compute_commitment(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[128]; /* 2 blocks */
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+
+    /* Initialize crypto for hashing */
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Create test data - 128 bytes = 2 blocks */
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i ^ 0xAA);
+    }
+
+    memset(&storage_id, 0x11, sizeof(storage_id));
+
+    /* Compute commitment */
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    /* Verify structure */
+    if (commitment.num_blocks != 2) {
+        return 0;
+    }
+
+    if (cyxwiz_storage_id_compare(&commitment.storage_id, &storage_id) != 0) {
+        return 0;
+    }
+
+    /* Merkle root should be non-zero */
+    int all_zero = 1;
+    for (size_t i = 0; i < CYXWIZ_POS_HASH_SIZE; i++) {
+        if (commitment.merkle_root[i] != 0) {
+            all_zero = 0;
+            break;
+        }
+    }
+    if (all_zero) {
+        return 0;
+    }
+
+    /* Compute again - should be deterministic */
+    cyxwiz_pos_commitment_t commitment2;
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment2);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    if (memcmp(commitment.merkle_root, commitment2.merkle_root, CYXWIZ_POS_HASH_SIZE) != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS commitment with different data produces different roots */
+static int test_pos_different_data(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data1[128], data2[128];
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commit1, commit2;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Create two different data sets */
+    memset(data1, 0xAA, sizeof(data1));
+    memset(data2, 0xBB, sizeof(data2));
+    memset(&storage_id, 0x22, sizeof(storage_id));
+
+    err = cyxwiz_pos_compute_commitment(data1, sizeof(data1), &storage_id, &commit1);
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_pos_compute_commitment(data2, sizeof(data2), &storage_id, &commit2);
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Roots should be different */
+    if (memcmp(commit1.merkle_root, commit2.merkle_root, CYXWIZ_POS_HASH_SIZE) == 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS proof generation */
+static int test_pos_generate_proof(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[256]; /* 4 blocks */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {1,2,3,4,5,6,7,8};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Create test data - 256 bytes = 4 blocks */
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)i;
+    }
+
+    /* Generate proof for block 0 */
+    err = cyxwiz_pos_generate_proof(
+        data, sizeof(data),
+        0, /* block_index */
+        challenge_nonce,
+        proof_buf, sizeof(proof_buf),
+        &proof_len
+    );
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    /* Proof should be non-empty */
+    if (proof_len == 0) {
+        return 0;
+    }
+
+    /* Proof should fit in LoRa MTU */
+    if (proof_len > CYXWIZ_MAX_PACKET_SIZE) {
+        return 0;
+    }
+
+    /* Generate proof for different block */
+    size_t proof_len2;
+    err = cyxwiz_pos_generate_proof(
+        data, sizeof(data),
+        2, /* different block_index */
+        challenge_nonce,
+        proof_buf, sizeof(proof_buf),
+        &proof_len2
+    );
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS proof generation with invalid block index */
+static int test_pos_invalid_block(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[128]; /* 2 blocks */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {0};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(data, 0xAA, sizeof(data));
+
+    /* Try to generate proof for out-of-range block */
+    err = cyxwiz_pos_generate_proof(
+        data, sizeof(data),
+        10, /* invalid block_index - only 2 blocks exist */
+        challenge_nonce,
+        proof_buf, sizeof(proof_buf),
+        &proof_len
+    );
+
+    /* Should fail with invalid block error */
+    if (err != CYXWIZ_ERR_POS_INVALID_BLOCK) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS full verification cycle */
+static int test_pos_verify_cycle(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[192]; /* 3 blocks */
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+    bool valid;
+    cyxwiz_pos_fail_reason_t reason;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Create test data */
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i * 7 + 13);
+    }
+    memset(&storage_id, 0x33, sizeof(storage_id));
+
+    /* Step 1: Provider computes commitment */
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    /* Step 2: Test each block can be verified */
+    for (uint8_t block_idx = 0; block_idx < commitment.num_blocks; block_idx++) {
+        /* Generate proof */
+        err = cyxwiz_pos_generate_proof(
+            data, sizeof(data),
+            block_idx,
+            challenge_nonce,
+            proof_buf, sizeof(proof_buf),
+            &proof_len
+        );
+        if (err != CYXWIZ_OK) {
+            return 0;
+        }
+
+        /* Verify proof */
+        err = cyxwiz_pos_verify_proof(
+            &commitment,
+            proof_buf, proof_len,
+            &valid, &reason
+        );
+        if (err != CYXWIZ_OK) {
+            return 0;
+        }
+
+        if (!valid) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* Test: PoS verification fails with wrong data */
+static int test_pos_verify_wrong_data(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[128];
+    uint8_t wrong_data[128];
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {0};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+    bool valid;
+    cyxwiz_pos_fail_reason_t reason;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Create original data and commitment */
+    memset(data, 0xAA, sizeof(data));
+    memset(&storage_id, 0x44, sizeof(storage_id));
+
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment);
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Generate proof from WRONG data */
+    memset(wrong_data, 0xBB, sizeof(wrong_data));
+    err = cyxwiz_pos_generate_proof(
+        wrong_data, sizeof(wrong_data),
+        0,
+        challenge_nonce,
+        proof_buf, sizeof(proof_buf),
+        &proof_len
+    );
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Verify should FAIL */
+    err = cyxwiz_pos_verify_proof(
+        &commitment,
+        proof_buf, proof_len,
+        &valid, &reason
+    );
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Proof should be invalid */
+    if (valid) {
+        return 0;
+    }
+
+    /* Reason should indicate root mismatch */
+    if (reason != CYXWIZ_POS_FAIL_INVALID_ROOT) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS single block data */
+static int test_pos_single_block(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[32]; /* Less than one full block */
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {0};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+    bool valid;
+    cyxwiz_pos_fail_reason_t reason;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(data, 0xCC, sizeof(data));
+    memset(&storage_id, 0x55, sizeof(storage_id));
+
+    /* Compute commitment - should produce single block */
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment);
+    if (err != CYXWIZ_OK) return 0;
+
+    if (commitment.num_blocks != 1) {
+        return 0;
+    }
+
+    /* Generate and verify proof */
+    err = cyxwiz_pos_generate_proof(
+        data, sizeof(data),
+        0,
+        challenge_nonce,
+        proof_buf, sizeof(proof_buf),
+        &proof_len
+    );
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_pos_verify_proof(
+        &commitment,
+        proof_buf, proof_len,
+        &valid, &reason
+    );
+    if (err != CYXWIZ_OK) return 0;
+
+    if (!valid) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test: PoS maximum blocks */
+static int test_pos_max_blocks(void)
+{
+    cyxwiz_error_t err;
+    uint8_t data[CYXWIZ_POS_BLOCK_SIZE * CYXWIZ_POS_MAX_BLOCKS]; /* 32 blocks */
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE] = {0xDE, 0xAD};
+    uint8_t proof_buf[256];
+    size_t proof_len;
+    bool valid;
+    cyxwiz_pos_fail_reason_t reason;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    /* Fill with pattern */
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i % 256);
+    }
+    memset(&storage_id, 0x66, sizeof(storage_id));
+
+    /* Compute commitment */
+    err = cyxwiz_pos_compute_commitment(data, sizeof(data), &storage_id, &commitment);
+    if (err != CYXWIZ_OK) return 0;
+
+    if (commitment.num_blocks != CYXWIZ_POS_MAX_BLOCKS) {
+        return 0;
+    }
+
+    /* Test first, middle, and last blocks */
+    uint8_t test_blocks[] = {0, CYXWIZ_POS_MAX_BLOCKS / 2, CYXWIZ_POS_MAX_BLOCKS - 1};
+    for (size_t i = 0; i < sizeof(test_blocks); i++) {
+        err = cyxwiz_pos_generate_proof(
+            data, sizeof(data),
+            test_blocks[i],
+            challenge_nonce,
+            proof_buf, sizeof(proof_buf),
+            &proof_len
+        );
+        if (err != CYXWIZ_OK) return 0;
+
+        /* Ensure proof fits LoRa MTU */
+        if (proof_len > CYXWIZ_MAX_PACKET_SIZE) {
+            return 0;
+        }
+
+        err = cyxwiz_pos_verify_proof(
+            &commitment,
+            proof_buf, proof_len,
+            &valid, &reason
+        );
+        if (err != CYXWIZ_OK) return 0;
+
+        if (!valid) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* Test: PoS fail reason names */
+static int test_pos_fail_reason_names(void)
+{
+    const char *name;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_INVALID_ROOT);
+    if (strcmp(name, "invalid_root") != 0) return 0;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_INVALID_BLOCK);
+    if (strcmp(name, "invalid_block") != 0) return 0;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_INVALID_PATH);
+    if (strcmp(name, "invalid_path") != 0) return 0;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_WRONG_NONCE);
+    if (strcmp(name, "wrong_nonce") != 0) return 0;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_TIMEOUT);
+    if (strcmp(name, "timeout") != 0) return 0;
+
+    name = cyxwiz_pos_fail_reason_name(CYXWIZ_POS_FAIL_NOT_FOUND);
+    if (strcmp(name, "not_found") != 0) return 0;
+
+    return 1;
+}
+
+/* Test: PoS commitment message handling */
+static int test_pos_handle_commitment(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, provider_id;
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_node_id_t providers[2];
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 2, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x09, sizeof(local_id));
+    memset(&provider_id, 0xF1, sizeof(provider_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Create a store operation first (to have context for commitment) */
+    memset(&providers[0], 0xF1, sizeof(cyxwiz_node_id_t));
+    memset(&providers[1], 0xF2, sizeof(cyxwiz_node_id_t));
+
+    uint8_t data[] = "Test data for PoS";
+    err = cyxwiz_storage_store(ctx, providers, 2, 2, data, sizeof(data) - 1,
+                               3600, &storage_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Build a POS_COMMITMENT message */
+    cyxwiz_pos_commitment_msg_t msg;
+    msg.type = CYXWIZ_MSG_POS_COMMITMENT;
+    memcpy(msg.storage_id, storage_id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memset(msg.merkle_root, 0xAB, CYXWIZ_POS_HASH_SIZE);
+    msg.num_blocks = 1;
+
+    /* Reset mock */
+    g_mock_router.send_count = 0;
+
+    /* Handle the commitment message */
+    err = cyxwiz_storage_handle_message(ctx, &provider_id,
+                                         (uint8_t *)&msg, sizeof(msg));
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Provider sends commitment after STORE_ACK */
+static int test_pos_provider_sends_commitment(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_t client_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x0A, sizeof(local_id));
+    memset(&client_id, 0xC1, sizeof(client_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Enable provider mode */
+    err = cyxwiz_storage_enable_provider(ctx, 1024 * 1024, 3600);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Build a STORE_REQ message */
+    uint8_t msg[256];
+    cyxwiz_store_req_msg_t *req = (cyxwiz_store_req_msg_t *)msg;
+    req->type = CYXWIZ_MSG_STORE_REQ;
+    memset(req->storage_id, 0xDD, CYXWIZ_STORAGE_ID_SIZE);
+    req->share_index = 1;
+    req->total_shares = 3;
+    req->threshold = 2;
+    req->ttl_seconds = 3600;
+    req->total_chunks = 0;
+    req->payload_len = 64; /* Data for PoS commitment */
+
+    /* Add a share */
+    size_t offset = sizeof(cyxwiz_store_req_msg_t);
+    cyxwiz_share_t share;
+    memset(&share, 0xEE, sizeof(share));
+    share.party_id = 1;
+    memcpy(msg + offset, &share, sizeof(share));
+    offset += sizeof(share);
+
+    /* Add encrypted payload */
+    uint8_t encrypted[64];
+    memset(encrypted, 0xFF, sizeof(encrypted));
+    memcpy(msg + offset, encrypted, sizeof(encrypted));
+    offset += sizeof(encrypted);
+
+    /* Reset mock */
+    g_mock_router.send_count = 0;
+
+    /* Handle the message */
+    err = cyxwiz_storage_handle_message(ctx, &client_id, msg, offset);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Should have sent 2 messages: STORE_ACK and POS_COMMITMENT */
+    if (g_mock_router.send_count != 2) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Last message should be POS_COMMITMENT */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_COMMITMENT) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
 int main(void)
 {
     printf("\nCyxWiz Storage Tests\n");
     printf("====================\n\n");
 
+    /* Core storage tests */
     TEST(context_create);
     TEST(provider_mode);
     TEST(storage_id);
@@ -681,6 +1270,20 @@ int main(void)
     TEST(retrieve_submit);
     TEST(poll_timeout);
     TEST(delete_submit);
+
+    /* Proof of Storage tests */
+    printf("\n  Proof of Storage:\n");
+    TEST(pos_compute_commitment);
+    TEST(pos_different_data);
+    TEST(pos_generate_proof);
+    TEST(pos_invalid_block);
+    TEST(pos_verify_cycle);
+    TEST(pos_verify_wrong_data);
+    TEST(pos_single_block);
+    TEST(pos_max_blocks);
+    TEST(pos_fail_reason_names);
+    TEST(pos_handle_commitment);
+    TEST(pos_provider_sends_commitment);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

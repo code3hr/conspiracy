@@ -31,6 +31,16 @@ typedef struct cyxwiz_peer_table cyxwiz_peer_table_t;
 #define CYXWIZ_STORAGE_DEFAULT_TTL_SEC 3600  /* 1 hour default TTL */
 #define CYXWIZ_STORAGE_MAX_TTL_SEC 86400     /* 24 hour max TTL */
 
+/* ============ Proof of Storage Constants ============ */
+
+#define CYXWIZ_POS_BLOCK_SIZE 64            /* 64-byte blocks (fits LoRa) */
+#define CYXWIZ_POS_MAX_BLOCKS 32            /* Max blocks (2KB data) */
+#define CYXWIZ_POS_HASH_SIZE 32             /* BLAKE2b-256 output */
+#define CYXWIZ_POS_MAX_PROOF_DEPTH 5        /* log2(32) = 5 */
+#define CYXWIZ_POS_CHALLENGE_SIZE 8         /* Nonce size */
+#define CYXWIZ_POS_CHALLENGE_TIMEOUT_MS 30000 /* 30 second timeout */
+#define CYXWIZ_MAX_POS_CHALLENGES 8         /* Max concurrent challenges */
+
 /* ============ Storage ID ============ */
 
 typedef struct {
@@ -64,6 +74,37 @@ typedef enum {
     CYXWIZ_STORAGE_REJECT_INVALID = 0x04,     /* Invalid request format */
     CYXWIZ_STORAGE_REJECT_DUPLICATE = 0x05    /* ID already exists */
 } cyxwiz_storage_reject_reason_t;
+
+/* ============ Proof of Storage Types ============ */
+
+/* PoS verification failure reasons */
+typedef enum {
+    CYXWIZ_POS_FAIL_INVALID_ROOT = 0x01,   /* Merkle root mismatch */
+    CYXWIZ_POS_FAIL_INVALID_BLOCK = 0x02,  /* Block hash mismatch */
+    CYXWIZ_POS_FAIL_INVALID_PATH = 0x03,   /* Merkle path invalid */
+    CYXWIZ_POS_FAIL_WRONG_NONCE = 0x04,    /* Challenge nonce mismatch */
+    CYXWIZ_POS_FAIL_TIMEOUT = 0x05,        /* Response too slow */
+    CYXWIZ_POS_FAIL_NOT_FOUND = 0x06       /* Storage ID not found */
+} cyxwiz_pos_fail_reason_t;
+
+/* PoS commitment - Merkle root of data blocks */
+typedef struct {
+    uint8_t merkle_root[CYXWIZ_POS_HASH_SIZE];  /* 32 bytes */
+    uint8_t num_blocks;                          /* Number of data blocks */
+    cyxwiz_storage_id_t storage_id;              /* 8 bytes - reference */
+} cyxwiz_pos_commitment_t;
+
+/* PoS challenge state (owner-side tracking) */
+typedef struct {
+    cyxwiz_storage_id_t storage_id;              /* Which data */
+    cyxwiz_node_id_t provider_id;                /* Which provider */
+    cyxwiz_pos_commitment_t commitment;          /* Stored commitment */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE]; /* Freshness nonce */
+    uint8_t block_index;                         /* Challenged block */
+    uint8_t sequence;                            /* Challenge sequence number */
+    uint64_t sent_at;                            /* When challenge was sent */
+    bool active;                                 /* Is this slot in use? */
+} cyxwiz_pos_challenge_state_t;
 
 /* ============ Provider Slot (tracks one provider in an operation) ============ */
 
@@ -122,6 +163,10 @@ typedef struct {
     /* Flags */
     bool is_owner;                        /* Are we the data owner? */
     bool valid;                           /* Is this slot in use? */
+
+    /* Proof of Storage - commitments received from providers */
+    cyxwiz_pos_commitment_t pos_commitments[CYXWIZ_MAX_STORAGE_PROVIDERS];
+    uint8_t pos_commitments_received;     /* Count of commitments received */
 } cyxwiz_storage_op_t;
 
 /* ============ Stored Item (provider-side) ============ */
@@ -144,6 +189,10 @@ typedef struct {
     /* TTL */
     uint64_t expires_at;                  /* Absolute expiry timestamp */
     uint64_t stored_at;                   /* When stored */
+
+    /* Proof of Storage commitment */
+    cyxwiz_pos_commitment_t pos_commitment;
+    bool has_pos_commitment;              /* Was commitment computed? */
 
     bool valid;
 } cyxwiz_stored_item_t;
@@ -243,6 +292,67 @@ typedef struct {
     uint32_t max_ttl_seconds;             /* Maximum TTL supported */
     uint8_t current_load;                 /* 0-100% load */
 } cyxwiz_storage_announce_msg_t;
+
+/* ============ Proof of Storage Messages ============ */
+
+/* POS_COMMITMENT (0x50) - Provider -> Owner after successful storage */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_COMMITMENT */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t merkle_root[CYXWIZ_POS_HASH_SIZE];   /* 32 bytes */
+    uint8_t num_blocks;                          /* Number of data blocks */
+} cyxwiz_pos_commitment_msg_t;
+/* Total: 42 bytes */
+
+/* POS_CHALLENGE (0x51) - Owner -> Provider */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_CHALLENGE */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t block_index;                         /* Which block to prove */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE]; /* 8 bytes freshness */
+    uint8_t sequence;                            /* Challenge sequence number */
+} cyxwiz_pos_challenge_msg_t;
+/* Total: 19 bytes */
+
+/* POS_PROOF (0x52) - Provider -> Owner
+ * Variable length: header + block_data + proof_path
+ * Max size: 21 + 64 + (5 * 32) = 245 bytes (fits LoRa MTU) */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_PROOF */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t block_index;                         /* Which block */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE]; /* 8 bytes - echo back */
+    uint8_t block_len;                           /* Actual block length */
+    uint8_t proof_depth;                         /* Number of proof path entries */
+    uint8_t sibling_positions;                   /* Bitmap: 0=left, 1=right */
+    /* Variable: uint8_t block_data[block_len] follows */
+    /* Variable: uint8_t proof_path[proof_depth][32] follows */
+} cyxwiz_pos_proof_msg_t;
+/* Header: 21 bytes */
+
+/* POS_VERIFY_OK (0x53) - Owner -> Provider */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_VERIFY_OK */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t sequence;                            /* Which challenge */
+} cyxwiz_pos_verify_ok_msg_t;
+/* Total: 10 bytes */
+
+/* POS_VERIFY_FAIL (0x54) - Owner -> Provider */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_VERIFY_FAIL */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t sequence;                            /* Which challenge */
+    uint8_t reason;                              /* cyxwiz_pos_fail_reason_t */
+} cyxwiz_pos_verify_fail_msg_t;
+/* Total: 11 bytes */
+
+/* POS_REQUEST_COMMIT (0x55) - Owner -> Provider (retry) */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_REQUEST_COMMIT */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+} cyxwiz_pos_request_commit_msg_t;
+/* Total: 9 bytes */
 
 #pragma pack(pop)
 
@@ -490,5 +600,131 @@ void cyxwiz_storage_id_generate(
     size_t data_len,
     cyxwiz_storage_id_t *id_out
 );
+
+/* ============ Proof of Storage API ============ */
+
+/*
+ * Callback for PoS verification results
+ *
+ * @param ctx         Storage context
+ * @param storage_id  Storage ID that was challenged
+ * @param provider_id Provider that was challenged
+ * @param valid       true if proof was valid, false otherwise
+ * @param reason      If invalid, the failure reason
+ * @param user_data   User-provided context
+ */
+typedef void (*cyxwiz_pos_result_cb_t)(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id,
+    bool valid,
+    cyxwiz_pos_fail_reason_t reason,
+    void *user_data
+);
+
+/*
+ * Set PoS result callback
+ */
+void cyxwiz_pos_set_result_callback(
+    cyxwiz_storage_ctx_t *ctx,
+    cyxwiz_pos_result_cb_t callback,
+    void *user_data
+);
+
+/*
+ * Compute Merkle commitment for data (provider-side)
+ *
+ * @param data        Encrypted data
+ * @param data_len    Length of data
+ * @param storage_id  Storage ID for reference
+ * @param commitment  Output commitment structure
+ * @return            CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_compute_commitment(
+    const uint8_t *data,
+    size_t data_len,
+    const cyxwiz_storage_id_t *storage_id,
+    cyxwiz_pos_commitment_t *commitment
+);
+
+/*
+ * Store a commitment received from a provider (owner-side)
+ *
+ * @param ctx         Storage context
+ * @param storage_id  Storage ID
+ * @param provider_id Provider that sent commitment
+ * @param commitment  The commitment to store
+ * @return            CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_store_commitment(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id,
+    const cyxwiz_pos_commitment_t *commitment
+);
+
+/*
+ * Issue a PoS challenge to a provider (owner-side)
+ *
+ * @param ctx         Storage context
+ * @param storage_id  Storage ID to challenge
+ * @param provider_id Provider to challenge
+ * @return            CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_challenge(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id
+);
+
+/*
+ * Generate a proof for a challenged block (provider-side)
+ *
+ * @param data            Encrypted data
+ * @param data_len        Length of data
+ * @param block_index     Which block to prove
+ * @param challenge_nonce The challenge nonce to echo
+ * @param proof_buf       Output buffer for proof message
+ * @param proof_buf_size  Size of output buffer
+ * @param proof_len       Output: actual proof length
+ * @return                CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_generate_proof(
+    const uint8_t *data,
+    size_t data_len,
+    uint8_t block_index,
+    const uint8_t *challenge_nonce,
+    uint8_t *proof_buf,
+    size_t proof_buf_size,
+    size_t *proof_len
+);
+
+/*
+ * Verify a proof received from a provider (owner-side)
+ *
+ * @param commitment      The stored commitment to verify against
+ * @param proof_data      Raw proof message data
+ * @param proof_len       Length of proof message
+ * @param valid_out       Output: true if valid
+ * @param reason_out      Output: failure reason if invalid
+ * @return                CYXWIZ_OK on success (even if proof is invalid)
+ */
+cyxwiz_error_t cyxwiz_pos_verify_proof(
+    const cyxwiz_pos_commitment_t *commitment,
+    const uint8_t *proof_data,
+    size_t proof_len,
+    bool *valid_out,
+    cyxwiz_pos_fail_reason_t *reason_out
+);
+
+/*
+ * Get number of active PoS challenges
+ */
+size_t cyxwiz_pos_challenge_count(const cyxwiz_storage_ctx_t *ctx);
+
+/*
+ * Get human-readable PoS failure reason name
+ */
+const char *cyxwiz_pos_fail_reason_name(cyxwiz_pos_fail_reason_t reason);
 
 #endif /* CYXWIZ_STORAGE_H */

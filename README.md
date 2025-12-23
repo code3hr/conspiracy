@@ -310,7 +310,8 @@ cyxwiz/
 ### Phase 3: Protocol Layer
 - [x] Compute protocol (job marketplace with MAC verification)
 - [x] Storage protocol (CyxCloud distributed storage with K-of-N threshold)
-- [ ] Privacy protocol (zero-knowledge proofs)
+- [x] Proof of Storage (Merkle-based storage verification)
+- [ ] Privacy protocol (zero-knowledge proofs, identity privacy)
 - [ ] Consensus mechanism
 
 ### Phase 4: Production

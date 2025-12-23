@@ -42,6 +42,12 @@ struct cyxwiz_storage_ctx {
     cyxwiz_storage_complete_cb_t on_complete;
     void *complete_user_data;
 
+    /* Proof of Storage */
+    cyxwiz_pos_challenge_state_t pos_challenges[CYXWIZ_MAX_POS_CHALLENGES];
+    size_t pos_challenge_count;
+    cyxwiz_pos_result_cb_t on_pos_result;
+    void *pos_result_user_data;
+
     /* State */
     bool running;
     uint64_t last_poll;
@@ -120,6 +126,75 @@ static cyxwiz_error_t try_reconstruct(cyxwiz_storage_ctx_t *ctx, cyxwiz_storage_
 static void complete_operation(cyxwiz_storage_ctx_t *ctx, cyxwiz_storage_op_t *op,
                                const uint8_t *data, size_t data_len);
 
+/* Proof of Storage helpers */
+static void merkle_hash_block(const uint8_t *block, size_t len, uint8_t *out);
+static size_t merkle_build_tree(const uint8_t *data, size_t data_len,
+                                 uint8_t tree[][CYXWIZ_POS_HASH_SIZE],
+                                 size_t *num_leaves_out);
+static void merkle_get_proof(const uint8_t tree[][CYXWIZ_POS_HASH_SIZE],
+                              size_t tree_size, size_t num_leaves,
+                              uint8_t block_index,
+                              uint8_t path[][CYXWIZ_POS_HASH_SIZE],
+                              uint8_t *depth_out, uint8_t *positions_out);
+static bool merkle_verify_path(const uint8_t *block_data, size_t block_len,
+                                uint8_t block_index,
+                                const uint8_t path[][CYXWIZ_POS_HASH_SIZE],
+                                uint8_t depth, uint8_t sibling_positions,
+                                const uint8_t *expected_root);
+
+/* PoS message handlers */
+static cyxwiz_error_t handle_pos_commitment(cyxwiz_storage_ctx_t *ctx,
+                                             const cyxwiz_node_id_t *from,
+                                             const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_challenge(cyxwiz_storage_ctx_t *ctx,
+                                            const cyxwiz_node_id_t *from,
+                                            const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_proof(cyxwiz_storage_ctx_t *ctx,
+                                        const cyxwiz_node_id_t *from,
+                                        const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_verify_ok(cyxwiz_storage_ctx_t *ctx,
+                                            const cyxwiz_node_id_t *from,
+                                            const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_verify_fail(cyxwiz_storage_ctx_t *ctx,
+                                              const cyxwiz_node_id_t *from,
+                                              const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_request_commit(cyxwiz_storage_ctx_t *ctx,
+                                                 const cyxwiz_node_id_t *from,
+                                                 const uint8_t *data, size_t len);
+
+/* PoS message senders */
+static cyxwiz_error_t send_pos_commitment(cyxwiz_storage_ctx_t *ctx,
+                                           const cyxwiz_node_id_t *to,
+                                           const cyxwiz_pos_commitment_t *commitment);
+static cyxwiz_error_t send_pos_challenge_msg(cyxwiz_storage_ctx_t *ctx,
+                                              const cyxwiz_node_id_t *to,
+                                              const cyxwiz_storage_id_t *storage_id,
+                                              uint8_t block_index,
+                                              const uint8_t *nonce,
+                                              uint8_t sequence);
+static cyxwiz_error_t send_pos_proof_msg(cyxwiz_storage_ctx_t *ctx,
+                                          const cyxwiz_node_id_t *to,
+                                          cyxwiz_stored_item_t *item,
+                                          uint8_t block_index,
+                                          const uint8_t *nonce);
+static cyxwiz_error_t send_pos_verify_ok_msg(cyxwiz_storage_ctx_t *ctx,
+                                              const cyxwiz_node_id_t *to,
+                                              const cyxwiz_storage_id_t *storage_id,
+                                              uint8_t sequence);
+static cyxwiz_error_t send_pos_verify_fail_msg(cyxwiz_storage_ctx_t *ctx,
+                                                const cyxwiz_node_id_t *to,
+                                                const cyxwiz_storage_id_t *storage_id,
+                                                uint8_t sequence,
+                                                cyxwiz_pos_fail_reason_t reason);
+
+/* PoS challenge state helpers */
+static cyxwiz_pos_challenge_state_t *find_pos_challenge(cyxwiz_storage_ctx_t *ctx,
+                                                         const cyxwiz_storage_id_t *storage_id,
+                                                         const cyxwiz_node_id_t *provider_id);
+static cyxwiz_pos_challenge_state_t *alloc_pos_challenge(cyxwiz_storage_ctx_t *ctx);
+static void free_pos_challenge(cyxwiz_storage_ctx_t *ctx,
+                                cyxwiz_pos_challenge_state_t *challenge);
+
 /* External router function */
 extern cyxwiz_error_t cyxwiz_router_send(
     cyxwiz_router_t *router,
@@ -180,12 +255,20 @@ cyxwiz_error_t cyxwiz_storage_create(
     s->running = true;
     s->last_poll = 0;
 
+    /* PoS initialization */
+    s->pos_challenge_count = 0;
+    s->on_pos_result = NULL;
+    s->pos_result_user_data = NULL;
+
     /* Initialize all slots as invalid */
     for (size_t i = 0; i < CYXWIZ_MAX_ACTIVE_STORAGE_OPS; i++) {
         s->operations[i].valid = false;
     }
     for (size_t i = 0; i < CYXWIZ_MAX_STORED_ITEMS; i++) {
         s->stored_items[i].valid = false;
+    }
+    for (size_t i = 0; i < CYXWIZ_MAX_POS_CHALLENGES; i++) {
+        s->pos_challenges[i].active = false;
     }
 
     CYXWIZ_INFO("Created storage context");
@@ -633,6 +716,21 @@ cyxwiz_error_t cyxwiz_storage_handle_message(
             return handle_delete_req(ctx, from, data, len);
         case CYXWIZ_MSG_DELETE_ACK:
             return handle_delete_ack(ctx, from, data, len);
+
+        /* Proof of Storage messages */
+        case CYXWIZ_MSG_POS_COMMITMENT:
+            return handle_pos_commitment(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_CHALLENGE:
+            return handle_pos_challenge(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_PROOF:
+            return handle_pos_proof(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_VERIFY_OK:
+            return handle_pos_verify_ok(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_VERIFY_FAIL:
+            return handle_pos_verify_fail(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_REQUEST_COMMIT:
+            return handle_pos_request_commit(ctx, from, data, len);
+
         default:
             CYXWIZ_DEBUG("Unknown storage message type: 0x%02X", msg_type);
             return CYXWIZ_ERR_INVALID;
@@ -742,6 +840,15 @@ static cyxwiz_error_t handle_store_req(
         CYXWIZ_DEBUG("Stored item %s (share %u, %u bytes)",
                      id_hex, item->share_index, payload_len);
         send_store_ack(ctx, from, &storage_id, item->share_index, item->expires_at);
+
+        /* Compute and send PoS commitment */
+        cyxwiz_error_t pos_err = cyxwiz_pos_compute_commitment(
+            item->encrypted_data, item->encrypted_len,
+            &storage_id, &item->pos_commitment);
+        if (pos_err == CYXWIZ_OK) {
+            item->has_pos_commitment = true;
+            send_pos_commitment(ctx, from, &item->pos_commitment);
+        }
     } else {
         /* Wait for chunks */
         CYXWIZ_DEBUG("Awaiting %u chunks for item %s", msg->total_chunks, id_hex);
@@ -805,6 +912,15 @@ static cyxwiz_error_t handle_store_chunk(
                      id_hex, item->share_index, item->encrypted_len);
 
         send_store_ack(ctx, from, &storage_id, item->share_index, item->expires_at);
+
+        /* Compute and send PoS commitment */
+        cyxwiz_error_t pos_err = cyxwiz_pos_compute_commitment(
+            item->encrypted_data, item->encrypted_len,
+            &storage_id, &item->pos_commitment);
+        if (pos_err == CYXWIZ_OK) {
+            item->has_pos_commitment = true;
+            send_pos_commitment(ctx, from, &item->pos_commitment);
+        }
     }
 
     return CYXWIZ_OK;
@@ -1561,4 +1677,864 @@ void cyxwiz_storage_id_generate(
 
     /* Take first 8 bytes as ID */
     memcpy(id_out->bytes, hash, CYXWIZ_STORAGE_ID_SIZE);
+}
+
+/* ============ Proof of Storage - Merkle Tree Functions ============ */
+
+/*
+ * Hash a single block using BLAKE2b-256
+ */
+static void merkle_hash_block(const uint8_t *block, size_t len, uint8_t *out)
+{
+    cyxwiz_crypto_hash(block, len, out, CYXWIZ_POS_HASH_SIZE);
+}
+
+/*
+ * Round up to next power of 2
+ */
+static size_t next_power_of_2(size_t n)
+{
+    if (n == 0) return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return n + 1;
+}
+
+/*
+ * Build a complete Merkle tree from data blocks
+ * Returns total tree size (nodes), sets num_leaves_out
+ * Tree is stored in array form: leaves at indices [tree_size/2, tree_size-1]
+ */
+static size_t merkle_build_tree(
+    const uint8_t *data,
+    size_t data_len,
+    uint8_t tree[][CYXWIZ_POS_HASH_SIZE],
+    size_t *num_leaves_out)
+{
+    /* Calculate number of blocks */
+    size_t num_blocks = (data_len + CYXWIZ_POS_BLOCK_SIZE - 1) / CYXWIZ_POS_BLOCK_SIZE;
+    if (num_blocks == 0) num_blocks = 1;
+    if (num_blocks > CYXWIZ_POS_MAX_BLOCKS) num_blocks = CYXWIZ_POS_MAX_BLOCKS;
+
+    /* Pad to power of 2 for complete binary tree */
+    size_t num_leaves = next_power_of_2(num_blocks);
+    size_t tree_size = num_leaves * 2;
+
+    *num_leaves_out = num_leaves;
+
+    /* Hash data blocks into leaf positions */
+    for (size_t i = 0; i < num_leaves; i++) {
+        size_t leaf_idx = num_leaves + i; /* Leaves at [num_leaves, 2*num_leaves-1] */
+
+        if (i < num_blocks) {
+            size_t offset = i * CYXWIZ_POS_BLOCK_SIZE;
+            size_t block_len = data_len - offset;
+            if (block_len > CYXWIZ_POS_BLOCK_SIZE) {
+                block_len = CYXWIZ_POS_BLOCK_SIZE;
+            }
+            merkle_hash_block(data + offset, block_len, tree[leaf_idx]);
+        } else {
+            /* Padding with zeros for empty leaves */
+            memset(tree[leaf_idx], 0, CYXWIZ_POS_HASH_SIZE);
+        }
+    }
+
+    /* Build internal nodes bottom-up */
+    for (size_t i = num_leaves - 1; i >= 1; i--) {
+        size_t left = i * 2;
+        size_t right = i * 2 + 1;
+
+        /* Hash(left || right) */
+        uint8_t combined[CYXWIZ_POS_HASH_SIZE * 2];
+        memcpy(combined, tree[left], CYXWIZ_POS_HASH_SIZE);
+        memcpy(combined + CYXWIZ_POS_HASH_SIZE, tree[right], CYXWIZ_POS_HASH_SIZE);
+        merkle_hash_block(combined, CYXWIZ_POS_HASH_SIZE * 2, tree[i]);
+    }
+
+    return tree_size;
+}
+
+/*
+ * Get proof path for a specific block index
+ * path contains sibling hashes, positions indicates left(0) or right(1)
+ */
+static void merkle_get_proof(
+    const uint8_t tree[][CYXWIZ_POS_HASH_SIZE],
+    size_t tree_size,
+    size_t num_leaves,
+    uint8_t block_index,
+    uint8_t path[][CYXWIZ_POS_HASH_SIZE],
+    uint8_t *depth_out,
+    uint8_t *positions_out)
+{
+    CYXWIZ_UNUSED(tree_size);
+
+    uint8_t depth = 0;
+    uint8_t positions = 0;
+
+    /* Start at leaf */
+    size_t idx = num_leaves + block_index;
+
+    /* Walk up to root (but not including root at index 1) */
+    while (idx > 1) {
+        size_t sibling_idx;
+        if (idx % 2 == 0) {
+            /* We're left child, sibling is right */
+            sibling_idx = idx + 1;
+            positions |= (1 << depth); /* Sibling on right */
+        } else {
+            /* We're right child, sibling is left */
+            sibling_idx = idx - 1;
+            /* Sibling on left, bit stays 0 */
+        }
+
+        memcpy(path[depth], tree[sibling_idx], CYXWIZ_POS_HASH_SIZE);
+        depth++;
+
+        /* Move to parent */
+        idx = idx / 2;
+    }
+
+    *depth_out = depth;
+    *positions_out = positions;
+}
+
+/*
+ * Verify a Merkle proof by reconstructing the root
+ */
+static bool merkle_verify_path(
+    const uint8_t *block_data,
+    size_t block_len,
+    uint8_t block_index,
+    const uint8_t path[][CYXWIZ_POS_HASH_SIZE],
+    uint8_t depth,
+    uint8_t sibling_positions,
+    const uint8_t *expected_root)
+{
+    CYXWIZ_UNUSED(block_index);
+
+    /* Start with hash of the block */
+    uint8_t current[CYXWIZ_POS_HASH_SIZE];
+    merkle_hash_block(block_data, block_len, current);
+
+    /* Walk up the tree */
+    for (uint8_t i = 0; i < depth; i++) {
+        uint8_t combined[CYXWIZ_POS_HASH_SIZE * 2];
+
+        if (sibling_positions & (1 << i)) {
+            /* Sibling on right: current || sibling */
+            memcpy(combined, current, CYXWIZ_POS_HASH_SIZE);
+            memcpy(combined + CYXWIZ_POS_HASH_SIZE, path[i], CYXWIZ_POS_HASH_SIZE);
+        } else {
+            /* Sibling on left: sibling || current */
+            memcpy(combined, path[i], CYXWIZ_POS_HASH_SIZE);
+            memcpy(combined + CYXWIZ_POS_HASH_SIZE, current, CYXWIZ_POS_HASH_SIZE);
+        }
+
+        merkle_hash_block(combined, CYXWIZ_POS_HASH_SIZE * 2, current);
+    }
+
+    /* Compare computed root with expected */
+    return cyxwiz_secure_compare(current, expected_root, CYXWIZ_POS_HASH_SIZE) == 0;
+}
+
+/* ============ Proof of Storage - Challenge State Helpers ============ */
+
+static cyxwiz_pos_challenge_state_t *find_pos_challenge(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id)
+{
+    for (size_t i = 0; i < CYXWIZ_MAX_POS_CHALLENGES; i++) {
+        if (ctx->pos_challenges[i].active &&
+            cyxwiz_storage_id_compare(&ctx->pos_challenges[i].storage_id, storage_id) == 0 &&
+            memcmp(&ctx->pos_challenges[i].provider_id, provider_id, sizeof(cyxwiz_node_id_t)) == 0) {
+            return &ctx->pos_challenges[i];
+        }
+    }
+    return NULL;
+}
+
+static cyxwiz_pos_challenge_state_t *alloc_pos_challenge(cyxwiz_storage_ctx_t *ctx)
+{
+    for (size_t i = 0; i < CYXWIZ_MAX_POS_CHALLENGES; i++) {
+        if (!ctx->pos_challenges[i].active) {
+            memset(&ctx->pos_challenges[i], 0, sizeof(cyxwiz_pos_challenge_state_t));
+            ctx->pos_challenges[i].active = true;
+            ctx->pos_challenge_count++;
+            return &ctx->pos_challenges[i];
+        }
+    }
+    return NULL;
+}
+
+static void free_pos_challenge(cyxwiz_storage_ctx_t *ctx, cyxwiz_pos_challenge_state_t *challenge)
+{
+    if (challenge == NULL || !challenge->active) {
+        return;
+    }
+    cyxwiz_secure_zero(challenge, sizeof(cyxwiz_pos_challenge_state_t));
+    challenge->active = false;
+    ctx->pos_challenge_count--;
+}
+
+/* ============ Proof of Storage - Message Senders ============ */
+
+static cyxwiz_error_t send_pos_commitment(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_pos_commitment_t *commitment)
+{
+    cyxwiz_pos_commitment_msg_t msg;
+    msg.type = CYXWIZ_MSG_POS_COMMITMENT;
+    memcpy(msg.storage_id, commitment->storage_id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memcpy(msg.merkle_root, commitment->merkle_root, CYXWIZ_POS_HASH_SIZE);
+    msg.num_blocks = commitment->num_blocks;
+
+    return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+static cyxwiz_error_t send_pos_challenge_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    uint8_t block_index,
+    const uint8_t *nonce,
+    uint8_t sequence)
+{
+    cyxwiz_pos_challenge_msg_t msg;
+    msg.type = CYXWIZ_MSG_POS_CHALLENGE;
+    memcpy(msg.storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg.block_index = block_index;
+    memcpy(msg.challenge_nonce, nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+    msg.sequence = sequence;
+
+    return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+static cyxwiz_error_t send_pos_proof_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    cyxwiz_stored_item_t *item,
+    uint8_t block_index,
+    const uint8_t *nonce)
+{
+    /* Build Merkle tree */
+    uint8_t tree[CYXWIZ_POS_MAX_BLOCKS * 2][CYXWIZ_POS_HASH_SIZE];
+    size_t num_leaves;
+    size_t tree_size = merkle_build_tree(item->encrypted_data, item->encrypted_len,
+                                         tree, &num_leaves);
+
+    /* Get proof path */
+    uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
+    uint8_t depth, positions;
+    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+
+    /* Extract block data */
+    size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
+    size_t block_len = item->encrypted_len - block_offset;
+    if (block_len > CYXWIZ_POS_BLOCK_SIZE) {
+        block_len = CYXWIZ_POS_BLOCK_SIZE;
+    }
+
+    /* Build message */
+    uint8_t buf[256];
+    cyxwiz_pos_proof_msg_t *msg = (cyxwiz_pos_proof_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_POS_PROOF;
+    memcpy(msg->storage_id, item->id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->block_index = block_index;
+    memcpy(msg->challenge_nonce, nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+    msg->block_len = (uint8_t)block_len;
+    msg->proof_depth = depth;
+    msg->sibling_positions = positions;
+
+    /* Append block data */
+    size_t offset = sizeof(cyxwiz_pos_proof_msg_t);
+    memcpy(buf + offset, item->encrypted_data + block_offset, block_len);
+    offset += block_len;
+
+    /* Append proof path */
+    for (uint8_t i = 0; i < depth; i++) {
+        memcpy(buf + offset, path[i], CYXWIZ_POS_HASH_SIZE);
+        offset += CYXWIZ_POS_HASH_SIZE;
+    }
+
+    return cyxwiz_router_send(ctx->router, to, buf, offset);
+}
+
+static cyxwiz_error_t send_pos_verify_ok_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    uint8_t sequence)
+{
+    cyxwiz_pos_verify_ok_msg_t msg;
+    msg.type = CYXWIZ_MSG_POS_VERIFY_OK;
+    memcpy(msg.storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg.sequence = sequence;
+
+    return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+static cyxwiz_error_t send_pos_verify_fail_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    uint8_t sequence,
+    cyxwiz_pos_fail_reason_t reason)
+{
+    cyxwiz_pos_verify_fail_msg_t msg;
+    msg.type = CYXWIZ_MSG_POS_VERIFY_FAIL;
+    memcpy(msg.storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg.sequence = sequence;
+    msg.reason = (uint8_t)reason;
+
+    return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+/* ============ Proof of Storage - Message Handlers ============ */
+
+static cyxwiz_error_t handle_pos_commitment(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (len < sizeof(cyxwiz_pos_commitment_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_commitment_msg_t *msg = (const cyxwiz_pos_commitment_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    /* Find the storage operation */
+    cyxwiz_storage_op_t *op = find_operation(ctx, &storage_id);
+    if (op == NULL || op->op_type != CYXWIZ_STORAGE_OP_STORE) {
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Find the provider slot */
+    for (size_t i = 0; i < op->num_shares; i++) {
+        if (memcmp(&op->providers[i].provider_id, from, sizeof(cyxwiz_node_id_t)) == 0) {
+            /* Store the commitment */
+            memcpy(op->pos_commitments[i].merkle_root, msg->merkle_root, CYXWIZ_POS_HASH_SIZE);
+            op->pos_commitments[i].num_blocks = msg->num_blocks;
+            memcpy(&op->pos_commitments[i].storage_id, &storage_id, sizeof(cyxwiz_storage_id_t));
+            op->pos_commitments_received++;
+
+            char id_hex[17];
+            cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+            CYXWIZ_DEBUG("Received PoS commitment for %s from provider %zu (%u blocks)",
+                         id_hex, i, msg->num_blocks);
+            break;
+        }
+    }
+
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_pos_challenge(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (len < sizeof(cyxwiz_pos_challenge_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_challenge_msg_t *msg = (const cyxwiz_pos_challenge_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        char id_hex[17];
+        cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+        CYXWIZ_DEBUG("PoS challenge for unknown item: %s", id_hex);
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Validate block index */
+    size_t num_blocks = (item->encrypted_len + CYXWIZ_POS_BLOCK_SIZE - 1) / CYXWIZ_POS_BLOCK_SIZE;
+    if (msg->block_index >= num_blocks) {
+        char id_hex[17];
+        cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+        CYXWIZ_DEBUG("PoS challenge for invalid block %u (max %zu) in %s",
+                     msg->block_index, num_blocks - 1, id_hex);
+        return CYXWIZ_ERR_POS_INVALID_BLOCK;
+    }
+
+    /* Generate and send proof */
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+    CYXWIZ_DEBUG("Generating PoS proof for %s block %u", id_hex, msg->block_index);
+
+    return send_pos_proof_msg(ctx, from, item, msg->block_index, msg->challenge_nonce);
+}
+
+static cyxwiz_error_t handle_pos_proof(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (len < sizeof(cyxwiz_pos_proof_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_proof_msg_t *msg = (const cyxwiz_pos_proof_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    /* Find the pending challenge */
+    cyxwiz_pos_challenge_state_t *challenge = find_pos_challenge(ctx, &storage_id, from);
+    if (challenge == NULL) {
+        return CYXWIZ_ERR_POS_NO_COMMITMENT;
+    }
+
+    /* Verify nonce matches */
+    if (memcmp(msg->challenge_nonce, challenge->challenge_nonce, CYXWIZ_POS_CHALLENGE_SIZE) != 0) {
+        send_pos_verify_fail_msg(ctx, from, &storage_id, challenge->sequence,
+                                  CYXWIZ_POS_FAIL_WRONG_NONCE);
+        if (ctx->on_pos_result != NULL) {
+            ctx->on_pos_result(ctx, &storage_id, from, false,
+                               CYXWIZ_POS_FAIL_WRONG_NONCE, ctx->pos_result_user_data);
+        }
+        free_pos_challenge(ctx, challenge);
+        return CYXWIZ_OK;
+    }
+
+    /* Extract block data and proof path */
+    const uint8_t *block_data = data + sizeof(cyxwiz_pos_proof_msg_t);
+    size_t remaining = len - sizeof(cyxwiz_pos_proof_msg_t);
+
+    if (remaining < msg->block_len) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const uint8_t *proof_path_data = block_data + msg->block_len;
+    remaining -= msg->block_len;
+
+    if (remaining < (size_t)msg->proof_depth * CYXWIZ_POS_HASH_SIZE) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Copy proof path */
+    uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
+    for (uint8_t i = 0; i < msg->proof_depth; i++) {
+        memcpy(path[i], proof_path_data + i * CYXWIZ_POS_HASH_SIZE, CYXWIZ_POS_HASH_SIZE);
+    }
+
+    /* Verify the proof */
+    bool valid = merkle_verify_path(block_data, msg->block_len, msg->block_index,
+                                    path, msg->proof_depth, msg->sibling_positions,
+                                    challenge->commitment.merkle_root);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    if (valid) {
+        CYXWIZ_DEBUG("PoS proof verified for %s block %u", id_hex, msg->block_index);
+        send_pos_verify_ok_msg(ctx, from, &storage_id, challenge->sequence);
+
+        if (ctx->on_pos_result != NULL) {
+            ctx->on_pos_result(ctx, &storage_id, from, true,
+                               (cyxwiz_pos_fail_reason_t)0, ctx->pos_result_user_data);
+        }
+    } else {
+        CYXWIZ_WARN("PoS proof FAILED for %s block %u", id_hex, msg->block_index);
+        send_pos_verify_fail_msg(ctx, from, &storage_id, challenge->sequence,
+                                  CYXWIZ_POS_FAIL_INVALID_ROOT);
+
+        if (ctx->on_pos_result != NULL) {
+            ctx->on_pos_result(ctx, &storage_id, from, false,
+                               CYXWIZ_POS_FAIL_INVALID_ROOT, ctx->pos_result_user_data);
+        }
+    }
+
+    free_pos_challenge(ctx, challenge);
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_pos_verify_ok(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_pos_verify_ok_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_verify_ok_msg_t *msg = (const cyxwiz_pos_verify_ok_msg_t *)data;
+
+    char id_hex[17];
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    CYXWIZ_DEBUG("PoS verified OK for %s (seq %u)", id_hex, msg->sequence);
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_pos_verify_fail(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_pos_verify_fail_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_verify_fail_msg_t *msg = (const cyxwiz_pos_verify_fail_msg_t *)data;
+
+    char id_hex[17];
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    CYXWIZ_WARN("PoS verify FAILED for %s (seq %u, reason %u)",
+                id_hex, msg->sequence, msg->reason);
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_pos_request_commit(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (len < sizeof(cyxwiz_pos_request_commit_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_request_commit_msg_t *msg = (const cyxwiz_pos_request_commit_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Compute commitment if not already done */
+    if (!item->has_pos_commitment) {
+        cyxwiz_error_t err = cyxwiz_pos_compute_commitment(
+            item->encrypted_data, item->encrypted_len,
+            &item->id, &item->pos_commitment);
+        if (err != CYXWIZ_OK) {
+            return err;
+        }
+        item->has_pos_commitment = true;
+    }
+
+    /* Send commitment */
+    return send_pos_commitment(ctx, from, &item->pos_commitment);
+}
+
+/* ============ Proof of Storage - Public API ============ */
+
+void cyxwiz_pos_set_result_callback(
+    cyxwiz_storage_ctx_t *ctx,
+    cyxwiz_pos_result_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->on_pos_result = callback;
+    ctx->pos_result_user_data = user_data;
+}
+
+cyxwiz_error_t cyxwiz_pos_compute_commitment(
+    const uint8_t *data,
+    size_t data_len,
+    const cyxwiz_storage_id_t *storage_id,
+    cyxwiz_pos_commitment_t *commitment)
+{
+    if (data == NULL || storage_id == NULL || commitment == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Build Merkle tree */
+    uint8_t tree[CYXWIZ_POS_MAX_BLOCKS * 2][CYXWIZ_POS_HASH_SIZE];
+    size_t num_leaves;
+    merkle_build_tree(data, data_len, tree, &num_leaves);
+
+    /* Root is at index 1 */
+    memcpy(commitment->merkle_root, tree[1], CYXWIZ_POS_HASH_SIZE);
+
+    /* Calculate number of actual blocks */
+    size_t num_blocks = (data_len + CYXWIZ_POS_BLOCK_SIZE - 1) / CYXWIZ_POS_BLOCK_SIZE;
+    if (num_blocks == 0) num_blocks = 1;
+    if (num_blocks > 255) num_blocks = 255;
+    commitment->num_blocks = (uint8_t)num_blocks;
+
+    memcpy(&commitment->storage_id, storage_id, sizeof(cyxwiz_storage_id_t));
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_pos_store_commitment(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id,
+    const cyxwiz_pos_commitment_t *commitment)
+{
+    if (ctx == NULL || storage_id == NULL || provider_id == NULL || commitment == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find the storage operation */
+    cyxwiz_storage_op_t *op = find_operation(ctx, storage_id);
+    if (op == NULL) {
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Find the provider slot */
+    for (size_t i = 0; i < op->num_shares; i++) {
+        if (memcmp(&op->providers[i].provider_id, provider_id, sizeof(cyxwiz_node_id_t)) == 0) {
+            memcpy(&op->pos_commitments[i], commitment, sizeof(cyxwiz_pos_commitment_t));
+            op->pos_commitments_received++;
+            return CYXWIZ_OK;
+        }
+    }
+
+    return CYXWIZ_ERR_PEER_NOT_FOUND;
+}
+
+cyxwiz_error_t cyxwiz_pos_challenge(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id)
+{
+    if (ctx == NULL || storage_id == NULL || provider_id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if challenge already pending */
+    if (find_pos_challenge(ctx, storage_id, provider_id) != NULL) {
+        return CYXWIZ_ERR_POS_CHALLENGE_PENDING;
+    }
+
+    /* Find the storage operation to get commitment */
+    cyxwiz_storage_op_t *op = find_operation(ctx, storage_id);
+    if (op == NULL) {
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Find the provider's commitment */
+    cyxwiz_pos_commitment_t *commitment = NULL;
+    for (size_t i = 0; i < op->num_shares; i++) {
+        if (memcmp(&op->providers[i].provider_id, provider_id, sizeof(cyxwiz_node_id_t)) == 0) {
+            commitment = &op->pos_commitments[i];
+            break;
+        }
+    }
+
+    if (commitment == NULL || commitment->num_blocks == 0) {
+        return CYXWIZ_ERR_POS_NO_COMMITMENT;
+    }
+
+    /* Allocate challenge state */
+    cyxwiz_pos_challenge_state_t *challenge = alloc_pos_challenge(ctx);
+    if (challenge == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize challenge */
+    memcpy(&challenge->storage_id, storage_id, sizeof(cyxwiz_storage_id_t));
+    memcpy(&challenge->provider_id, provider_id, sizeof(cyxwiz_node_id_t));
+    memcpy(&challenge->commitment, commitment, sizeof(cyxwiz_pos_commitment_t));
+    challenge->sent_at = get_time_ms();
+    challenge->sequence = 0;
+
+    /* Generate random nonce */
+    cyxwiz_crypto_random(challenge->challenge_nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+
+    /* Pick random block to challenge */
+    uint8_t random_byte;
+    cyxwiz_crypto_random(&random_byte, 1);
+    challenge->block_index = random_byte % commitment->num_blocks;
+
+    /* Send challenge */
+    cyxwiz_error_t err = send_pos_challenge_msg(ctx, provider_id, storage_id,
+                                                 challenge->block_index,
+                                                 challenge->challenge_nonce,
+                                                 challenge->sequence);
+
+    if (err != CYXWIZ_OK) {
+        free_pos_challenge(ctx, challenge);
+        return err;
+    }
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(storage_id, id_hex);
+    CYXWIZ_DEBUG("Sent PoS challenge for %s block %u", id_hex, challenge->block_index);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_pos_generate_proof(
+    const uint8_t *data,
+    size_t data_len,
+    uint8_t block_index,
+    const uint8_t *challenge_nonce,
+    uint8_t *proof_buf,
+    size_t proof_buf_size,
+    size_t *proof_len)
+{
+    if (data == NULL || proof_buf == NULL || proof_len == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Validate block index */
+    size_t num_blocks = (data_len + CYXWIZ_POS_BLOCK_SIZE - 1) / CYXWIZ_POS_BLOCK_SIZE;
+    if (num_blocks == 0) num_blocks = 1;
+    if (block_index >= num_blocks) {
+        return CYXWIZ_ERR_POS_INVALID_BLOCK;
+    }
+
+    /* Build Merkle tree */
+    uint8_t tree[CYXWIZ_POS_MAX_BLOCKS * 2][CYXWIZ_POS_HASH_SIZE];
+    size_t num_leaves;
+    size_t tree_size = merkle_build_tree(data, data_len, tree, &num_leaves);
+
+    /* Get proof path */
+    uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
+    uint8_t depth, positions;
+    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+
+    /* Extract block data */
+    size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
+    size_t block_len = data_len - block_offset;
+    if (block_len > CYXWIZ_POS_BLOCK_SIZE) {
+        block_len = CYXWIZ_POS_BLOCK_SIZE;
+    }
+
+    /* Calculate required size */
+    size_t required = sizeof(cyxwiz_pos_proof_msg_t) + block_len + depth * CYXWIZ_POS_HASH_SIZE;
+    if (proof_buf_size < required) {
+        return CYXWIZ_ERR_BUFFER_TOO_SMALL;
+    }
+
+    /* Build proof message (without storage_id, which caller provides) */
+    cyxwiz_pos_proof_msg_t *msg = (cyxwiz_pos_proof_msg_t *)proof_buf;
+    msg->type = CYXWIZ_MSG_POS_PROOF;
+    memset(msg->storage_id, 0, CYXWIZ_STORAGE_ID_SIZE); /* Caller fills in */
+    msg->block_index = block_index;
+    memcpy(msg->challenge_nonce, challenge_nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+    msg->block_len = (uint8_t)block_len;
+    msg->proof_depth = depth;
+    msg->sibling_positions = positions;
+
+    /* Append block data */
+    size_t offset = sizeof(cyxwiz_pos_proof_msg_t);
+    memcpy(proof_buf + offset, data + block_offset, block_len);
+    offset += block_len;
+
+    /* Append proof path */
+    for (uint8_t i = 0; i < depth; i++) {
+        memcpy(proof_buf + offset, path[i], CYXWIZ_POS_HASH_SIZE);
+        offset += CYXWIZ_POS_HASH_SIZE;
+    }
+
+    *proof_len = offset;
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_pos_verify_proof(
+    const cyxwiz_pos_commitment_t *commitment,
+    const uint8_t *proof_data,
+    size_t proof_len,
+    bool *valid_out,
+    cyxwiz_pos_fail_reason_t *reason_out)
+{
+    if (commitment == NULL || proof_data == NULL || valid_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    *valid_out = false;
+    if (reason_out != NULL) {
+        *reason_out = CYXWIZ_POS_FAIL_INVALID_ROOT;
+    }
+
+    if (proof_len < sizeof(cyxwiz_pos_proof_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_proof_msg_t *msg = (const cyxwiz_pos_proof_msg_t *)proof_data;
+
+    /* Extract block data and proof path */
+    const uint8_t *block_data = proof_data + sizeof(cyxwiz_pos_proof_msg_t);
+    size_t remaining = proof_len - sizeof(cyxwiz_pos_proof_msg_t);
+
+    if (remaining < msg->block_len) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const uint8_t *proof_path_data = block_data + msg->block_len;
+    remaining -= msg->block_len;
+
+    if (remaining < (size_t)msg->proof_depth * CYXWIZ_POS_HASH_SIZE) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Copy proof path */
+    uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
+    for (uint8_t i = 0; i < msg->proof_depth; i++) {
+        memcpy(path[i], proof_path_data + i * CYXWIZ_POS_HASH_SIZE, CYXWIZ_POS_HASH_SIZE);
+    }
+
+    /* Verify the proof */
+    *valid_out = merkle_verify_path(block_data, msg->block_len, msg->block_index,
+                                    path, msg->proof_depth, msg->sibling_positions,
+                                    commitment->merkle_root);
+
+    if (*valid_out && reason_out != NULL) {
+        *reason_out = (cyxwiz_pos_fail_reason_t)0;
+    }
+
+    return CYXWIZ_OK;
+}
+
+size_t cyxwiz_pos_challenge_count(const cyxwiz_storage_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return 0;
+    }
+    return ctx->pos_challenge_count;
+}
+
+const char *cyxwiz_pos_fail_reason_name(cyxwiz_pos_fail_reason_t reason)
+{
+    switch (reason) {
+        case CYXWIZ_POS_FAIL_INVALID_ROOT:  return "invalid_root";
+        case CYXWIZ_POS_FAIL_INVALID_BLOCK: return "invalid_block";
+        case CYXWIZ_POS_FAIL_INVALID_PATH:  return "invalid_path";
+        case CYXWIZ_POS_FAIL_WRONG_NONCE:   return "wrong_nonce";
+        case CYXWIZ_POS_FAIL_TIMEOUT:       return "timeout";
+        case CYXWIZ_POS_FAIL_NOT_FOUND:     return "not_found";
+        default:                            return "unknown";
+    }
 }
