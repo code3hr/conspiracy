@@ -154,6 +154,7 @@ const char *cyxwiz_strerror(cyxwiz_error_t err)
         case CYXWIZ_ERR_TTL_EXPIRED:     return "TTL expired";
         case CYXWIZ_ERR_NO_KEY:          return "No shared key with peer";
         case CYXWIZ_ERR_CIRCUIT_FULL:    return "Circuit table full";
+        case CYXWIZ_ERR_EXHAUSTED:       return "Resource exhausted";
         default:                         return "Unknown error";
     }
 }

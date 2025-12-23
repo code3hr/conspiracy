@@ -34,6 +34,7 @@ typedef enum {
     CYXWIZ_ERR_TTL_EXPIRED = -13,     /* TTL reached zero */
     CYXWIZ_ERR_NO_KEY = -14,          /* No shared key with peer */
     CYXWIZ_ERR_CIRCUIT_FULL = -15,    /* Circuit table full */
+    CYXWIZ_ERR_EXHAUSTED = -16,       /* Resource exhausted (e.g., triple pool) */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 

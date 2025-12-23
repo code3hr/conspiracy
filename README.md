@@ -294,7 +294,7 @@ cyxwiz/
 - [x] Bootstrap node for peer discovery
 - [x] Onion routing implementation
 - [x] Message routing (multi-hop)
-- [ ] SPDZ online computation (Beaver triples)
+- [x] SPDZ online computation (Beaver triples)
 - [ ] Full threshold reconstruction
 
 ### Phase 3: Protocol Layer

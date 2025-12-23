@@ -437,6 +437,348 @@ static int test_random(void)
     return 1;
 }
 
+/* ============ Beaver Triple Tests ============ */
+
+/* Test triple pool initialization */
+static int test_triple_pool_init(void)
+{
+    cyxwiz_triple_pool_t pool;
+
+    cyxwiz_error_t err = cyxwiz_triple_pool_init(&pool);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    if (pool.count != 0) {
+        return 0;
+    }
+
+    if (pool.next_index != 0) {
+        return 0;
+    }
+
+    if (cyxwiz_triple_pool_available(&pool) != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Test triple generation */
+static int test_triple_generation(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    err = cyxwiz_crypto_create(&ctx, 3, 5, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    cyxwiz_triple_pool_t pool;
+    err = cyxwiz_triple_pool_init(&pool);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Generate some triples */
+    err = cyxwiz_triple_pool_generate(ctx, &pool, 5);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    if (pool.count != 5) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    if (cyxwiz_triple_pool_available(&pool) != 5) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify each triple has valid MACs */
+    for (size_t i = 0; i < pool.count; i++) {
+        cyxwiz_beaver_triple_t *t = &pool.triples[i];
+
+        err = cyxwiz_crypto_verify_share(ctx, &t->a);
+        if (err != CYXWIZ_OK) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+
+        err = cyxwiz_crypto_verify_share(ctx, &t->b);
+        if (err != CYXWIZ_OK) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+
+        err = cyxwiz_crypto_verify_share(ctx, &t->c);
+        if (err != CYXWIZ_OK) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+
+        if (t->used != false) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+    }
+
+    cyxwiz_triple_pool_clear(&pool);
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
+/* Test triple consumption */
+static int test_triple_consume(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    err = cyxwiz_crypto_create(&ctx, 3, 5, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    cyxwiz_triple_pool_t pool;
+    cyxwiz_triple_pool_init(&pool);
+
+    /* Generate 3 triples */
+    err = cyxwiz_triple_pool_generate(ctx, &pool, 3);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Consume all 3 */
+    cyxwiz_beaver_triple_t triple;
+    for (int i = 0; i < 3; i++) {
+        err = cyxwiz_triple_pool_consume(&pool, &triple);
+        if (err != CYXWIZ_OK) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+    }
+
+    /* Fourth consume should fail */
+    err = cyxwiz_triple_pool_consume(&pool, &triple);
+    if (err != CYXWIZ_ERR_EXHAUSTED) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Available should be 0 */
+    if (cyxwiz_triple_pool_available(&pool) != 0) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_triple_pool_clear(&pool);
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
+/* Test share multiplication using Beaver triples */
+static int test_share_mul(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    /* Create 2-of-2 context for testing (simulate party 1's view) */
+    err = cyxwiz_crypto_create(&ctx, 2, 2, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    /* Create triple pool and generate triples */
+    cyxwiz_triple_pool_t pool;
+    cyxwiz_triple_pool_init(&pool);
+    err = cyxwiz_triple_pool_generate(ctx, &pool, 10);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Create two secrets */
+    uint8_t secret_x[CYXWIZ_KEY_SIZE];
+    uint8_t secret_y[CYXWIZ_KEY_SIZE];
+    cyxwiz_crypto_random(secret_x, CYXWIZ_KEY_SIZE);
+    cyxwiz_crypto_random(secret_y, CYXWIZ_KEY_SIZE);
+
+    /* Split into shares */
+    cyxwiz_share_t shares_x[2];
+    cyxwiz_share_t shares_y[2];
+    size_t num_shares;
+
+    err = cyxwiz_crypto_share_secret(ctx, secret_x, CYXWIZ_KEY_SIZE, shares_x, &num_shares);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    err = cyxwiz_crypto_share_secret(ctx, secret_y, CYXWIZ_KEY_SIZE, shares_y, &num_shares);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Multiply shares (party 1's shares only, simulating local computation) */
+    cyxwiz_share_t result_share;
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &shares_x[0], &shares_y[0], &result_share);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify result has valid MAC */
+    err = cyxwiz_crypto_verify_share(ctx, &result_share);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify one triple was consumed */
+    if (cyxwiz_triple_pool_available(&pool) != 9) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_triple_pool_clear(&pool);
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
+/* Test multiple share multiplications */
+static int test_share_mul_multiple(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    err = cyxwiz_crypto_create(&ctx, 2, 2, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    cyxwiz_triple_pool_t pool;
+    cyxwiz_triple_pool_init(&pool);
+    err = cyxwiz_triple_pool_generate(ctx, &pool, 16);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Create multiple secrets */
+    uint8_t secrets[4][CYXWIZ_KEY_SIZE];
+    cyxwiz_share_t shares[4];
+    size_t num_shares;
+
+    for (int i = 0; i < 4; i++) {
+        cyxwiz_crypto_random(secrets[i], CYXWIZ_KEY_SIZE);
+        cyxwiz_share_t temp_shares[2];
+        err = cyxwiz_crypto_share_secret(ctx, secrets[i], CYXWIZ_KEY_SIZE, temp_shares, &num_shares);
+        if (err != CYXWIZ_OK) {
+            cyxwiz_crypto_destroy(ctx);
+            return 0;
+        }
+        /* Use party 1's share */
+        memcpy(&shares[i], &temp_shares[0], sizeof(cyxwiz_share_t));
+    }
+
+    /* Perform 3 multiplications: (s0 * s1) * (s2 * s3) */
+    cyxwiz_share_t result1, result2, final_result;
+
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &shares[0], &shares[1], &result1);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &shares[2], &shares[3], &result2);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &result1, &result2, &final_result);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify 3 triples were consumed */
+    if (cyxwiz_triple_pool_available(&pool) != 13) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify final result has valid MAC */
+    err = cyxwiz_crypto_verify_share(ctx, &final_result);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_triple_pool_clear(&pool);
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
+/* Test exhausted pool error */
+static int test_share_mul_exhausted(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    err = cyxwiz_crypto_create(&ctx, 2, 2, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    cyxwiz_triple_pool_t pool;
+    cyxwiz_triple_pool_init(&pool);
+
+    /* Generate only 1 triple */
+    err = cyxwiz_triple_pool_generate(ctx, &pool, 1);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Create secrets and shares */
+    uint8_t secret[CYXWIZ_KEY_SIZE];
+    cyxwiz_crypto_random(secret, CYXWIZ_KEY_SIZE);
+
+    cyxwiz_share_t shares[2];
+    size_t num_shares;
+    err = cyxwiz_crypto_share_secret(ctx, secret, CYXWIZ_KEY_SIZE, shares, &num_shares);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* First multiplication should succeed */
+    cyxwiz_share_t result;
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &shares[0], &shares[0], &result);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Second multiplication should fail with exhausted */
+    err = cyxwiz_crypto_share_mul(ctx, &pool, &shares[0], &shares[0], &result);
+    if (err != CYXWIZ_ERR_EXHAUSTED) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_triple_pool_clear(&pool);
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
 int main(void)
 {
     cyxwiz_log_init(CYXWIZ_LOG_NONE); /* Quiet during tests */
@@ -454,6 +796,14 @@ int main(void)
     TEST(mac_verify);
     TEST(derive_key);
     TEST(random);
+
+    printf("\n  Beaver Triple Tests:\n");
+    TEST(triple_pool_init);
+    TEST(triple_generation);
+    TEST(triple_consume);
+    TEST(share_mul);
+    TEST(share_mul_multiple);
+    TEST(share_mul_exhausted);
 
     printf("\n===================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

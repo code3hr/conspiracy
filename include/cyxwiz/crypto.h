@@ -27,6 +27,10 @@
 #define CYXWIZ_DEFAULT_PARTIES 5
 #define CYXWIZ_MAX_PARTIES 255
 
+/* Beaver triple pool parameters */
+#define CYXWIZ_MAX_TRIPLES 64
+#define CYXWIZ_TRIPLE_BATCH_SIZE 16
+
 /*
  * Secret share with MAC for integrity verification
  * Total size: 49 bytes (fits comfortably in 250-byte LoRa packets)
@@ -36,6 +40,34 @@ typedef struct {
     uint8_t mac[CYXWIZ_MAC_SIZE];       /* SPDZ-style MAC */
     uint8_t party_id;                    /* Owning party (1-indexed) */
 } cyxwiz_share_t;
+
+/*
+ * Beaver triple (a, b, c) where c = a * b
+ * Used for secure multiplication of secret-shared values.
+ *
+ * Protocol:
+ *   To compute [x] * [y]:
+ *   1. Open d = x - a (reveals nothing about x)
+ *   2. Open e = y - b (reveals nothing about y)
+ *   3. Compute [z] = [c] + d*[b] + e*[a] + d*e
+ *   Result: z = x * y
+ */
+typedef struct {
+    cyxwiz_share_t a;       /* Share of random 'a' */
+    cyxwiz_share_t b;       /* Share of random 'b' */
+    cyxwiz_share_t c;       /* Share of c = a * b */
+    bool used;              /* Has this triple been consumed */
+} cyxwiz_beaver_triple_t;
+
+/*
+ * Triple pool for pre-computed Beaver triples
+ * Each multiplication consumes one triple (cannot be reused)
+ */
+typedef struct {
+    cyxwiz_beaver_triple_t triples[CYXWIZ_MAX_TRIPLES];
+    size_t count;           /* Number of triples in pool */
+    size_t next_index;      /* Next triple to consume */
+} cyxwiz_triple_pool_t;
 
 /*
  * Crypto context - opaque structure
@@ -145,10 +177,79 @@ cyxwiz_error_t cyxwiz_crypto_share_sub(
 /*
  * Multiply share by a public scalar (result = share * scalar)
  * Scalar must be CYXWIZ_KEY_SIZE bytes
+ * Context is needed to recompute the MAC for the result
  */
 cyxwiz_error_t cyxwiz_crypto_share_scalar_mul(
+    cyxwiz_crypto_ctx_t *ctx,
     const cyxwiz_share_t *share,
     const uint8_t *scalar,
+    cyxwiz_share_t *result
+);
+
+/* ============ Beaver Triples ============ */
+
+/*
+ * Initialize a triple pool (sets count and next_index to 0)
+ */
+cyxwiz_error_t cyxwiz_triple_pool_init(cyxwiz_triple_pool_t *pool);
+
+/*
+ * Generate a batch of Beaver triples
+ * Generates up to 'count' triples, or until pool is full
+ *
+ * @param ctx           Crypto context
+ * @param pool          Triple pool to fill
+ * @param count         Number of triples to generate
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_triple_pool_generate(
+    cyxwiz_crypto_ctx_t *ctx,
+    cyxwiz_triple_pool_t *pool,
+    size_t count
+);
+
+/*
+ * Consume one triple from the pool
+ * Each triple can only be used once for security
+ *
+ * @param pool          Triple pool
+ * @param triple_out    Output triple (copied, pool entry marked used)
+ * @return              CYXWIZ_OK on success, CYXWIZ_ERR_EXHAUSTED if empty
+ */
+cyxwiz_error_t cyxwiz_triple_pool_consume(
+    cyxwiz_triple_pool_t *pool,
+    cyxwiz_beaver_triple_t *triple_out
+);
+
+/*
+ * Get number of available (unused) triples in pool
+ */
+size_t cyxwiz_triple_pool_available(const cyxwiz_triple_pool_t *pool);
+
+/*
+ * Securely clear a triple pool (zeros all data)
+ */
+void cyxwiz_triple_pool_clear(cyxwiz_triple_pool_t *pool);
+
+/*
+ * Multiply two secret-shared values using Beaver triple
+ *
+ * This is a LOCAL simulation of the Beaver protocol:
+ * - In full SPDZ, steps 2-3 require communication to open d and e
+ * - Here we simulate single-party computation for testing
+ *
+ * @param ctx           Crypto context
+ * @param pool          Triple pool (will consume one triple)
+ * @param x             First share
+ * @param y             Second share
+ * @param result        Output share [x * y]
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_crypto_share_mul(
+    cyxwiz_crypto_ctx_t *ctx,
+    cyxwiz_triple_pool_t *pool,
+    const cyxwiz_share_t *x,
+    const cyxwiz_share_t *y,
     cyxwiz_share_t *result
 );
 
