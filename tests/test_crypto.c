@@ -197,6 +197,51 @@ static int test_decrypt_wrong_key(void)
     return (err == CYXWIZ_ERR_CRYPTO);
 }
 
+/* Test simple 2-of-2 threshold reconstruction */
+static int test_threshold_2of2(void)
+{
+    cyxwiz_crypto_ctx_t *ctx = NULL;
+    cyxwiz_error_t err;
+
+    /* Create 2-of-2 context - simplest threshold case */
+    err = cyxwiz_crypto_create(&ctx, 2, 2, 1);
+    if (err != CYXWIZ_OK) {
+        return 0;
+    }
+
+    /* Create a simple secret (all zeros except first byte = 42) */
+    uint8_t secret[CYXWIZ_KEY_SIZE];
+    memset(secret, 0, CYXWIZ_KEY_SIZE);
+    secret[CYXWIZ_KEY_SIZE - 1] = 42;
+
+    /* Split into 2 shares */
+    cyxwiz_share_t shares[2];
+    size_t num_shares;
+
+    err = cyxwiz_crypto_share_secret(ctx, secret, CYXWIZ_KEY_SIZE, shares, &num_shares);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Reconstruct with both shares */
+    uint8_t reconstructed[CYXWIZ_KEY_SIZE];
+    err = cyxwiz_crypto_reconstruct_secret(ctx, shares, 2, reconstructed, CYXWIZ_KEY_SIZE);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Verify */
+    if (memcmp(secret, reconstructed, CYXWIZ_KEY_SIZE) != 0) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    cyxwiz_crypto_destroy(ctx);
+    return 1;
+}
+
 /* Test secret sharing and reconstruction */
 static int test_share_reconstruct(void)
 {
@@ -236,15 +281,27 @@ static int test_share_reconstruct(void)
         }
     }
 
-    /* Reconstruct with all shares */
+    /* Reconstruct with threshold shares (3 of 5) */
     uint8_t reconstructed[CYXWIZ_KEY_SIZE];
-    err = cyxwiz_crypto_reconstruct_secret(ctx, shares, num_shares, reconstructed, CYXWIZ_KEY_SIZE);
+    err = cyxwiz_crypto_reconstruct_secret(ctx, shares, 3, reconstructed, CYXWIZ_KEY_SIZE);
     if (err != CYXWIZ_OK) {
         cyxwiz_crypto_destroy(ctx);
         return 0;
     }
 
     /* Verify reconstruction */
+    if (memcmp(secret, reconstructed, CYXWIZ_KEY_SIZE) != 0) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
+    /* Also test with all shares */
+    err = cyxwiz_crypto_reconstruct_secret(ctx, shares, num_shares, reconstructed, CYXWIZ_KEY_SIZE);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(ctx);
+        return 0;
+    }
+
     if (memcmp(secret, reconstructed, CYXWIZ_KEY_SIZE) != 0) {
         cyxwiz_crypto_destroy(ctx);
         return 0;
@@ -781,7 +838,7 @@ static int test_share_mul_exhausted(void)
 
 int main(void)
 {
-    cyxwiz_log_init(CYXWIZ_LOG_NONE); /* Quiet during tests */
+    cyxwiz_log_init(CYXWIZ_LOG_DEBUG); /* Enable debug for debugging */
 
     printf("\nCyxWiz Crypto Tests\n");
     printf("===================\n\n");
@@ -791,6 +848,7 @@ int main(void)
     TEST(context_invalid);
     TEST(encrypt_decrypt);
     TEST(decrypt_wrong_key);
+    TEST(threshold_2of2);
     TEST(share_reconstruct);
     TEST(share_add);
     TEST(mac_verify);

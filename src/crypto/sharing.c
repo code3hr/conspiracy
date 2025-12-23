@@ -53,56 +53,59 @@ static void field_sub(uint8_t *out, const uint8_t *a, const uint8_t *b)
  * Irreducible polynomial: x^256 + x^10 + x^5 + x^2 + 1
  *
  * Binary polynomial multiplication followed by reduction.
- * This is needed for Beaver triple computation (c = a * b).
+ * This is needed for Beaver triple computation (c = a * b) and
+ * Lagrange interpolation in Shamir's Secret Sharing.
+ *
+ * Representation (big-endian bytes):
+ *   - byte[31] contains x^0 to x^7 (LSB)
+ *   - byte[0] contains x^248 to x^255 (MSB)
+ *   - bit j of byte i represents coefficient of x^(8*(31-i) + j)
  */
 static void gf256_mul(uint8_t *out, const uint8_t *a, const uint8_t *b)
 {
-    uint8_t v[CYXWIZ_KEY_SIZE];      /* Working copy of b */
+    uint8_t v[CYXWIZ_KEY_SIZE];      /* Working copy of b, shifted */
     uint8_t z[CYXWIZ_KEY_SIZE];      /* Accumulator */
 
     memcpy(v, b, CYXWIZ_KEY_SIZE);
     memset(z, 0, CYXWIZ_KEY_SIZE);
 
     /*
-     * Binary polynomial multiplication with reduction
-     * For each bit of 'a', if set, XOR 'v' into result
-     * Then shift 'v' and reduce if needed
+     * Standard shift-and-add polynomial multiplication
+     * Process bits of 'a' from LSB (x^0) to MSB (x^255)
+     * For each bit: if set, XOR current v into result
+     * Then shift v left (multiply by x) and reduce if overflow
      */
     for (int i = 0; i < 256; i++) {
-        /* Check if bit i of 'a' is set (big-endian) */
-        int byte_idx = i / 8;
-        int bit_idx = 7 - (i % 8);
+        /* Bit i of 'a' is at byte (31 - i/8), bit (i % 8)
+         * e.g., bit 0 (x^0) is byte[31] bit 0
+         *       bit 8 (x^8) is byte[30] bit 0
+         */
+        int byte_idx = 31 - (i / 8);
+        int bit_idx = i % 8;
 
         if ((a[byte_idx] >> bit_idx) & 1) {
             xor_bytes(z, z, v, CYXWIZ_KEY_SIZE);
         }
 
-        /* Check if MSB of v is set before shifting */
-        int msb = v[0] & 0x80;
-
-        /* Shift v right by 1 (big-endian representation) */
-        for (int j = CYXWIZ_KEY_SIZE - 1; j > 0; j--) {
-            v[j] = (uint8_t)((v[j] >> 1) | ((v[j-1] & 1) << 7));
+        /* Shift v left by 1 (multiply by x) */
+        int carry = 0;
+        for (int j = CYXWIZ_KEY_SIZE - 1; j >= 0; j--) {
+            int new_carry = (v[j] >> 7) & 1;
+            v[j] = (uint8_t)((v[j] << 1) | carry);
+            carry = new_carry;
         }
-        v[0] >>= 1;
 
-        /* If MSB was set, reduce by XORing with reduction polynomial
-         * x^256 + x^10 + x^5 + x^2 + 1
-         * When MSB (x^255) shifts out and wraps, we XOR at positions:
-         *   x^10, x^5, x^2, x^0 (constant term)
-         * In bytes (little-endian polynomial): byte 31 bits 2,5,10 and byte 30 for bit 10
-         * In big-endian byte order: positions from LSB end
+        /* If there was carry (x^256 term), reduce modulo p(x)
+         * x^256 ≡ x^10 + x^5 + x^2 + 1 (mod p)
+         * Positions in our representation:
+         *   x^0  = byte[31] bit 0
+         *   x^2  = byte[31] bit 2
+         *   x^5  = byte[31] bit 5
+         *   x^10 = byte[30] bit 2
          */
-        if (msb) {
-            /* Reduction polynomial bits: 10, 5, 2, 0
-             * In big-endian 32-byte array:
-             * bit 0   = byte[31] bit 0
-             * bit 2   = byte[31] bit 2
-             * bit 5   = byte[31] bit 5
-             * bit 10  = byte[30] bit 2
-             */
-            v[31] ^= 0x25;  /* bits 0, 2, 5 = 0b00100101 = 0x25 */
-            v[30] ^= 0x04;  /* bit 10 = bit 2 of byte 30 = 0x04 */
+        if (carry) {
+            v[31] ^= 0x25;  /* bits 0, 2, 5 = 0b00100101 */
+            v[30] ^= 0x04;  /* bit 2 (which is x^10) */
         }
     }
 
@@ -110,16 +113,177 @@ static void gf256_mul(uint8_t *out, const uint8_t *a, const uint8_t *b)
 }
 
 /*
- * Split a secret into N additive shares
+ * GF(2^256) squaring (optimized: a^2)
+ */
+static void gf256_square(uint8_t *out, const uint8_t *a)
+{
+    gf256_mul(out, a, a);
+}
+
+/*
+ * GF(2^256) inversion using Fermat's little theorem
+ * a^(-1) = a^(2^256 - 2) in GF(2^256)
  *
- * For a secret S and N parties:
- *   share[0] = random
- *   share[1] = random
- *   ...
- *   share[N-2] = random
- *   share[N-1] = S XOR share[0] XOR share[1] XOR ... XOR share[N-2]
+ * The exponent 2^256 - 2 = (2^256 - 1) - 1
+ * In binary: 255 ones followed by a zero
+ * = 111...110 (255 ones, then 0)
  *
- * Sum of all shares = S
+ * We compute this using square-and-multiply.
+ */
+static void gf256_inverse(uint8_t *out, const uint8_t *a)
+{
+    uint8_t result[CYXWIZ_KEY_SIZE];
+    uint8_t base[CYXWIZ_KEY_SIZE];
+    uint8_t temp[CYXWIZ_KEY_SIZE];
+
+    /* Check for zero (no inverse) */
+    int is_zero = 1;
+    for (size_t i = 0; i < CYXWIZ_KEY_SIZE; i++) {
+        if (a[i] != 0) {
+            is_zero = 0;
+            break;
+        }
+    }
+    if (is_zero) {
+        memset(out, 0, CYXWIZ_KEY_SIZE);
+        return;
+    }
+
+    /* Initialize: result = 1, base = a */
+    memset(result, 0, CYXWIZ_KEY_SIZE);
+    result[CYXWIZ_KEY_SIZE - 1] = 1;  /* result = 1 */
+    memcpy(base, a, CYXWIZ_KEY_SIZE);
+
+    /*
+     * Compute a^(2^256 - 2) using square-and-multiply
+     * Exponent bits (from LSB): 0, then 255 ones
+     * So we skip the first bit (0), then multiply for the next 255 bits (all 1s)
+     */
+
+    /* First iteration: square base, don't multiply (bit 0 is 0) */
+    gf256_square(temp, base);
+    memcpy(base, temp, CYXWIZ_KEY_SIZE);
+
+    /* Next 255 iterations: square and multiply (bits 1-255 are all 1) */
+    for (int i = 1; i < 256; i++) {
+        /* Multiply result by base */
+        gf256_mul(temp, result, base);
+        memcpy(result, temp, CYXWIZ_KEY_SIZE);
+
+        /* Square base */
+        gf256_square(temp, base);
+        memcpy(base, temp, CYXWIZ_KEY_SIZE);
+    }
+
+    memcpy(out, result, CYXWIZ_KEY_SIZE);
+}
+
+/*
+ * Convert integer to field element
+ * Sets the least significant byte to the value
+ */
+static void int_to_field(uint8_t *out, uint8_t val)
+{
+    memset(out, 0, CYXWIZ_KEY_SIZE);
+    out[CYXWIZ_KEY_SIZE - 1] = val;
+}
+
+/*
+ * Evaluate polynomial at point x
+ * P(x) = coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ... + coeffs[degree]*x^degree
+ *
+ * Uses Horner's method: P(x) = ((coeffs[degree]*x + coeffs[degree-1])*x + ...)*x + coeffs[0]
+ */
+static void poly_eval(
+    uint8_t *out,
+    const uint8_t coeffs[][CYXWIZ_KEY_SIZE],
+    size_t num_coeffs,
+    const uint8_t *x)
+{
+    uint8_t result[CYXWIZ_KEY_SIZE];
+    uint8_t temp[CYXWIZ_KEY_SIZE];
+
+    if (num_coeffs == 0) {
+        memset(out, 0, CYXWIZ_KEY_SIZE);
+        return;
+    }
+
+    /* Start with highest degree coefficient */
+    memcpy(result, coeffs[num_coeffs - 1], CYXWIZ_KEY_SIZE);
+
+    /* Horner's method: work down to constant term */
+    for (size_t i = num_coeffs - 1; i > 0; i--) {
+        /* result = result * x */
+        gf256_mul(temp, result, x);
+        /* result = result + coeffs[i-1] */
+        field_add(result, temp, coeffs[i - 1]);
+    }
+
+    memcpy(out, result, CYXWIZ_KEY_SIZE);
+}
+
+/*
+ * Compute Lagrange basis polynomial L_i(0)
+ *
+ * L_i(0) = Π_{j≠i} (0 - x_j) / (x_i - x_j)
+ *        = Π_{j≠i} x_j / (x_i - x_j)
+ *
+ * In GF(2^n), subtraction is XOR.
+ */
+static void lagrange_coeff(
+    uint8_t *out,
+    const uint8_t *party_ids,
+    size_t num_parties,
+    size_t i)
+{
+    uint8_t numerator[CYXWIZ_KEY_SIZE];
+    uint8_t denominator[CYXWIZ_KEY_SIZE];
+    uint8_t x_i[CYXWIZ_KEY_SIZE];
+    uint8_t x_j[CYXWIZ_KEY_SIZE];
+    uint8_t diff[CYXWIZ_KEY_SIZE];
+    uint8_t temp[CYXWIZ_KEY_SIZE];
+
+    /* Initialize numerator = 1, denominator = 1 */
+    memset(numerator, 0, CYXWIZ_KEY_SIZE);
+    numerator[CYXWIZ_KEY_SIZE - 1] = 1;
+    memset(denominator, 0, CYXWIZ_KEY_SIZE);
+    denominator[CYXWIZ_KEY_SIZE - 1] = 1;
+
+    int_to_field(x_i, party_ids[i]);
+
+    for (size_t j = 0; j < num_parties; j++) {
+        if (j == i) continue;
+
+        int_to_field(x_j, party_ids[j]);
+
+        /* numerator *= x_j */
+        gf256_mul(temp, numerator, x_j);
+        memcpy(numerator, temp, CYXWIZ_KEY_SIZE);
+
+        /* diff = x_i - x_j (XOR in GF(2^n)) */
+        field_sub(diff, x_i, x_j);
+
+        /* denominator *= diff */
+        gf256_mul(temp, denominator, diff);
+        memcpy(denominator, temp, CYXWIZ_KEY_SIZE);
+    }
+
+    /* result = numerator / denominator = numerator * denominator^(-1) */
+    uint8_t denom_inv[CYXWIZ_KEY_SIZE];
+    gf256_inverse(denom_inv, denominator);
+    gf256_mul(out, numerator, denom_inv);
+}
+
+/*
+ * Split a secret into N shares using Shamir's Secret Sharing
+ *
+ * Creates a random polynomial P(x) of degree (threshold - 1):
+ *   P(x) = secret + a_1*x + a_2*x^2 + ... + a_{t-1}*x^{t-1}
+ *
+ * Each party i gets share = P(i) where i is the party ID (1, 2, ..., N)
+ *
+ * Any 'threshold' shares can reconstruct the secret using Lagrange interpolation
+ * at x=0, recovering P(0) = secret.
  */
 cyxwiz_error_t cyxwiz_crypto_share_secret(
     cyxwiz_crypto_ctx_t *ctx,
@@ -137,51 +301,63 @@ cyxwiz_error_t cyxwiz_crypto_share_secret(
         return CYXWIZ_ERR_INVALID;
     }
 
+    uint8_t threshold = cyxwiz_crypto_get_threshold(ctx);
     uint8_t n = cyxwiz_crypto_get_num_parties(ctx);
 
-    /* Generate random shares for first N-1 parties */
-    uint8_t running_xor[CYXWIZ_KEY_SIZE];
-    memset(running_xor, 0, CYXWIZ_KEY_SIZE);
+    /*
+     * Build polynomial coefficients:
+     * coeffs[0] = secret (constant term)
+     * coeffs[1..threshold-1] = random values
+     */
+    uint8_t coeffs[CYXWIZ_MAX_PARTIES][CYXWIZ_KEY_SIZE];
 
-    for (uint8_t i = 0; i < n - 1; i++) {
-        /* Generate random share value */
-        cyxwiz_crypto_random(shares_out[i].value, CYXWIZ_KEY_SIZE);
-        shares_out[i].party_id = i + 1;  /* 1-indexed */
+    /* coeffs[0] = secret */
+    memcpy(coeffs[0], secret, CYXWIZ_KEY_SIZE);
+
+    /* Generate random coefficients for x^1 through x^(threshold-1) */
+    for (uint8_t i = 1; i < threshold; i++) {
+        cyxwiz_crypto_random(coeffs[i], CYXWIZ_KEY_SIZE);
+    }
+
+    /* Evaluate polynomial at each party's ID (1, 2, ..., N) */
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t party_id = i + 1;  /* 1-indexed */
+        uint8_t x[CYXWIZ_KEY_SIZE];
+
+        int_to_field(x, party_id);
+
+        /* Evaluate P(party_id) */
+        poly_eval(shares_out[i].value, (const uint8_t (*)[CYXWIZ_KEY_SIZE])coeffs, threshold, x);
+
+        shares_out[i].party_id = party_id;
 
         /* Compute MAC for this share */
         cyxwiz_error_t err = cyxwiz_crypto_compute_mac(ctx, shares_out[i].value, shares_out[i].mac);
         if (err != CYXWIZ_OK) {
+            cyxwiz_secure_zero(coeffs, sizeof(coeffs));
             return err;
         }
-
-        /* XOR into running total */
-        field_add(running_xor, running_xor, shares_out[i].value);
-    }
-
-    /* Last share = secret XOR (all other shares) */
-    field_sub(shares_out[n - 1].value, secret, running_xor);
-    shares_out[n - 1].party_id = n;
-
-    /* Compute MAC for last share */
-    cyxwiz_error_t err = cyxwiz_crypto_compute_mac(ctx, shares_out[n - 1].value, shares_out[n - 1].mac);
-    if (err != CYXWIZ_OK) {
-        return err;
     }
 
     *num_shares = n;
 
     /* Zero temporary data */
-    cyxwiz_secure_zero(running_xor, sizeof(running_xor));
+    cyxwiz_secure_zero(coeffs, sizeof(coeffs));
 
-    CYXWIZ_DEBUG("Split secret into %d shares", n);
+    CYXWIZ_DEBUG("Split secret into %d shares (threshold=%d)", n, threshold);
     return CYXWIZ_OK;
 }
 
 /*
- * Reconstruct secret from additive shares
+ * Reconstruct secret from shares using Lagrange interpolation
  *
- * For full reconstruction: secret = XOR of all shares
- * For threshold reconstruction: use Lagrange interpolation
+ * Given shares (x_i, y_i) where y_i = P(x_i) and P(0) = secret,
+ * we compute:
+ *   secret = P(0) = Σ y_i * L_i(0)
+ *
+ * where L_i(0) is the Lagrange basis polynomial evaluated at 0.
+ *
+ * Only needs 'threshold' shares to reconstruct.
  */
 cyxwiz_error_t cyxwiz_crypto_reconstruct_secret(
     cyxwiz_crypto_ctx_t *ctx,
@@ -199,7 +375,6 @@ cyxwiz_error_t cyxwiz_crypto_reconstruct_secret(
     }
 
     uint8_t threshold = cyxwiz_crypto_get_threshold(ctx);
-    uint8_t n = cyxwiz_crypto_get_num_parties(ctx);
 
     if (num_shares < threshold) {
         CYXWIZ_ERROR("Need at least %d shares, got %zu", threshold, num_shares);
@@ -217,31 +392,35 @@ cyxwiz_error_t cyxwiz_crypto_reconstruct_secret(
     }
 
     /*
-     * If we have all N shares, use simple additive reconstruction
-     * Otherwise, use threshold reconstruction (Shamir interpolation)
+     * Lagrange interpolation to find P(0)
+     * Use only the first 'threshold' shares (any subset would work)
+     *
+     * secret = Σ_{i=0}^{t-1} shares[i].value * L_i(0)
      */
-    if (num_shares == n) {
-        /* Simple case: XOR all shares */
-        memset(secret_out, 0, CYXWIZ_KEY_SIZE);
-        for (size_t i = 0; i < num_shares; i++) {
-            field_add(secret_out, secret_out, shares[i].value);
-        }
-    } else {
-        /*
-         * Threshold reconstruction using Lagrange interpolation
-         * This works because our additive shares can be viewed as
-         * evaluations of a polynomial at specific points
-         *
-         * For simplicity in Phase 1, we require all shares
-         * Full Shamir implementation is Phase 2
-         */
-        CYXWIZ_WARN("Threshold reconstruction not fully implemented, need all %d shares", n);
 
-        /* For now, try XOR anyway if we have enough shares */
-        memset(secret_out, 0, CYXWIZ_KEY_SIZE);
-        for (size_t i = 0; i < num_shares; i++) {
-            field_add(secret_out, secret_out, shares[i].value);
-        }
+    /* Collect party IDs for the shares we'll use */
+    uint8_t party_ids[CYXWIZ_MAX_PARTIES];
+    size_t use_count = (num_shares < threshold) ? num_shares : threshold;
+
+    for (size_t i = 0; i < use_count; i++) {
+        party_ids[i] = shares[i].party_id;
+    }
+
+    /* Compute secret = Σ y_i * L_i(0) */
+    memset(secret_out, 0, CYXWIZ_KEY_SIZE);
+
+    for (size_t i = 0; i < use_count; i++) {
+        uint8_t lambda[CYXWIZ_KEY_SIZE];  /* Lagrange coefficient L_i(0) */
+        uint8_t term[CYXWIZ_KEY_SIZE];    /* y_i * L_i(0) */
+
+        /* Compute L_i(0) */
+        lagrange_coeff(lambda, party_ids, use_count, i);
+
+        /* term = shares[i].value * lambda */
+        gf256_mul(term, shares[i].value, lambda);
+
+        /* secret += term */
+        field_add(secret_out, secret_out, term);
     }
 
     CYXWIZ_DEBUG("Reconstructed secret from %zu shares", num_shares);

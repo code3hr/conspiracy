@@ -289,13 +289,13 @@ cyxwiz/
 - [x] Secret sharing with MACs
 - [x] Basic node daemon
 
-### Phase 2: Network Core (In Progress)
+### Phase 2: Network Core ✅
 - [x] UDP/Internet transport with NAT traversal
 - [x] Bootstrap node for peer discovery
 - [x] Onion routing implementation
 - [x] Message routing (multi-hop)
 - [x] SPDZ online computation (Beaver triples)
-- [ ] Full threshold reconstruction
+- [x] Full threshold reconstruction (Shamir's Secret Sharing)
 
 ### Phase 3: Protocol Layer
 - [ ] Compute protocol (job submission/execution)
