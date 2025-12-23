@@ -17,6 +17,10 @@
 #include "cyxwiz/onion.h"
 #endif
 
+#ifdef CYXWIZ_HAS_COMPUTE
+#include "cyxwiz/compute.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +48,9 @@ static cyxwiz_discovery_t *g_discovery = NULL;
 static cyxwiz_router_t *g_router = NULL;
 #ifdef CYXWIZ_HAS_CRYPTO
 static cyxwiz_onion_ctx_t *g_onion = NULL;
+#endif
+#ifdef CYXWIZ_HAS_COMPUTE
+static cyxwiz_compute_ctx_t *g_compute = NULL;
 #endif
 
 static void on_peer_discovered(
@@ -103,6 +110,13 @@ static void on_data_received(
         if (g_discovery != NULL) {
             cyxwiz_discovery_handle_message(g_discovery, from, data, len);
         }
+#ifdef CYXWIZ_HAS_COMPUTE
+    } else if (msg_type >= 0x30 && msg_type <= 0x3F) {
+        /* Compute messages (JOB_SUBMIT, JOB_RESULT, etc.) */
+        if (g_compute != NULL) {
+            cyxwiz_compute_handle_message(g_compute, from, data, len);
+        }
+#endif
     } else {
         CYXWIZ_DEBUG("Unknown message type: 0x%02X", msg_type);
     }
@@ -114,14 +128,23 @@ static void on_routed_data(
     size_t len,
     void *user_data)
 {
-    CYXWIZ_UNUSED(data);
     CYXWIZ_UNUSED(user_data);
 
     char hex_id[65];
     cyxwiz_node_id_to_hex(from, hex_id);
     CYXWIZ_INFO("Received %zu bytes via route from %.16s...", len, hex_id);
 
-    /* TODO: Process application data */
+#ifdef CYXWIZ_HAS_COMPUTE
+    /* Dispatch compute messages received via routing */
+    if (len > 0 && data[0] >= 0x30 && data[0] <= 0x3F) {
+        if (g_compute != NULL) {
+            cyxwiz_compute_handle_message(g_compute, from, data, len);
+        }
+        return;
+    }
+#endif
+
+    /* TODO: Process other application data */
 }
 
 #ifdef CYXWIZ_HAS_CRYPTO
@@ -352,6 +375,18 @@ int main(int argc, char *argv[])
                 CYXWIZ_INFO("Onion routing enabled");
             }
 #endif
+
+#ifdef CYXWIZ_HAS_COMPUTE
+            /* Create compute context */
+            err = cyxwiz_compute_create(&g_compute, g_router, peer_table, crypto_ctx, &local_id);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to create compute context: %s", cyxwiz_strerror(err));
+            } else {
+                /* Enable worker mode by default */
+                cyxwiz_compute_enable_worker(g_compute, 4);
+                CYXWIZ_INFO("Compute protocol enabled (worker mode)");
+            }
+#endif
         }
     }
 
@@ -378,6 +413,13 @@ int main(int argc, char *argv[])
         }
 #endif
 
+#ifdef CYXWIZ_HAS_COMPUTE
+        /* Poll compute context (handles timeouts) */
+        if (g_compute != NULL) {
+            cyxwiz_compute_poll(g_compute, now);
+        }
+#endif
+
         /* Poll all transports */
         if (udp_transport != NULL) {
             udp_transport->ops->poll(udp_transport, 50);
@@ -393,6 +435,14 @@ int main(int argc, char *argv[])
 
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
+
+#ifdef CYXWIZ_HAS_COMPUTE
+    /* Destroy compute context */
+    if (g_compute != NULL) {
+        cyxwiz_compute_destroy(g_compute);
+        g_compute = NULL;
+    }
+#endif
 
 #ifdef CYXWIZ_HAS_CRYPTO
     /* Destroy onion context (before router) */

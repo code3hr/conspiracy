@@ -35,6 +35,10 @@ typedef enum {
     CYXWIZ_ERR_NO_KEY = -14,          /* No shared key with peer */
     CYXWIZ_ERR_CIRCUIT_FULL = -15,    /* Circuit table full */
     CYXWIZ_ERR_EXHAUSTED = -16,       /* Resource exhausted (e.g., triple pool) */
+    CYXWIZ_ERR_JOB_NOT_FOUND = -17,   /* Job not found */
+    CYXWIZ_ERR_JOB_INVALID = -18,     /* Invalid job format */
+    CYXWIZ_ERR_WORKER_BUSY = -19,     /* Worker at capacity */
+    CYXWIZ_ERR_MAC_INVALID = -20,     /* MAC verification failed */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -64,7 +68,20 @@ typedef enum {
     CYXWIZ_MSG_ROUTE_REPLY = 0x21,    /* Route reply (unicast) */
     CYXWIZ_MSG_ROUTE_DATA = 0x22,     /* Routed data packet */
     CYXWIZ_MSG_ROUTE_ERROR = 0x23,    /* Route error notification */
-    CYXWIZ_MSG_ONION_DATA = 0x24      /* Onion-encrypted data packet */
+    CYXWIZ_MSG_ONION_DATA = 0x24,     /* Onion-encrypted data packet */
+
+    /* Compute messages (0x30-0x3F) */
+    CYXWIZ_MSG_JOB_SUBMIT = 0x30,     /* Submit job to worker */
+    CYXWIZ_MSG_JOB_CHUNK = 0x31,      /* Job payload chunk */
+    CYXWIZ_MSG_JOB_ACCEPT = 0x32,     /* Worker accepts job */
+    CYXWIZ_MSG_JOB_REJECT = 0x33,     /* Worker rejects job */
+    CYXWIZ_MSG_JOB_STATUS = 0x34,     /* Status update */
+    CYXWIZ_MSG_JOB_RESULT = 0x35,     /* Result with MAC */
+    CYXWIZ_MSG_JOB_RESULT_CHUNK = 0x36, /* Large result chunk */
+    CYXWIZ_MSG_JOB_ACK = 0x37,        /* Acknowledge result */
+    CYXWIZ_MSG_JOB_CANCEL = 0x38,     /* Cancel job */
+    CYXWIZ_MSG_JOB_QUERY = 0x39,      /* Query workers */
+    CYXWIZ_MSG_JOB_ANNOUNCE = 0x3A    /* Worker availability */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

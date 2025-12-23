@@ -107,12 +107,14 @@ if(CYXWIZ_TRANSPORT_UDP)
     endif()
 endif()
 
-# Core modules (peer discovery, routing)
+# Core modules (peer discovery, routing, compute)
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
     src/core/discovery.c
     src/core/routing.c
+    src/core/compute.c
 )
+add_compile_definitions(CYXWIZ_HAS_COMPUTE=1)
 
 # Onion routing (requires crypto)
 if(CYXWIZ_HAS_CRYPTO)
@@ -195,6 +197,13 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_udp tests/test_udp.c)
         target_link_libraries(test_udp PRIVATE cyxwiz)
         add_test(NAME test_udp COMMAND test_udp)
+    endif()
+
+    # Compute tests (requires crypto for MAC verification)
+    if(CYXWIZ_HAS_CRYPTO)
+        add_executable(test_compute tests/test_compute.c)
+        target_link_libraries(test_compute PRIVATE cyxwiz)
+        add_test(NAME test_compute COMMAND test_compute)
     endif()
 endif()
 

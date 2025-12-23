@@ -257,6 +257,7 @@ cyxwiz/
 │   ├── types.h              # Core types, error codes
 │   ├── transport.h          # Transport abstraction
 │   ├── crypto.h             # MPC crypto API
+│   ├── compute.h            # Job marketplace API
 │   ├── memory.h             # Secure memory utilities
 │   └── log.h                # Logging
 │
@@ -264,7 +265,14 @@ cyxwiz/
 │   ├── transport/           # Transport drivers
 │   │   ├── wifi_direct.c    # WiFi Direct
 │   │   ├── bluetooth.c      # Bluetooth Mesh
-│   │   └── lora.c           # LoRa
+│   │   ├── lora.c           # LoRa
+│   │   └── udp.c            # UDP/Internet
+│   ├── core/                # Core protocol modules
+│   │   ├── peer.c           # Peer table management
+│   │   ├── discovery.c      # Peer discovery
+│   │   ├── routing.c        # Multi-hop message routing
+│   │   ├── onion.c          # Onion routing
+│   │   └── compute.c        # Job marketplace
 │   ├── crypto/              # SPDZ MPC implementation
 │   │   ├── crypto.c         # Context management
 │   │   ├── sharing.c        # Secret sharing
@@ -298,7 +306,7 @@ cyxwiz/
 - [x] Full threshold reconstruction (Shamir's Secret Sharing)
 
 ### Phase 3: Protocol Layer
-- [ ] Compute protocol (job submission/execution)
+- [x] Compute protocol (job marketplace with MAC verification)
 - [ ] Storage protocol (CyxCloud)
 - [ ] Privacy protocol (zero-knowledge proofs)
 - [ ] Consensus mechanism
