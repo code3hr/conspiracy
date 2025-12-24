@@ -450,8 +450,11 @@ cyxwiz/
 | Feature | Status | Description |
 |---------|--------|-------------|
 | Job Marketplace | ✅ | Distributed compute with MAC verification |
+| Anonymous Compute | ✅ | SURB-based anonymous job submission and results |
 | CyxCloud Storage | ✅ | K-of-N threshold distributed storage |
+| Anonymous Storage | ✅ | SURB-based store/retrieve/delete without identity |
 | Proof of Storage | ✅ | Merkle-based storage verification |
+| Anonymous PoS | ✅ | Anonymous storage verification via SURBs |
 | Anonymous Route Discovery | ✅ | SURB-based anonymous routing with destination tokens |
 
 ### Message Types Implemented
@@ -459,9 +462,12 @@ cyxwiz/
 Discovery:    PING, PONG, DISCOVER, ANNOUNCE
 Routing:      ROUTE_REQ, ROUTE_REPLY, ROUTE_DATA, ROUTE_ERROR, ONION_DATA,
               ANON_ROUTE_REQ, ANON_ROUTE_REPLY
-Compute:      JOB_SUBMIT, JOB_CHUNK, JOB_ACCEPT/REJECT, JOB_STATUS, JOB_RESULT, etc.
-Storage:      STORE_REQ/ACK/REJECT, RETRIEVE_REQ/RESP, DELETE_REQ/ACK, etc.
-Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL
+Compute:      JOB_SUBMIT, JOB_CHUNK, JOB_ACCEPT/REJECT, JOB_STATUS, JOB_RESULT,
+              JOB_SUBMIT_ANON (anonymous with SURB)
+Storage:      STORE_REQ/ACK/REJECT, RETRIEVE_REQ/RESP, DELETE_REQ/ACK,
+              STORE_REQ_ANON, RETRIEVE_REQ_ANON, DELETE_REQ_ANON (anonymous with SURBs)
+Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL,
+              POS_CHALLENGE_ANON, POS_REQUEST_COMMIT_ANON (anonymous verification)
 ```
 
 ---
