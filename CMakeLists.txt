@@ -132,6 +132,7 @@ if(CYXWIZ_HAS_CRYPTO)
         src/crypto/primitives.c
         src/crypto/sharing.c
         src/crypto/mac.c
+        src/crypto/zkp.c
     )
     add_compile_definitions(CYXWIZ_HAS_CRYPTO=1)
 endif()
@@ -181,6 +182,10 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_onion tests/test_onion.c)
         target_link_libraries(test_onion PRIVATE cyxwiz)
         add_test(NAME test_onion COMMAND test_onion)
+
+        add_executable(test_zkp tests/test_zkp.c)
+        target_link_libraries(test_zkp PRIVATE cyxwiz)
+        add_test(NAME test_zkp COMMAND test_zkp)
     endif()
 
     add_executable(test_peer tests/test_peer.c)

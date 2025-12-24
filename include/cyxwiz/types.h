@@ -50,6 +50,7 @@ typedef enum {
     CYXWIZ_ERR_POS_CHALLENGE_PENDING = -29, /* Challenge already in progress */
     CYXWIZ_ERR_POS_INVALID_BLOCK = -30, /* Block index out of range */
     CYXWIZ_ERR_INSUFFICIENT_RELAYS = -31, /* Not enough relay nodes for SURB */
+    CYXWIZ_ERR_PROOF_INVALID = -32,       /* ZKP verification failed */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
