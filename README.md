@@ -359,6 +359,7 @@ cyxwiz/
 │   ├── types.h              # Core types, error codes
 │   ├── transport.h          # Transport abstraction
 │   ├── crypto.h             # MPC crypto API
+│   ├── zkp.h                # Zero-knowledge proofs (Schnorr)
 │   ├── compute.h            # Job marketplace API
 │   ├── storage.h            # Distributed storage API
 │   ├── memory.h             # Secure memory utilities
@@ -381,6 +382,7 @@ cyxwiz/
 │   │   ├── crypto.c         # Context management
 │   │   ├── sharing.c        # Secret sharing
 │   │   ├── mac.c            # Information-theoretic MACs
+│   │   ├── zkp.c            # Schnorr identity proofs
 │   │   └── primitives.c     # libsodium wrappers
 │   └── util/                # Utilities
 │
@@ -413,7 +415,8 @@ cyxwiz/
 - [x] Compute protocol (job marketplace with MAC verification)
 - [x] Storage protocol (CyxCloud distributed storage with K-of-N threshold)
 - [x] Proof of Storage (Merkle-based storage verification)
-- [ ] Privacy protocol (zero-knowledge proofs, identity privacy)
+- [x] Schnorr identity proofs (zero-knowledge peer authentication)
+- [ ] Privacy protocol (extended ZKPs, anonymous credentials)
 - [ ] Consensus mechanism
 
 ### Phase 4: Production
@@ -436,6 +439,8 @@ cyxwiz/
 | Shamir's Secret Sharing | ✅ | K-of-N threshold reconstruction |
 | SPDZ MACs | ✅ | Information-theoretic authentication |
 | Beaver Triples | ✅ | Secure multiplication preprocessing |
+| Schnorr Identity Proofs | ✅ | Zero-knowledge peer authentication (64 bytes) |
+| Ed25519 Identity Keys | ✅ | Master identity with X25519 derivation |
 
 ### Network Layer
 | Feature | Status | Description |
@@ -443,6 +448,7 @@ cyxwiz/
 | Multi-hop Routing | ✅ | Source routing with path caching |
 | Onion Routing | ✅ | 3-hop encrypted relay (XChaCha20-Poly1305) |
 | Peer Discovery | ✅ | Broadcast-based with ANNOUNCE messages |
+| Authenticated Discovery | ✅ | Schnorr proofs verify peer identity ownership |
 | UDP Transport | ✅ | NAT traversal with STUN |
 | Bootstrap Nodes | ✅ | Initial peer discovery servers |
 
