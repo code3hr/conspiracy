@@ -58,6 +58,48 @@ cyxwiz_error_t cyxwiz_router_send(
     return CYXWIZ_OK;
 }
 
+/* Mock SURB functions for anonymous storage */
+static bool g_mock_surb_available = true;
+static int g_mock_surb_create_count = 0;
+static int g_mock_surb_send_count = 0;
+
+bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router)
+{
+    (void)router;
+    return g_mock_surb_available;
+}
+
+cyxwiz_error_t cyxwiz_router_create_surb(
+    cyxwiz_router_t *router,
+    cyxwiz_surb_t *surb_out)
+{
+    (void)router;
+    if (!g_mock_surb_available) {
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+    /* Fill with recognizable test pattern */
+    memset(surb_out, 0xAB, sizeof(cyxwiz_surb_t));
+    g_mock_surb_create_count++;
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_router_send_via_surb(
+    cyxwiz_router_t *router,
+    const cyxwiz_surb_t *surb,
+    const uint8_t *data,
+    size_t len)
+{
+    (void)router;
+    (void)surb;
+    if (len > sizeof(g_mock_router.last_data)) {
+        len = sizeof(g_mock_router.last_data);
+    }
+    memcpy(g_mock_router.last_data, data, len);
+    g_mock_router.last_len = len;
+    g_mock_surb_send_count++;
+    return CYXWIZ_OK;
+}
+
 /* Test: Context creation and destruction */
 static int test_context_create(void)
 {
@@ -1254,6 +1296,416 @@ static int test_pos_provider_sends_commitment(void)
     return 1;
 }
 
+/* ============ Anonymous Storage Tests ============ */
+
+/* Test: Anonymous storage capability check */
+static int test_anon_can_store(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+
+    /* Initialize crypto */
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 3, 5, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Test with SURB available */
+    g_mock_surb_available = true;
+    if (!cyxwiz_storage_can_store_anonymous(ctx)) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Test with SURB unavailable */
+    g_mock_surb_available = false;
+    if (cyxwiz_storage_can_store_anonymous(ctx)) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Restore for other tests */
+    g_mock_surb_available = true;
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Anonymous store submission */
+static int test_anon_store_submit(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, provider_id;
+
+    /* Initialize crypto */
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+    memset(&provider_id, 0x02, sizeof(provider_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mock counters */
+    g_mock_router.send_count = 0;
+    g_mock_surb_create_count = 0;
+    g_mock_surb_available = true;
+
+    /* Submit anonymous store */
+    uint8_t data[] = "test anonymous data";
+    cyxwiz_storage_id_t storage_id;
+    uint8_t delete_token[16];
+
+    err = cyxwiz_storage_store_anonymous(ctx, &provider_id, 1, 1,
+                                          data, sizeof(data), 3600,
+                                          &storage_id, delete_token);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify SURB was created */
+    if (g_mock_surb_create_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message was sent */
+    if (g_mock_router.send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is anonymous store */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_STORE_REQ_ANON) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify delete token is non-zero */
+    int has_nonzero = 0;
+    for (size_t i = 0; i < sizeof(delete_token); i++) {
+        if (delete_token[i] != 0) has_nonzero = 1;
+    }
+    if (!has_nonzero) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Anonymous store fails without SURB capability */
+static int test_anon_store_requires_surb(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, provider_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+    memset(&provider_id, 0x02, sizeof(provider_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Disable SURB capability */
+    g_mock_surb_available = false;
+
+    uint8_t data[] = "test";
+    cyxwiz_storage_id_t storage_id;
+    uint8_t delete_token[16];
+
+    err = cyxwiz_storage_store_anonymous(ctx, &provider_id, 1, 1,
+                                          data, sizeof(data), 3600,
+                                          &storage_id, delete_token);
+
+    /* Should fail with INSUFFICIENT_RELAYS */
+    if (err != CYXWIZ_ERR_INSUFFICIENT_RELAYS) {
+        g_mock_surb_available = true;
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    g_mock_surb_available = true;
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Handle anonymous store request as provider */
+static int test_anon_handle_store(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, sender_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+    memset(&sender_id, 0x02, sizeof(sender_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Enable provider mode */
+    err = cyxwiz_storage_enable_provider(ctx, 1024, 3600);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mock counters */
+    g_mock_surb_send_count = 0;
+
+    /* Build anonymous store request message - use larger buffer */
+    uint8_t msg_buf[300];
+    cyxwiz_store_req_anon_msg_t *msg = (cyxwiz_store_req_anon_msg_t *)msg_buf;
+
+    msg->type = CYXWIZ_MSG_STORE_REQ_ANON;
+    memset(msg->storage_id, 0xCC, CYXWIZ_STORAGE_ID_SIZE);
+    msg->share_index = 1;
+    msg->total_shares = 1;
+    msg->threshold = 1;
+    msg->ttl_seconds = 300;
+    msg->total_chunks = 0;
+    msg->payload_len = 20; /* Share + small payload */
+    memset(msg->delete_token, 0xDD, CYXWIZ_MAC_SIZE);
+    memset(&msg->reply_surb, 0xAB, sizeof(cyxwiz_surb_t));
+
+    /* Append share */
+    size_t offset = sizeof(cyxwiz_store_req_anon_msg_t);
+    cyxwiz_share_t share;
+    memset(&share, 0x55, sizeof(share));
+    share.party_id = 1;
+    memcpy(msg_buf + offset, &share, sizeof(share));
+    offset += sizeof(share);
+
+    /* Append encrypted payload (20 bytes total = encrypted_len) */
+    memset(msg_buf + offset, 0xEE, 20);
+    offset += 20;
+
+    /* Handle the message */
+    err = cyxwiz_storage_handle_message(ctx, &sender_id, msg_buf, offset);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify ACK was sent via SURB */
+    if (g_mock_surb_send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify item was stored */
+    if (cyxwiz_storage_stored_count(ctx) != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Anonymous retrieve submission */
+static int test_anon_retrieve_submit(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, provider_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+    memset(&provider_id, 0x02, sizeof(provider_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mock counters */
+    g_mock_router.send_count = 0;
+    g_mock_surb_create_count = 0;
+    g_mock_surb_available = true;
+
+    /* Submit anonymous retrieve */
+    cyxwiz_storage_id_t storage_id;
+    memset(storage_id.bytes, 0xAA, CYXWIZ_STORAGE_ID_SIZE);
+
+    err = cyxwiz_storage_retrieve_anonymous(ctx, &storage_id, &provider_id, 1);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify SURB was created */
+    if (g_mock_surb_create_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message was sent */
+    if (g_mock_router.send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is anonymous retrieve */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_RETRIEVE_REQ_ANON) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Anonymous delete submission */
+static int test_anon_delete_submit(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id, provider_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x01, sizeof(local_id));
+    memset(&provider_id, 0x02, sizeof(provider_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mock counters */
+    g_mock_router.send_count = 0;
+    g_mock_surb_create_count = 0;
+    g_mock_surb_available = true;
+
+    /* Submit anonymous delete */
+    cyxwiz_storage_id_t storage_id;
+    uint8_t delete_token[16];
+    memset(storage_id.bytes, 0xAA, CYXWIZ_STORAGE_ID_SIZE);
+    memset(delete_token, 0xBB, sizeof(delete_token));
+
+    err = cyxwiz_storage_delete_anonymous(ctx, &storage_id, delete_token,
+                                           &provider_id, 1);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify SURB was created */
+    if (g_mock_surb_create_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message was sent */
+    if (g_mock_router.send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is anonymous delete */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_DELETE_REQ_ANON) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
 int main(void)
 {
     printf("\nCyxWiz Storage Tests\n");
@@ -1284,6 +1736,15 @@ int main(void)
     TEST(pos_fail_reason_names);
     TEST(pos_handle_commitment);
     TEST(pos_provider_sends_commitment);
+
+    /* Anonymous storage tests */
+    printf("\n  Anonymous Storage:\n");
+    TEST(anon_can_store);
+    TEST(anon_store_submit);
+    TEST(anon_store_requires_surb);
+    TEST(anon_handle_store);
+    TEST(anon_retrieve_submit);
+    TEST(anon_delete_submit);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

@@ -112,6 +112,9 @@ typedef enum {
     CYXWIZ_MSG_DELETE_ACK = 0x48,     /* Deletion confirmed */
     CYXWIZ_MSG_STORAGE_QUERY = 0x49,  /* Query for providers */
     CYXWIZ_MSG_STORAGE_ANNOUNCE = 0x4A, /* Provider availability */
+    CYXWIZ_MSG_STORE_REQ_ANON = 0x4B,  /* Anonymous store request (with SURB) */
+    CYXWIZ_MSG_RETRIEVE_REQ_ANON = 0x4C, /* Anonymous retrieve request (with SURB) */
+    CYXWIZ_MSG_DELETE_REQ_ANON = 0x4D, /* Anonymous delete request (with SURB) */
 
     /* Proof of Storage messages (0x50-0x5F) */
     CYXWIZ_MSG_POS_COMMITMENT = 0x50,     /* Provider sends commitment after store */

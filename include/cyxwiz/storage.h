@@ -12,6 +12,7 @@
 
 #include "types.h"
 #include "crypto.h"
+#include "routing.h"
 
 /* Forward declarations */
 typedef struct cyxwiz_storage_ctx cyxwiz_storage_ctx_t;
@@ -164,6 +165,11 @@ typedef struct {
     bool is_owner;                        /* Are we the data owner? */
     bool valid;                           /* Is this slot in use? */
 
+    /* Anonymous storage support */
+    bool is_anonymous;                    /* Is this an anonymous operation? */
+    uint8_t delete_token[CYXWIZ_MAC_SIZE]; /* Token for anonymous deletion */
+    cyxwiz_surb_t reply_surbs[CYXWIZ_MAX_STORAGE_PROVIDERS]; /* SURBs for provider replies */
+
     /* Proof of Storage - commitments received from providers */
     cyxwiz_pos_commitment_t pos_commitments[CYXWIZ_MAX_STORAGE_PROVIDERS];
     uint8_t pos_commitments_received;     /* Count of commitments received */
@@ -193,6 +199,10 @@ typedef struct {
     /* Proof of Storage commitment */
     cyxwiz_pos_commitment_t pos_commitment;
     bool has_pos_commitment;              /* Was commitment computed? */
+
+    /* Anonymous storage support */
+    bool is_anonymous;                    /* Was this stored anonymously? */
+    uint8_t delete_token[CYXWIZ_MAC_SIZE]; /* Token for anonymous deletion */
 
     bool valid;
 } cyxwiz_stored_item_t;
@@ -354,6 +364,39 @@ typedef struct {
 } cyxwiz_pos_request_commit_msg_t;
 /* Total: 9 bytes */
 
+/* ============ Anonymous Storage Messages ============ */
+
+/* Anonymous store request (0x4B) - with SURB for reply */
+typedef struct {
+    uint8_t type;                         /* CYXWIZ_MSG_STORE_REQ_ANON */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE]; /* 8 bytes */
+    uint8_t share_index;                  /* Which share (1-indexed) */
+    uint8_t total_shares;                 /* N in K-of-N */
+    uint8_t threshold;                    /* K in K-of-N */
+    uint32_t ttl_seconds;                 /* TTL in seconds */
+    uint8_t total_chunks;                 /* 0 = inline payload, >0 = chunked */
+    uint16_t payload_len;                 /* Total encrypted payload length */
+    uint8_t delete_token[CYXWIZ_MAC_SIZE]; /* 16 bytes - token for anonymous deletion */
+    cyxwiz_surb_t reply_surb;             /* 120 bytes - anonymous reply path */
+    /* cyxwiz_share_t share follows (49 bytes) */
+    /* If total_chunks == 0, encrypted payload follows share */
+} cyxwiz_store_req_anon_msg_t;
+
+/* Anonymous retrieve request (0x4C) - with SURB for reply */
+typedef struct {
+    uint8_t type;                         /* CYXWIZ_MSG_RETRIEVE_REQ_ANON */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE]; /* 8 bytes */
+    cyxwiz_surb_t reply_surb;             /* 120 bytes - anonymous reply path */
+} cyxwiz_retrieve_req_anon_msg_t;
+
+/* Anonymous delete request (0x4D) - with token and SURB */
+typedef struct {
+    uint8_t type;                         /* CYXWIZ_MSG_DELETE_REQ_ANON */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE]; /* 8 bytes */
+    uint8_t delete_token[CYXWIZ_MAC_SIZE]; /* 16 bytes - pre-shared token */
+    cyxwiz_surb_t reply_surb;             /* 120 bytes - anonymous reply path */
+} cyxwiz_delete_req_anon_msg_t;
+
 #pragma pack(pop)
 
 /* ============ Callbacks ============ */
@@ -490,6 +533,87 @@ cyxwiz_error_t cyxwiz_storage_retrieve(
 cyxwiz_error_t cyxwiz_storage_delete(
     cyxwiz_storage_ctx_t *ctx,
     const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers
+);
+
+/* ============ Anonymous Client Operations ============ */
+
+/*
+ * Check if anonymous storage operations are possible
+ * Requires sufficient relay peers to create SURBs
+ *
+ * @param ctx  Storage context
+ * @return     true if anonymous operations can be performed
+ */
+bool cyxwiz_storage_can_store_anonymous(const cyxwiz_storage_ctx_t *ctx);
+
+/*
+ * Store data anonymously across N providers
+ *
+ * Same as cyxwiz_storage_store() but uses SURBs for provider replies,
+ * so providers cannot identify the data owner. A random delete_token
+ * is generated and returned for later deletion.
+ *
+ * @param ctx             Storage context
+ * @param providers       Array of N provider node IDs
+ * @param num_providers   N - total providers
+ * @param threshold       K - minimum shares needed to reconstruct
+ * @param data            Data to store
+ * @param data_len        Length of data
+ * @param ttl_seconds     Time-to-live in seconds
+ * @param storage_id_out  Output: generated storage ID
+ * @param delete_token_out Output: 16-byte token for anonymous deletion
+ * @return                CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_storage_store_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers,
+    uint8_t threshold,
+    const uint8_t *data,
+    size_t data_len,
+    uint32_t ttl_seconds,
+    cyxwiz_storage_id_t *storage_id_out,
+    uint8_t *delete_token_out
+);
+
+/*
+ * Retrieve data anonymously from providers
+ *
+ * Same as cyxwiz_storage_retrieve() but uses SURBs for provider replies.
+ * Provider cannot identify who is requesting the data.
+ *
+ * @param ctx           Storage context
+ * @param storage_id    ID of data to retrieve
+ * @param providers     Array of provider node IDs
+ * @param num_providers Number of providers
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_storage_retrieve_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers
+);
+
+/*
+ * Delete stored data anonymously using delete token
+ *
+ * Uses the delete_token from store_anonymous() to prove authorization
+ * without revealing identity.
+ *
+ * @param ctx           Storage context
+ * @param storage_id    ID of data to delete
+ * @param delete_token  16-byte token from store_anonymous()
+ * @param providers     Array of provider node IDs
+ * @param num_providers Number of providers
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_storage_delete_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const uint8_t *delete_token,
     const cyxwiz_node_id_t *providers,
     size_t num_providers
 );

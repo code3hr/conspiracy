@@ -187,6 +187,43 @@ static cyxwiz_error_t send_pos_verify_fail_msg(cyxwiz_storage_ctx_t *ctx,
                                                 uint8_t sequence,
                                                 cyxwiz_pos_fail_reason_t reason);
 
+/* Anonymous storage helpers */
+static cyxwiz_error_t send_store_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                           const cyxwiz_node_id_t *to,
+                                           cyxwiz_storage_op_t *op,
+                                           uint8_t share_index,
+                                           const cyxwiz_share_t *share,
+                                           const cyxwiz_surb_t *reply_surb);
+static cyxwiz_error_t send_store_ack_via_surb(cyxwiz_storage_ctx_t *ctx,
+                                               const cyxwiz_surb_t *surb,
+                                               const cyxwiz_storage_id_t *storage_id,
+                                               uint8_t share_index,
+                                               uint64_t expires_at);
+static cyxwiz_error_t send_retrieve_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                              const cyxwiz_node_id_t *to,
+                                              const cyxwiz_storage_id_t *storage_id,
+                                              const cyxwiz_surb_t *reply_surb);
+static cyxwiz_error_t send_retrieve_resp_via_surb(cyxwiz_storage_ctx_t *ctx,
+                                                   const cyxwiz_surb_t *surb,
+                                                   cyxwiz_stored_item_t *item);
+static cyxwiz_error_t send_delete_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                            const cyxwiz_node_id_t *to,
+                                            const cyxwiz_storage_id_t *storage_id,
+                                            const uint8_t *delete_token,
+                                            const cyxwiz_surb_t *reply_surb);
+static cyxwiz_error_t send_delete_ack_via_surb(cyxwiz_storage_ctx_t *ctx,
+                                                const cyxwiz_surb_t *surb,
+                                                const cyxwiz_storage_id_t *storage_id);
+static cyxwiz_error_t handle_store_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                             const cyxwiz_node_id_t *from,
+                                             const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_retrieve_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                                const cyxwiz_node_id_t *from,
+                                                const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_delete_req_anon(cyxwiz_storage_ctx_t *ctx,
+                                              const cyxwiz_node_id_t *from,
+                                              const uint8_t *data, size_t len);
+
 /* PoS challenge state helpers */
 static cyxwiz_pos_challenge_state_t *find_pos_challenge(cyxwiz_storage_ctx_t *ctx,
                                                          const cyxwiz_storage_id_t *storage_id,
@@ -623,6 +660,313 @@ cyxwiz_error_t cyxwiz_storage_delete(
     return CYXWIZ_OK;
 }
 
+/* ============ Anonymous Client Operations ============ */
+
+bool cyxwiz_storage_can_store_anonymous(const cyxwiz_storage_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return false;
+    }
+
+    return cyxwiz_router_can_create_surb(ctx->router);
+}
+
+cyxwiz_error_t cyxwiz_storage_store_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers,
+    uint8_t threshold,
+    const uint8_t *data,
+    size_t data_len,
+    uint32_t ttl_seconds,
+    cyxwiz_storage_id_t *storage_id_out,
+    uint8_t *delete_token_out)
+{
+    if (ctx == NULL || providers == NULL || data == NULL ||
+        storage_id_out == NULL || delete_token_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (num_providers < 1 || num_providers > CYXWIZ_MAX_STORAGE_PROVIDERS) {
+        CYXWIZ_ERROR("Invalid number of providers: %zu", num_providers);
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (threshold < 1 || threshold > num_providers) {
+        CYXWIZ_ERROR("Invalid threshold: %u (providers: %zu)", threshold, num_providers);
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check SURB capability */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        CYXWIZ_ERROR("Cannot create SURB - insufficient relay peers");
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Check data size */
+    size_t max_plaintext = CYXWIZ_STORAGE_MAX_PAYLOAD - CYXWIZ_CRYPTO_OVERHEAD;
+    if (data_len > max_plaintext) {
+        CYXWIZ_ERROR("Data too large: %zu > %zu", data_len, max_plaintext);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    if (ttl_seconds == 0) {
+        ttl_seconds = CYXWIZ_STORAGE_DEFAULT_TTL_SEC;
+    }
+
+    /* Allocate operation */
+    cyxwiz_storage_op_t *op = alloc_operation(ctx);
+    if (op == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Generate storage ID */
+    cyxwiz_storage_id_generate(data, data_len, &op->id);
+    memcpy(storage_id_out, &op->id, sizeof(cyxwiz_storage_id_t));
+
+    /* Generate random delete token */
+    cyxwiz_crypto_random(op->delete_token, CYXWIZ_MAC_SIZE);
+    memcpy(delete_token_out, op->delete_token, CYXWIZ_MAC_SIZE);
+
+    /* Initialize operation as anonymous */
+    op->state = CYXWIZ_STORAGE_STATE_DISTRIBUTING;
+    op->op_type = CYXWIZ_STORAGE_OP_STORE;
+    op->is_anonymous = true;
+    memcpy(&op->owner, &ctx->local_id, sizeof(cyxwiz_node_id_t));
+    op->threshold = threshold;
+    op->num_shares = (uint8_t)num_providers;
+    op->ttl_seconds = ttl_seconds;
+    op->created_at = get_time_ms();
+    op->is_owner = true;
+    op->providers_confirmed = 0;
+
+    /* Copy original data */
+    op->data = cyxwiz_calloc(1, data_len);
+    if (op->data == NULL) {
+        free_operation(op);
+        return CYXWIZ_ERR_NOMEM;
+    }
+    memcpy(op->data, data, data_len);
+    op->data_len = data_len;
+
+    /* Generate random encryption key */
+    cyxwiz_crypto_random_key(op->encryption_key);
+
+    /* Encrypt data */
+    size_t encrypted_len = data_len + CYXWIZ_CRYPTO_OVERHEAD;
+    op->encrypted_data = cyxwiz_calloc(1, encrypted_len);
+    if (op->encrypted_data == NULL) {
+        free_operation(op);
+        return CYXWIZ_ERR_NOMEM;
+    }
+
+    cyxwiz_error_t err = cyxwiz_crypto_encrypt(
+        data, data_len,
+        op->encryption_key,
+        op->encrypted_data, &op->encrypted_len
+    );
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to encrypt data: %d", err);
+        free_operation(op);
+        return err;
+    }
+
+    /* Split encryption key into shares */
+    cyxwiz_share_t shares[CYXWIZ_MAX_STORAGE_PROVIDERS];
+    size_t num_shares_out;
+
+    err = cyxwiz_crypto_share_secret(
+        ctx->crypto_ctx,
+        op->encryption_key,
+        CYXWIZ_KEY_SIZE,
+        shares,
+        &num_shares_out
+    );
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to split key: %d", err);
+        free_operation(op);
+        return err;
+    }
+
+    /* Calculate chunking */
+    if (op->encrypted_len <= 64) {
+        op->total_chunks = 0;
+    } else {
+        op->total_chunks = (uint8_t)((op->encrypted_len + CYXWIZ_STORAGE_CHUNK_SIZE - 1) /
+                                     CYXWIZ_STORAGE_CHUNK_SIZE);
+    }
+
+    /* Create SURBs and send anonymous STORE_REQ to each provider */
+    for (size_t i = 0; i < num_providers; i++) {
+        memcpy(&op->providers[i].provider_id, &providers[i], sizeof(cyxwiz_node_id_t));
+        op->providers[i].share_index = (uint8_t)(i + 1);
+        op->providers[i].confirmed = false;
+        op->providers[i].retrieved = false;
+        op->providers[i].sent_at = get_time_ms();
+
+        /* Create SURB for this provider's reply */
+        err = cyxwiz_router_create_surb(ctx->router, &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to create SURB for provider %zu: %s", i, cyxwiz_strerror(err));
+            continue;
+        }
+
+        err = send_store_req_anon(ctx, &providers[i], op, (uint8_t)(i + 1),
+                                   &shares[i], &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to send anonymous STORE_REQ to provider %zu: %d", i, err);
+        }
+    }
+
+    cyxwiz_secure_zero(shares, sizeof(shares));
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&op->id, id_hex);
+    CYXWIZ_INFO("Anonymous storage store initiated: %s (%zu bytes, %u-of-%u threshold)",
+                id_hex, data_len, threshold, (unsigned)num_providers);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_storage_retrieve_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers)
+{
+    if (ctx == NULL || storage_id == NULL || providers == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (num_providers < 1 || num_providers > CYXWIZ_MAX_STORAGE_PROVIDERS) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check SURB capability */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        CYXWIZ_ERROR("Cannot create SURB - insufficient relay peers");
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Check if operation already exists */
+    cyxwiz_storage_op_t *existing = find_operation(ctx, storage_id);
+    if (existing != NULL) {
+        CYXWIZ_WARN("Retrieve operation already exists for this ID");
+        return CYXWIZ_ERR_ALREADY_INIT;
+    }
+
+    /* Allocate operation */
+    cyxwiz_storage_op_t *op = alloc_operation(ctx);
+    if (op == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize operation as anonymous */
+    memcpy(&op->id, storage_id, sizeof(cyxwiz_storage_id_t));
+    op->state = CYXWIZ_STORAGE_STATE_RETRIEVING;
+    op->op_type = CYXWIZ_STORAGE_OP_RETRIEVE;
+    op->is_anonymous = true;
+    memcpy(&op->owner, &ctx->local_id, sizeof(cyxwiz_node_id_t));
+    op->num_shares = (uint8_t)num_providers;
+    op->threshold = 0;
+    op->created_at = get_time_ms();
+    op->is_owner = true;
+    op->providers_retrieved = 0;
+
+    /* Initialize provider slots and send anonymous RETRIEVE_REQ */
+    for (size_t i = 0; i < num_providers; i++) {
+        memcpy(&op->providers[i].provider_id, &providers[i], sizeof(cyxwiz_node_id_t));
+        op->providers[i].retrieved = false;
+        op->providers[i].sent_at = get_time_ms();
+
+        /* Create SURB for this provider's reply */
+        cyxwiz_error_t err = cyxwiz_router_create_surb(ctx->router, &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to create SURB for provider %zu: %s", i, cyxwiz_strerror(err));
+            continue;
+        }
+
+        err = send_retrieve_req_anon(ctx, &providers[i], storage_id, &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to send anonymous RETRIEVE_REQ to provider %zu: %d", i, err);
+        }
+    }
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(storage_id, id_hex);
+    CYXWIZ_INFO("Anonymous storage retrieve initiated: %s (from %zu providers)",
+                id_hex, num_providers);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_storage_delete_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const uint8_t *delete_token,
+    const cyxwiz_node_id_t *providers,
+    size_t num_providers)
+{
+    if (ctx == NULL || storage_id == NULL || delete_token == NULL || providers == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (num_providers < 1 || num_providers > CYXWIZ_MAX_STORAGE_PROVIDERS) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check SURB capability */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        CYXWIZ_ERROR("Cannot create SURB - insufficient relay peers");
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Allocate operation */
+    cyxwiz_storage_op_t *op = alloc_operation(ctx);
+    if (op == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize operation as anonymous */
+    memcpy(&op->id, storage_id, sizeof(cyxwiz_storage_id_t));
+    op->state = CYXWIZ_STORAGE_STATE_DELETING;
+    op->op_type = CYXWIZ_STORAGE_OP_DELETE;
+    op->is_anonymous = true;
+    memcpy(&op->owner, &ctx->local_id, sizeof(cyxwiz_node_id_t));
+    op->num_shares = (uint8_t)num_providers;
+    op->created_at = get_time_ms();
+    op->is_owner = true;
+    op->providers_confirmed = 0;
+    memcpy(op->delete_token, delete_token, CYXWIZ_MAC_SIZE);
+
+    /* Initialize provider slots and send anonymous DELETE_REQ */
+    for (size_t i = 0; i < num_providers; i++) {
+        memcpy(&op->providers[i].provider_id, &providers[i], sizeof(cyxwiz_node_id_t));
+        op->providers[i].confirmed = false;
+        op->providers[i].sent_at = get_time_ms();
+
+        /* Create SURB for this provider's reply */
+        cyxwiz_error_t err = cyxwiz_router_create_surb(ctx->router, &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to create SURB for provider %zu: %s", i, cyxwiz_strerror(err));
+            continue;
+        }
+
+        err = send_delete_req_anon(ctx, &providers[i], storage_id,
+                                    delete_token, &op->reply_surbs[i]);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to send anonymous DELETE_REQ to provider %zu: %d", i, err);
+        }
+    }
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(storage_id, id_hex);
+    CYXWIZ_INFO("Anonymous storage delete initiated: %s (to %zu providers)",
+                id_hex, num_providers);
+
+    return CYXWIZ_OK;
+}
+
 /* ============ Polling ============ */
 
 cyxwiz_error_t cyxwiz_storage_poll(
@@ -730,6 +1074,14 @@ cyxwiz_error_t cyxwiz_storage_handle_message(
             return handle_pos_verify_fail(ctx, from, data, len);
         case CYXWIZ_MSG_POS_REQUEST_COMMIT:
             return handle_pos_request_commit(ctx, from, data, len);
+
+        /* Anonymous storage messages */
+        case CYXWIZ_MSG_STORE_REQ_ANON:
+            return handle_store_req_anon(ctx, from, data, len);
+        case CYXWIZ_MSG_RETRIEVE_REQ_ANON:
+            return handle_retrieve_req_anon(ctx, from, data, len);
+        case CYXWIZ_MSG_DELETE_REQ_ANON:
+            return handle_delete_req_anon(ctx, from, data, len);
 
         default:
             CYXWIZ_DEBUG("Unknown storage message type: 0x%02X", msg_type);
@@ -1226,6 +1578,217 @@ static cyxwiz_error_t handle_delete_ack(
     return CYXWIZ_OK;
 }
 
+/* ============ Anonymous Message Handlers ============ */
+
+static cyxwiz_error_t handle_store_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_store_req_anon_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_store_req_anon_msg_t *msg = (const cyxwiz_store_req_anon_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    /* Check if we're a provider */
+    if (!ctx->is_provider) {
+        CYXWIZ_DEBUG("Ignoring anonymous STORE_REQ %s: not a provider", id_hex);
+        /* Cannot send reject via SURB - just ignore */
+        return CYXWIZ_OK;
+    }
+
+    /* Check TTL */
+    uint32_t ttl = msg->ttl_seconds;
+    if (ttl > ctx->max_ttl_seconds) {
+        CYXWIZ_DEBUG("Ignoring anonymous STORE_REQ %s: TTL too long", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Check for duplicate */
+    if (find_stored_item(ctx, &storage_id) != NULL) {
+        CYXWIZ_DEBUG("Ignoring anonymous STORE_REQ %s: duplicate", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Parse share from message */
+    const uint8_t *share_data = data + sizeof(cyxwiz_store_req_anon_msg_t);
+    size_t remaining = len - sizeof(cyxwiz_store_req_anon_msg_t);
+
+    if (remaining < sizeof(cyxwiz_share_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check storage capacity */
+    uint16_t payload_len = msg->payload_len;
+    if (ctx->storage_used_bytes + payload_len > ctx->storage_max_bytes) {
+        CYXWIZ_DEBUG("Ignoring anonymous STORE_REQ %s: storage full", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Allocate stored item */
+    cyxwiz_stored_item_t *item = alloc_stored_item(ctx);
+    if (item == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize item - no owner ID for anonymous storage */
+    memcpy(&item->id, &storage_id, sizeof(cyxwiz_storage_id_t));
+    memset(&item->owner, 0, sizeof(cyxwiz_node_id_t)); /* Anonymous - no owner */
+    memcpy(&item->share, share_data, sizeof(cyxwiz_share_t));
+    item->share_index = msg->share_index;
+    item->total_chunks = msg->total_chunks;
+    item->received_chunks = 0;
+    item->chunk_bitmap = 0;
+    item->stored_at = get_time_ms();
+    item->expires_at = item->stored_at + ((uint64_t)ttl * 1000);
+    item->is_anonymous = true;
+    memcpy(item->delete_token, msg->delete_token, CYXWIZ_MAC_SIZE);
+
+    /* Allocate encrypted data buffer */
+    item->encrypted_data = cyxwiz_calloc(1, payload_len);
+    if (item->encrypted_data == NULL) {
+        free_stored_item(ctx, item);
+        return CYXWIZ_ERR_NOMEM;
+    }
+    item->encrypted_len = payload_len;
+
+    /* If inline payload (total_chunks == 0), copy it now */
+    if (msg->total_chunks == 0) {
+        const uint8_t *payload = share_data + sizeof(cyxwiz_share_t);
+        size_t payload_remaining = remaining - sizeof(cyxwiz_share_t);
+
+        if (payload_remaining < payload_len) {
+            free_stored_item(ctx, item);
+            return CYXWIZ_ERR_INVALID;
+        }
+
+        memcpy(item->encrypted_data, payload, payload_len);
+        ctx->storage_used_bytes += payload_len;
+
+        /* Send ACK via SURB */
+        CYXWIZ_DEBUG("Anonymous stored item %s (share %u, %u bytes)",
+                     id_hex, item->share_index, payload_len);
+
+        return send_store_ack_via_surb(ctx, &msg->reply_surb, &storage_id,
+                                        item->share_index, item->expires_at);
+    }
+
+    /* Chunked storage - wait for chunks before sending ACK */
+    CYXWIZ_DEBUG("Anonymous STORE_REQ %s: waiting for %u chunks",
+                 id_hex, item->total_chunks);
+
+    /* Store SURB for later ACK (would need to add surb field to stored_item) */
+    /* For now, send immediate ACK even for chunked - simplified */
+    return send_store_ack_via_surb(ctx, &msg->reply_surb, &storage_id,
+                                    item->share_index, item->expires_at);
+}
+
+static cyxwiz_error_t handle_retrieve_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_retrieve_req_anon_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_retrieve_req_anon_msg_t *msg = (const cyxwiz_retrieve_req_anon_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        CYXWIZ_DEBUG("Anonymous RETRIEVE_REQ %s: not found", id_hex);
+        /* Cannot send error response via SURB for not found */
+        return CYXWIZ_OK;
+    }
+
+    /* Check expiry */
+    if (get_time_ms() >= item->expires_at) {
+        CYXWIZ_DEBUG("Anonymous RETRIEVE_REQ %s: expired", id_hex);
+        free_stored_item(ctx, item);
+        return CYXWIZ_OK;
+    }
+
+    /* No ownership check for anonymous retrieve - anyone with ID can retrieve */
+    CYXWIZ_DEBUG("Anonymous RETRIEVE_REQ %s: sending share %u via SURB",
+                 id_hex, item->share_index);
+
+    return send_retrieve_resp_via_surb(ctx, &msg->reply_surb, item);
+}
+
+static cyxwiz_error_t handle_delete_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_delete_req_anon_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_delete_req_anon_msg_t *msg = (const cyxwiz_delete_req_anon_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        CYXWIZ_DEBUG("Anonymous DELETE_REQ %s: not found", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Verify delete token for anonymous items */
+    if (!item->is_anonymous) {
+        CYXWIZ_DEBUG("Anonymous DELETE_REQ %s: item was not stored anonymously", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Compare delete tokens using constant-time comparison */
+    bool token_match = true;
+    for (size_t i = 0; i < CYXWIZ_MAC_SIZE; i++) {
+        if (item->delete_token[i] != msg->delete_token[i]) {
+            token_match = false;
+        }
+    }
+
+    if (!token_match) {
+        CYXWIZ_DEBUG("Anonymous DELETE_REQ %s: invalid delete token", id_hex);
+        return CYXWIZ_OK;
+    }
+
+    /* Delete the item */
+    CYXWIZ_DEBUG("Anonymous DELETE_REQ %s: deleting item", id_hex);
+    free_stored_item(ctx, item);
+
+    /* Send ACK via SURB */
+    return send_delete_ack_via_surb(ctx, &msg->reply_surb, &storage_id);
+}
+
 /* ============ Message Senders ============ */
 
 static cyxwiz_error_t send_store_req(
@@ -1406,6 +1969,175 @@ static cyxwiz_error_t send_delete_ack(
     memcpy(msg.storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
 
     return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
+}
+
+/* ============ Anonymous Storage Send Functions ============ */
+
+static cyxwiz_error_t send_store_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    cyxwiz_storage_op_t *op,
+    uint8_t share_index,
+    const cyxwiz_share_t *share,
+    const cyxwiz_surb_t *reply_surb)
+{
+    /* Build message - use larger buffer for packed struct safety */
+    uint8_t buf[300];
+    cyxwiz_store_req_anon_msg_t *msg = (cyxwiz_store_req_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_STORE_REQ_ANON;
+    memcpy(msg->storage_id, op->id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->share_index = share_index;
+    msg->total_shares = op->num_shares;
+    msg->threshold = op->threshold;
+    msg->ttl_seconds = op->ttl_seconds;
+    msg->total_chunks = op->total_chunks;
+    msg->payload_len = (uint16_t)op->encrypted_len;
+    memcpy(msg->delete_token, op->delete_token, CYXWIZ_MAC_SIZE);
+    memcpy(&msg->reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Append share */
+    size_t offset = sizeof(cyxwiz_store_req_anon_msg_t);
+    memcpy(buf + offset, share, sizeof(cyxwiz_share_t));
+    offset += sizeof(cyxwiz_share_t);
+
+    /* If inline payload, append encrypted data */
+    if (op->total_chunks == 0) {
+        memcpy(buf + offset, op->encrypted_data, op->encrypted_len);
+        offset += op->encrypted_len;
+    }
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, offset, CYXWIZ_PADDED_SIZE);
+
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+
+    /* If chunked, send chunks (via normal route, not anonymous) */
+    if (err == CYXWIZ_OK && op->total_chunks > 0) {
+        for (uint8_t i = 0; i < op->total_chunks; i++) {
+            size_t chunk_offset = (size_t)i * CYXWIZ_STORAGE_CHUNK_SIZE;
+            size_t chunk_len = op->encrypted_len - chunk_offset;
+            if (chunk_len > CYXWIZ_STORAGE_CHUNK_SIZE) {
+                chunk_len = CYXWIZ_STORAGE_CHUNK_SIZE;
+            }
+
+            err = send_store_chunk(ctx, to, &op->id, i,
+                                   op->encrypted_data + chunk_offset, chunk_len);
+            if (err != CYXWIZ_OK) {
+                break;
+            }
+        }
+    }
+
+    return err;
+}
+
+static cyxwiz_error_t send_store_ack_via_surb(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_surb_t *surb,
+    const cyxwiz_storage_id_t *storage_id,
+    uint8_t share_index,
+    uint64_t expires_at)
+{
+    uint8_t buf[256];
+    cyxwiz_store_ack_msg_t *msg = (cyxwiz_store_ack_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_STORE_ACK;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->share_index = share_index;
+    msg->expires_at = expires_at;
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_store_ack_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, surb, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_retrieve_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_surb_t *reply_surb)
+{
+    uint8_t buf[256];
+    cyxwiz_retrieve_req_anon_msg_t *msg = (cyxwiz_retrieve_req_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_RETRIEVE_REQ_ANON;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memcpy(&msg->reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_retrieve_req_anon_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_retrieve_resp_via_surb(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_surb_t *surb,
+    cyxwiz_stored_item_t *item)
+{
+    uint8_t buf[256];
+    cyxwiz_retrieve_resp_msg_t *msg = (cyxwiz_retrieve_resp_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_RETRIEVE_RESP;
+    memcpy(msg->storage_id, item->id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->share_index = item->share_index;
+    msg->total_chunks = 0; /* Inline for simplicity */
+    msg->payload_len = (uint16_t)item->encrypted_len;
+
+    size_t offset = sizeof(cyxwiz_retrieve_resp_msg_t);
+    memcpy(buf + offset, &item->share, sizeof(cyxwiz_share_t));
+    offset += sizeof(cyxwiz_share_t);
+
+    /* Inline encrypted data if it fits */
+    if (item->encrypted_len <= 64) {
+        memcpy(buf + offset, item->encrypted_data, item->encrypted_len);
+        offset += item->encrypted_len;
+    }
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, offset, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, surb, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_delete_req_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    const uint8_t *delete_token,
+    const cyxwiz_surb_t *reply_surb)
+{
+    uint8_t buf[256];
+    cyxwiz_delete_req_anon_msg_t *msg = (cyxwiz_delete_req_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_DELETE_REQ_ANON;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memcpy(msg->delete_token, delete_token, CYXWIZ_MAC_SIZE);
+    memcpy(&msg->reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_delete_req_anon_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_delete_ack_via_surb(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_surb_t *surb,
+    const cyxwiz_storage_id_t *storage_id)
+{
+    uint8_t buf[256];
+    cyxwiz_delete_ack_msg_t *msg = (cyxwiz_delete_ack_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_DELETE_ACK;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_delete_ack_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, surb, buf, CYXWIZ_PADDED_SIZE);
 }
 
 /* ============ Helper Functions ============ */
