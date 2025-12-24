@@ -122,7 +122,9 @@ typedef enum {
     CYXWIZ_MSG_POS_PROOF = 0x52,          /* Provider responds with proof */
     CYXWIZ_MSG_POS_VERIFY_OK = 0x53,      /* Owner confirms proof valid */
     CYXWIZ_MSG_POS_VERIFY_FAIL = 0x54,    /* Owner reports proof invalid */
-    CYXWIZ_MSG_POS_REQUEST_COMMIT = 0x55  /* Owner requests commitment (retry) */
+    CYXWIZ_MSG_POS_REQUEST_COMMIT = 0x55, /* Owner requests commitment (retry) */
+    CYXWIZ_MSG_POS_CHALLENGE_ANON = 0x56, /* Anonymous challenge with SURB for proof */
+    CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON = 0x57 /* Anonymous commitment request with SURB */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

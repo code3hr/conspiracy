@@ -105,6 +105,7 @@ typedef struct {
     uint8_t sequence;                            /* Challenge sequence number */
     uint64_t sent_at;                            /* When challenge was sent */
     bool active;                                 /* Is this slot in use? */
+    bool is_anonymous;                           /* Was this an anonymous challenge? */
 } cyxwiz_pos_challenge_state_t;
 
 /* ============ Provider Slot (tracks one provider in an operation) ============ */
@@ -363,6 +364,24 @@ typedef struct {
     uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
 } cyxwiz_pos_request_commit_msg_t;
 /* Total: 9 bytes */
+
+/* POS_CHALLENGE_ANON (0x56) - Anonymous challenge with SURB for proof response */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_CHALLENGE_ANON */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    uint8_t block_index;                         /* Which block to prove */
+    uint8_t challenge_nonce[CYXWIZ_POS_CHALLENGE_SIZE]; /* 8 bytes freshness */
+    cyxwiz_surb_t reply_surb;                    /* 120 bytes - for proof response */
+} cyxwiz_pos_challenge_anon_msg_t;
+/* Total: 138 bytes - fits MTU */
+
+/* POS_REQUEST_COMMIT_ANON (0x57) - Anonymous commitment request with SURB */
+typedef struct {
+    uint8_t type;                                /* CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON */
+    uint8_t storage_id[CYXWIZ_STORAGE_ID_SIZE];  /* 8 bytes */
+    cyxwiz_surb_t reply_surb;                    /* 120 bytes - for commitment response */
+} cyxwiz_pos_request_commit_anon_msg_t;
+/* Total: 129 bytes - fits MTU */
 
 /* ============ Anonymous Storage Messages ============ */
 
@@ -850,5 +869,43 @@ size_t cyxwiz_pos_challenge_count(const cyxwiz_storage_ctx_t *ctx);
  * Get human-readable PoS failure reason name
  */
 const char *cyxwiz_pos_fail_reason_name(cyxwiz_pos_fail_reason_t reason);
+
+/* ============ Anonymous Proof of Storage API ============ */
+
+/*
+ * Issue an anonymous PoS challenge to a provider (owner-side)
+ *
+ * Uses a SURB for the proof response, so provider cannot identify
+ * who is verifying their storage. Requires prior commitment.
+ *
+ * @param ctx         Storage context
+ * @param storage_id  Storage ID to challenge
+ * @param provider_id Provider to challenge
+ * @param commitment  Commitment to verify against
+ * @return            CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_challenge_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id,
+    const cyxwiz_pos_commitment_t *commitment
+);
+
+/*
+ * Request commitment anonymously (for anonymous storage)
+ *
+ * Uses a SURB for the commitment response. For use when data was
+ * stored anonymously and owner doesn't have a commitment yet.
+ *
+ * @param ctx         Storage context
+ * @param storage_id  Storage ID
+ * @param provider_id Provider to request from
+ * @return            CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_pos_request_commitment_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id
+);
 
 #endif /* CYXWIZ_STORAGE_H */

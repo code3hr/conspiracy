@@ -20,6 +20,7 @@ static int tests_passed = 0;
 
 #define TEST(name) do { \
     printf("  Testing: %s...", #name); \
+    fflush(stdout); \
     tests_run++; \
     if (test_##name()) { \
         printf(" PASS\n"); \
@@ -27,6 +28,7 @@ static int tests_passed = 0;
     } else { \
         printf(" FAIL\n"); \
     } \
+    fflush(stdout); \
 } while(0)
 
 /* Mock router for testing */
@@ -1706,6 +1708,384 @@ static int test_anon_delete_submit(void)
     return 1;
 }
 
+/* ============ Anonymous PoS Tests ============ */
+
+/* Test: Anonymous storage computes PoS commitment */
+static int test_anon_storage_has_commitment(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_t client_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x0B, sizeof(local_id));
+    memset(&client_id, 0xC2, sizeof(client_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Enable provider mode */
+    err = cyxwiz_storage_enable_provider(ctx, 1024 * 1024, 3600);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mocks */
+    g_mock_router.send_count = 0;
+    g_mock_surb_available = true;
+    g_mock_surb_send_count = 0;
+
+    /* Build an anonymous STORE_REQ message */
+    uint8_t msg[300];
+    cyxwiz_store_req_anon_msg_t *req = (cyxwiz_store_req_anon_msg_t *)msg;
+    req->type = CYXWIZ_MSG_STORE_REQ_ANON;
+    memset(req->storage_id, 0xAC, CYXWIZ_STORAGE_ID_SIZE);
+    req->share_index = 1;
+    req->total_shares = 2;
+    req->threshold = 2;
+    req->ttl_seconds = 3600;
+    req->total_chunks = 0;  /* Inline */
+    req->payload_len = 64;
+    memset(req->delete_token, 0xDD, CYXWIZ_MAC_SIZE);
+    memset(&req->reply_surb, 0xAB, sizeof(cyxwiz_surb_t));
+
+    /* Append share */
+    size_t offset = sizeof(cyxwiz_store_req_anon_msg_t);
+    cyxwiz_share_t share;
+    memset(&share, 0x55, sizeof(cyxwiz_share_t));
+    share.party_id = 1;
+    memcpy(msg + offset, &share, sizeof(cyxwiz_share_t));
+    offset += sizeof(cyxwiz_share_t);
+
+    /* Append payload */
+    memset(msg + offset, 0xDA, 64);
+    offset += 64;
+
+    /* Handle the anonymous store request */
+    err = cyxwiz_storage_handle_message(ctx, &client_id, msg, offset);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify ACK was sent via SURB */
+    if (g_mock_surb_send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify ACK message type */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_STORE_ACK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Now test that requesting commitment anonymously works */
+    /* Build anonymous commitment request */
+    cyxwiz_pos_request_commit_anon_msg_t commit_req;
+    commit_req.type = CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON;
+    memset(commit_req.storage_id, 0xAC, CYXWIZ_STORAGE_ID_SIZE);
+    memset(&commit_req.reply_surb, 0xCD, sizeof(cyxwiz_surb_t));
+
+    g_mock_surb_send_count = 0;
+
+    /* Handle the commitment request */
+    err = cyxwiz_storage_handle_message(ctx, &client_id,
+                                         (uint8_t *)&commit_req, sizeof(commit_req));
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify commitment sent via SURB */
+    if (g_mock_surb_send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify commitment message type */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_COMMITMENT) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Anonymous PoS challenge */
+static int test_pos_challenge_anon(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_t provider_id;
+    cyxwiz_storage_id_t storage_id;
+    cyxwiz_pos_commitment_t commitment;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 2, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x0C, sizeof(local_id));
+    memset(&provider_id, 0xF3, sizeof(provider_id));
+    memset(&storage_id, 0xAD, sizeof(storage_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Create a mock commitment */
+    memset(commitment.merkle_root, 0xBB, CYXWIZ_POS_HASH_SIZE);
+    commitment.num_blocks = 2;
+    memcpy(&commitment.storage_id, &storage_id, sizeof(storage_id));
+
+    /* Reset mocks */
+    g_mock_router.send_count = 0;
+    g_mock_surb_available = true;
+    g_mock_surb_create_count = 0;
+
+    /* Issue anonymous challenge */
+    err = cyxwiz_pos_challenge_anonymous(ctx, &storage_id, &provider_id, &commitment);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify SURB was created */
+    if (g_mock_surb_create_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message was sent */
+    if (g_mock_router.send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is anonymous challenge */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_CHALLENGE_ANON) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify challenge state was created */
+    if (cyxwiz_pos_challenge_count(ctx) != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Handle anonymous PoS challenge (provider side) */
+static int test_pos_handle_challenge_anon(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_t client_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 3, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x0D, sizeof(local_id));
+    memset(&client_id, 0xC3, sizeof(client_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Enable provider mode */
+    err = cyxwiz_storage_enable_provider(ctx, 1024 * 1024, 3600);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* First store some data anonymously */
+    g_mock_surb_available = true;
+    g_mock_surb_send_count = 0;
+
+    uint8_t msg[300];
+    cyxwiz_store_req_anon_msg_t *req = (cyxwiz_store_req_anon_msg_t *)msg;
+    req->type = CYXWIZ_MSG_STORE_REQ_ANON;
+    memset(req->storage_id, 0xAE, CYXWIZ_STORAGE_ID_SIZE);
+    req->share_index = 1;
+    req->total_shares = 2;
+    req->threshold = 2;
+    req->ttl_seconds = 3600;
+    req->total_chunks = 0;
+    req->payload_len = 64;  /* 1 block */
+    memset(req->delete_token, 0xDD, CYXWIZ_MAC_SIZE);
+    memset(&req->reply_surb, 0xAB, sizeof(cyxwiz_surb_t));
+
+    size_t offset = sizeof(cyxwiz_store_req_anon_msg_t);
+    cyxwiz_share_t share;
+    memset(&share, 0x55, sizeof(cyxwiz_share_t));
+    share.party_id = 1;
+    memcpy(msg + offset, &share, sizeof(cyxwiz_share_t));
+    offset += sizeof(cyxwiz_share_t);
+
+    memset(msg + offset, 0xDA, 64);
+    offset += 64;
+
+    err = cyxwiz_storage_handle_message(ctx, &client_id, msg, offset);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Now send anonymous challenge */
+    cyxwiz_pos_challenge_anon_msg_t challenge;
+    challenge.type = CYXWIZ_MSG_POS_CHALLENGE_ANON;
+    memset(challenge.storage_id, 0xAE, CYXWIZ_STORAGE_ID_SIZE);
+    challenge.block_index = 0;
+    memset(challenge.challenge_nonce, 0x12, CYXWIZ_POS_CHALLENGE_SIZE);
+    memset(&challenge.reply_surb, 0xEF, sizeof(cyxwiz_surb_t));
+
+    g_mock_surb_send_count = 0;
+
+    err = cyxwiz_storage_handle_message(ctx, &client_id,
+                                         (uint8_t *)&challenge, sizeof(challenge));
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify proof was sent via SURB */
+    if (g_mock_surb_send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is proof */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_PROOF) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
+/* Test: Request commitment anonymously */
+static int test_pos_request_commit_anon(void)
+{
+    cyxwiz_error_t err;
+    cyxwiz_storage_ctx_t *ctx = NULL;
+    cyxwiz_crypto_ctx_t *crypto = NULL;
+    cyxwiz_node_id_t local_id;
+    cyxwiz_node_id_t provider_id;
+    cyxwiz_storage_id_t storage_id;
+
+    err = cyxwiz_crypto_init();
+    if (err != CYXWIZ_OK) return 0;
+
+    err = cyxwiz_crypto_create(&crypto, 2, 2, 1);
+    if (err != CYXWIZ_OK) return 0;
+
+    memset(&local_id, 0x0E, sizeof(local_id));
+    memset(&provider_id, 0xF4, sizeof(provider_id));
+    memset(&storage_id, 0xAF, sizeof(storage_id));
+
+    err = cyxwiz_storage_create(&ctx, (cyxwiz_router_t *)&g_mock_router,
+                                 NULL, crypto, &local_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Reset mocks */
+    g_mock_router.send_count = 0;
+    g_mock_surb_available = true;
+    g_mock_surb_create_count = 0;
+
+    /* Request commitment anonymously */
+    err = cyxwiz_pos_request_commitment_anonymous(ctx, &storage_id, &provider_id);
+    if (err != CYXWIZ_OK) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify SURB was created */
+    if (g_mock_surb_create_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message was sent */
+    if (g_mock_router.send_count != 1) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    /* Verify message type is anonymous commitment request */
+    if (g_mock_router.last_data[0] != CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON) {
+        cyxwiz_storage_destroy(ctx);
+        cyxwiz_crypto_destroy(crypto);
+        return 0;
+    }
+
+    cyxwiz_storage_destroy(ctx);
+    cyxwiz_crypto_destroy(crypto);
+
+    return 1;
+}
+
 int main(void)
 {
     printf("\nCyxWiz Storage Tests\n");
@@ -1745,6 +2125,13 @@ int main(void)
     TEST(anon_handle_store);
     TEST(anon_retrieve_submit);
     TEST(anon_delete_submit);
+
+    /* Anonymous PoS tests */
+    printf("\n  Anonymous Proof of Storage:\n");
+    TEST(anon_storage_has_commitment);
+    TEST(pos_challenge_anon);
+    TEST(pos_handle_challenge_anon);
+    TEST(pos_request_commit_anon);
 
     printf("\n====================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

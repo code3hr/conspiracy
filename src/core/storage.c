@@ -187,6 +187,32 @@ static cyxwiz_error_t send_pos_verify_fail_msg(cyxwiz_storage_ctx_t *ctx,
                                                 uint8_t sequence,
                                                 cyxwiz_pos_fail_reason_t reason);
 
+/* Anonymous PoS message senders and handlers */
+static cyxwiz_error_t send_pos_challenge_anon_msg(cyxwiz_storage_ctx_t *ctx,
+                                                   const cyxwiz_node_id_t *to,
+                                                   const cyxwiz_storage_id_t *storage_id,
+                                                   uint8_t block_index,
+                                                   const uint8_t *nonce,
+                                                   const cyxwiz_surb_t *reply_surb);
+static cyxwiz_error_t send_pos_request_commit_anon_msg(cyxwiz_storage_ctx_t *ctx,
+                                                        const cyxwiz_node_id_t *to,
+                                                        const cyxwiz_storage_id_t *storage_id,
+                                                        const cyxwiz_surb_t *reply_surb);
+static cyxwiz_error_t send_pos_commitment_via_surb(cyxwiz_storage_ctx_t *ctx,
+                                                    const cyxwiz_surb_t *surb,
+                                                    const cyxwiz_pos_commitment_t *commitment);
+static cyxwiz_error_t send_pos_proof_via_surb(cyxwiz_storage_ctx_t *ctx,
+                                               const cyxwiz_surb_t *surb,
+                                               cyxwiz_stored_item_t *item,
+                                               uint8_t block_index,
+                                               const uint8_t *nonce);
+static cyxwiz_error_t handle_pos_challenge_anon(cyxwiz_storage_ctx_t *ctx,
+                                                 const cyxwiz_node_id_t *from,
+                                                 const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_pos_request_commit_anon(cyxwiz_storage_ctx_t *ctx,
+                                                      const cyxwiz_node_id_t *from,
+                                                      const uint8_t *data, size_t len);
+
 /* Anonymous storage helpers */
 static cyxwiz_error_t send_store_req_anon(cyxwiz_storage_ctx_t *ctx,
                                            const cyxwiz_node_id_t *to,
@@ -1074,6 +1100,10 @@ cyxwiz_error_t cyxwiz_storage_handle_message(
             return handle_pos_verify_fail(ctx, from, data, len);
         case CYXWIZ_MSG_POS_REQUEST_COMMIT:
             return handle_pos_request_commit(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_CHALLENGE_ANON:
+            return handle_pos_challenge_anon(ctx, from, data, len);
+        case CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON:
+            return handle_pos_request_commit_anon(ctx, from, data, len);
 
         /* Anonymous storage messages */
         case CYXWIZ_MSG_STORE_REQ_ANON:
@@ -1675,6 +1705,16 @@ static cyxwiz_error_t handle_store_req_anon(
         memcpy(item->encrypted_data, payload, payload_len);
         ctx->storage_used_bytes += payload_len;
 
+        /* Compute PoS commitment (but don't send - owner will request anonymously) */
+        cyxwiz_error_t pos_err = cyxwiz_pos_compute_commitment(
+            item->encrypted_data, item->encrypted_len,
+            &storage_id, &item->pos_commitment);
+        if (pos_err == CYXWIZ_OK) {
+            item->has_pos_commitment = true;
+            CYXWIZ_DEBUG("Computed PoS commitment for anonymous item %s (%u blocks)",
+                         id_hex, item->pos_commitment.num_blocks);
+        }
+
         /* Send ACK via SURB */
         CYXWIZ_DEBUG("Anonymous stored item %s (share %u, %u bytes)",
                      id_hex, item->share_index, payload_len);
@@ -1689,6 +1729,7 @@ static cyxwiz_error_t handle_store_req_anon(
 
     /* Store SURB for later ACK (would need to add surb field to stored_item) */
     /* For now, send immediate ACK even for chunked - simplified */
+    /* Note: PoS commitment computed after all chunks received */
     return send_store_ack_via_surb(ctx, &msg->reply_surb, &storage_id,
                                     item->share_index, item->expires_at);
 }
@@ -2739,6 +2780,123 @@ static cyxwiz_error_t send_pos_verify_fail_msg(
     return cyxwiz_router_send(ctx->router, to, (uint8_t *)&msg, sizeof(msg));
 }
 
+/* ============ Anonymous PoS - Message Senders ============ */
+
+static cyxwiz_error_t send_pos_challenge_anon_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    uint8_t block_index,
+    const uint8_t *nonce,
+    const cyxwiz_surb_t *reply_surb)
+{
+    uint8_t buf[256];
+    cyxwiz_pos_challenge_anon_msg_t *msg = (cyxwiz_pos_challenge_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_POS_CHALLENGE_ANON;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->block_index = block_index;
+    memcpy(msg->challenge_nonce, nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+    memcpy(&msg->reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_pos_challenge_anon_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_pos_request_commit_anon_msg(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_surb_t *reply_surb)
+{
+    uint8_t buf[256];
+    cyxwiz_pos_request_commit_anon_msg_t *msg = (cyxwiz_pos_request_commit_anon_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON;
+    memcpy(msg->storage_id, storage_id->bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memcpy(&msg->reply_surb, reply_surb, sizeof(cyxwiz_surb_t));
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_pos_request_commit_anon_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_pos_commitment_via_surb(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_surb_t *surb,
+    const cyxwiz_pos_commitment_t *commitment)
+{
+    uint8_t buf[256];
+    cyxwiz_pos_commitment_msg_t *msg = (cyxwiz_pos_commitment_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_POS_COMMITMENT;
+    memcpy(msg->storage_id, commitment->storage_id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    memcpy(msg->merkle_root, commitment->merkle_root, CYXWIZ_POS_HASH_SIZE);
+    msg->num_blocks = commitment->num_blocks;
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_pos_commitment_msg_t), CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, surb, buf, CYXWIZ_PADDED_SIZE);
+}
+
+static cyxwiz_error_t send_pos_proof_via_surb(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_surb_t *surb,
+    cyxwiz_stored_item_t *item,
+    uint8_t block_index,
+    const uint8_t *nonce)
+{
+    /* Build Merkle tree */
+    uint8_t tree[CYXWIZ_POS_MAX_BLOCKS * 2][CYXWIZ_POS_HASH_SIZE];
+    size_t num_leaves;
+    size_t tree_size = merkle_build_tree(item->encrypted_data, item->encrypted_len,
+                                         tree, &num_leaves);
+
+    /* Get proof path */
+    uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
+    uint8_t depth, positions;
+    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+
+    /* Extract block data */
+    size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
+    size_t block_len = item->encrypted_len - block_offset;
+    if (block_len > CYXWIZ_POS_BLOCK_SIZE) {
+        block_len = CYXWIZ_POS_BLOCK_SIZE;
+    }
+
+    /* Build message */
+    uint8_t buf[256];
+    cyxwiz_pos_proof_msg_t *msg = (cyxwiz_pos_proof_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_POS_PROOF;
+    memcpy(msg->storage_id, item->id.bytes, CYXWIZ_STORAGE_ID_SIZE);
+    msg->block_index = block_index;
+    memcpy(msg->challenge_nonce, nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+    msg->block_len = (uint8_t)block_len;
+    msg->proof_depth = depth;
+    msg->sibling_positions = positions;
+
+    /* Append block data */
+    size_t offset = sizeof(cyxwiz_pos_proof_msg_t);
+    memcpy(buf + offset, item->encrypted_data + block_offset, block_len);
+    offset += block_len;
+
+    /* Append proof path */
+    for (uint8_t i = 0; i < depth; i++) {
+        memcpy(buf + offset, path[i], CYXWIZ_POS_HASH_SIZE);
+        offset += CYXWIZ_POS_HASH_SIZE;
+    }
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, offset, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send_via_surb(ctx->router, surb, buf, CYXWIZ_PADDED_SIZE);
+}
+
 /* ============ Proof of Storage - Message Handlers ============ */
 
 static cyxwiz_error_t handle_pos_commitment(
@@ -2992,6 +3150,94 @@ static cyxwiz_error_t handle_pos_request_commit(
 
     /* Send commitment */
     return send_pos_commitment(ctx, from, &item->pos_commitment);
+}
+
+/* ============ Anonymous PoS - Message Handlers ============ */
+
+static cyxwiz_error_t handle_pos_challenge_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_pos_challenge_anon_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_challenge_anon_msg_t *msg = (const cyxwiz_pos_challenge_anon_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        CYXWIZ_DEBUG("Anonymous PoS challenge for unknown item: %s", id_hex);
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Validate block index */
+    size_t num_blocks = (item->encrypted_len + CYXWIZ_POS_BLOCK_SIZE - 1) / CYXWIZ_POS_BLOCK_SIZE;
+    if (msg->block_index >= num_blocks) {
+        CYXWIZ_DEBUG("Anonymous PoS challenge for invalid block %u (max %zu) in %s",
+                     msg->block_index, num_blocks - 1, id_hex);
+        return CYXWIZ_ERR_POS_INVALID_BLOCK;
+    }
+
+    /* Generate and send proof via SURB */
+    CYXWIZ_DEBUG("Generating anonymous PoS proof for %s block %u", id_hex, msg->block_index);
+
+    return send_pos_proof_via_surb(ctx, &msg->reply_surb, item,
+                                    msg->block_index, msg->challenge_nonce);
+}
+
+static cyxwiz_error_t handle_pos_request_commit_anon(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_pos_request_commit_anon_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_pos_request_commit_anon_msg_t *msg = (const cyxwiz_pos_request_commit_anon_msg_t *)data;
+
+    cyxwiz_storage_id_t storage_id;
+    memcpy(storage_id.bytes, msg->storage_id, CYXWIZ_STORAGE_ID_SIZE);
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(&storage_id, id_hex);
+
+    /* Find stored item */
+    cyxwiz_stored_item_t *item = find_stored_item(ctx, &storage_id);
+    if (item == NULL) {
+        CYXWIZ_DEBUG("Anonymous commitment request for unknown item: %s", id_hex);
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    /* Compute commitment if not already done */
+    if (!item->has_pos_commitment) {
+        cyxwiz_error_t err = cyxwiz_pos_compute_commitment(
+            item->encrypted_data, item->encrypted_len,
+            &item->id, &item->pos_commitment);
+        if (err != CYXWIZ_OK) {
+            return err;
+        }
+        item->has_pos_commitment = true;
+    }
+
+    CYXWIZ_DEBUG("Sending anonymous PoS commitment for %s", id_hex);
+
+    /* Send commitment via SURB */
+    return send_pos_commitment_via_surb(ctx, &msg->reply_surb, &item->pos_commitment);
 }
 
 /* ============ Proof of Storage - Public API ============ */
@@ -3279,4 +3525,102 @@ const char *cyxwiz_pos_fail_reason_name(cyxwiz_pos_fail_reason_t reason)
         case CYXWIZ_POS_FAIL_NOT_FOUND:     return "not_found";
         default:                            return "unknown";
     }
+}
+
+/* ============ Anonymous Proof of Storage - Public API ============ */
+
+cyxwiz_error_t cyxwiz_pos_challenge_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id,
+    const cyxwiz_pos_commitment_t *commitment)
+{
+    if (ctx == NULL || storage_id == NULL || provider_id == NULL || commitment == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if we can create SURBs */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Allocate challenge state */
+    cyxwiz_pos_challenge_state_t *challenge = alloc_pos_challenge(ctx);
+    if (challenge == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize challenge */
+    memcpy(&challenge->storage_id, storage_id, sizeof(cyxwiz_storage_id_t));
+    memcpy(&challenge->provider_id, provider_id, sizeof(cyxwiz_node_id_t));
+    memcpy(&challenge->commitment, commitment, sizeof(cyxwiz_pos_commitment_t));
+    challenge->sent_at = get_time_ms();
+    challenge->sequence = 0;
+    challenge->is_anonymous = true;
+
+    /* Generate random nonce */
+    cyxwiz_crypto_random(challenge->challenge_nonce, CYXWIZ_POS_CHALLENGE_SIZE);
+
+    /* Pick random block to challenge */
+    uint8_t random_byte;
+    cyxwiz_crypto_random(&random_byte, 1);
+    challenge->block_index = random_byte % commitment->num_blocks;
+
+    /* Create SURB for proof response */
+    cyxwiz_surb_t reply_surb;
+    cyxwiz_error_t err = cyxwiz_router_create_surb(ctx->router, &reply_surb);
+    if (err != CYXWIZ_OK) {
+        free_pos_challenge(ctx, challenge);
+        return err;
+    }
+
+    /* Send anonymous challenge */
+    err = send_pos_challenge_anon_msg(ctx, provider_id, storage_id,
+                                       challenge->block_index,
+                                       challenge->challenge_nonce,
+                                       &reply_surb);
+    if (err != CYXWIZ_OK) {
+        free_pos_challenge(ctx, challenge);
+        return err;
+    }
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(storage_id, id_hex);
+    CYXWIZ_DEBUG("Sent anonymous PoS challenge for %s block %u", id_hex, challenge->block_index);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_pos_request_commitment_anonymous(
+    cyxwiz_storage_ctx_t *ctx,
+    const cyxwiz_storage_id_t *storage_id,
+    const cyxwiz_node_id_t *provider_id)
+{
+    if (ctx == NULL || storage_id == NULL || provider_id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if we can create SURBs */
+    if (!cyxwiz_router_can_create_surb(ctx->router)) {
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Create SURB for commitment response */
+    cyxwiz_surb_t reply_surb;
+    cyxwiz_error_t err = cyxwiz_router_create_surb(ctx->router, &reply_surb);
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
+
+    /* Send anonymous commitment request */
+    err = send_pos_request_commit_anon_msg(ctx, provider_id, storage_id, &reply_surb);
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
+
+    char id_hex[17];
+    cyxwiz_storage_id_to_hex(storage_id, id_hex);
+    CYXWIZ_DEBUG("Sent anonymous PoS commitment request for %s", id_hex);
+
+    return CYXWIZ_OK;
 }
