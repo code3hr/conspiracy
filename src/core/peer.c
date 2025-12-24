@@ -5,6 +5,7 @@
  */
 
 #include "cyxwiz/peer.h"
+#include "cyxwiz/zkp.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
@@ -181,6 +182,8 @@ cyxwiz_error_t cyxwiz_peer_table_add(
     peer->latency_ms = 0;
     peer->bytes_sent = 0;
     peer->bytes_recv = 0;
+    peer->identity_verified = false;
+    memset(peer->ed25519_pubkey, 0, sizeof(peer->ed25519_pubkey));
 
     table->count++;
 
@@ -293,6 +296,30 @@ cyxwiz_error_t cyxwiz_peer_table_set_capabilities(
     }
 
     table->peers[idx].capabilities = capabilities;
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_set_identity_verified(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    const uint8_t *ed25519_pubkey)
+{
+    if (table == NULL || id == NULL || ed25519_pubkey == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    table->peers[idx].identity_verified = true;
+    memcpy(table->peers[idx].ed25519_pubkey, ed25519_pubkey, CYXWIZ_ED25519_PK_SIZE);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(id, hex_id);
+    CYXWIZ_DEBUG("Peer %.16s... identity verified", hex_id);
+
     return CYXWIZ_OK;
 }
 

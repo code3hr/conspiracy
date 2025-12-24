@@ -12,6 +12,7 @@
 
 #include "types.h"
 #include "transport.h"
+#include "zkp.h"
 
 /* Peer table limits */
 #define CYXWIZ_MAX_PEERS 64
@@ -51,6 +52,8 @@ typedef struct {
     uint16_t latency_ms;               /* Round-trip latency */
     uint32_t bytes_sent;               /* Traffic stats */
     uint32_t bytes_recv;
+    bool identity_verified;           /* True if Schnorr proof was valid */
+    uint8_t ed25519_pubkey[CYXWIZ_ED25519_PK_SIZE]; /* Ed25519 key (if verified) */
 } cyxwiz_peer_t;
 
 /*
@@ -136,6 +139,16 @@ cyxwiz_error_t cyxwiz_peer_table_set_capabilities(
 );
 
 /*
+ * Set peer identity as verified (Schnorr proof validated)
+ * Also stores the peer's Ed25519 public key.
+ */
+cyxwiz_error_t cyxwiz_peer_table_set_identity_verified(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    const uint8_t *ed25519_pubkey
+);
+
+/*
  * Get number of peers in table
  */
 size_t cyxwiz_peer_table_count(const cyxwiz_peer_table_t *table);
@@ -202,11 +215,22 @@ void cyxwiz_discovery_set_key_callback(
 );
 
 /*
- * Set this node's X25519 public key for announcements
+ * Set this node's X25519 public key for announcements (v1 only)
+ * For v2, use cyxwiz_discovery_set_identity() instead.
  */
 void cyxwiz_discovery_set_pubkey(
     cyxwiz_discovery_t *discovery,
     const uint8_t *pubkey
+);
+
+/*
+ * Set this node's Ed25519 identity keypair for authenticated announcements
+ * Enables v2 announcements with Schnorr identity proofs.
+ * The X25519 key is derived automatically from the Ed25519 key.
+ */
+void cyxwiz_discovery_set_identity(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_identity_keypair_t *identity
 );
 
 /*
@@ -273,15 +297,18 @@ typedef enum {
 #define CYXWIZ_PUBKEY_SIZE 32
 
 /*
- * Announcement message (broadcast to find peers)
+ * Announcement message v1 (broadcast to find peers)
  * Total: 69 bytes (fits easily in LoRa)
+ *
+ * Note: v1 has no identity proof - peers cannot verify identity ownership.
+ * Use v2 for authenticated peer discovery.
  */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
 #endif
 typedef struct {
     uint8_t type;                    /* CYXWIZ_DISC_ANNOUNCE */
-    uint8_t version;                 /* Protocol version */
+    uint8_t version;                 /* Protocol version (1) */
     cyxwiz_node_id_t node_id;        /* Our node ID (32 bytes) */
     uint8_t capabilities;            /* What we can do */
     uint16_t port;                   /* Optional port (0 if N/A) */
@@ -291,6 +318,33 @@ typedef struct {
 __attribute__((packed))
 #endif
 cyxwiz_disc_announce_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/*
+ * Announcement message v2 with identity proof (authenticated discovery)
+ * Total: 133 bytes (fits LoRa's 250-byte MTU)
+ *
+ * Includes Schnorr identity proof to prove ownership of the Ed25519 key.
+ * The X25519 key for onion routing is derived from the Ed25519 key.
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                    /* CYXWIZ_DISC_ANNOUNCE or ANNOUNCE_ACK */
+    uint8_t version;                 /* Protocol version (2) */
+    cyxwiz_node_id_t node_id;        /* Our node ID (32 bytes) */
+    uint8_t capabilities;            /* What we can do */
+    uint16_t port;                   /* Optional port (0 if N/A) */
+    uint8_t ed25519_pubkey[CYXWIZ_ED25519_PK_SIZE]; /* Ed25519 public key (32 bytes) */
+    cyxwiz_schnorr_proof_t identity_proof; /* Schnorr proof (64 bytes) */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_disc_announce_v2_t;
 #ifdef _MSC_VER
 #pragma pack(pop)
 #endif

@@ -8,13 +8,21 @@
  */
 
 #include "cyxwiz/peer.h"
+#include "cyxwiz/zkp.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
 #include <string.h>
 
-/* Protocol version */
-#define CYXWIZ_PROTOCOL_VERSION 1
+/* Protocol versions */
+#define CYXWIZ_PROTOCOL_VERSION_V1 1   /* Original, no identity proof */
+#define CYXWIZ_PROTOCOL_VERSION_V2 2   /* With Schnorr identity proof */
+
+/* Default to v2 when identity is set, v1 otherwise */
+#define CYXWIZ_PROTOCOL_VERSION CYXWIZ_PROTOCOL_VERSION_V1
+
+/* Context string for announce proofs */
+static const char *ANNOUNCE_PROOF_CONTEXT = "cyxwiz_announce_v2";
 
 /*
  * Discovery context
@@ -28,9 +36,13 @@ struct cyxwiz_discovery {
     uint64_t last_announce;
     uint64_t last_cleanup;
 
-    /* X25519 public key for onion routing */
+    /* X25519 public key for onion routing (v1 mode) */
     uint8_t pubkey[CYXWIZ_PUBKEY_SIZE];
     bool has_pubkey;
+
+    /* Ed25519 identity keypair for authenticated announcements (v2 mode) */
+    cyxwiz_identity_keypair_t identity;
+    bool has_identity;
 
     /* Key exchange callback */
     cyxwiz_key_exchange_cb_t key_callback;
@@ -66,6 +78,8 @@ cyxwiz_error_t cyxwiz_discovery_create(
     /* Initialize key exchange fields */
     memset(d->pubkey, 0, sizeof(d->pubkey));
     d->has_pubkey = false;
+    memset(&d->identity, 0, sizeof(d->identity));
+    d->has_identity = false;
     d->key_callback = NULL;
     d->key_user_data = NULL;
 
@@ -111,7 +125,7 @@ void cyxwiz_discovery_set_key_callback(
 }
 
 /*
- * Set public key for announcements
+ * Set public key for announcements (v1 mode)
  */
 void cyxwiz_discovery_set_pubkey(
     cyxwiz_discovery_t *discovery,
@@ -122,7 +136,27 @@ void cyxwiz_discovery_set_pubkey(
     }
     memcpy(discovery->pubkey, pubkey, CYXWIZ_PUBKEY_SIZE);
     discovery->has_pubkey = true;
-    CYXWIZ_DEBUG("Set X25519 public key for discovery");
+    CYXWIZ_DEBUG("Set X25519 public key for discovery (v1 mode)");
+}
+
+/*
+ * Set identity keypair for authenticated announcements (v2 mode)
+ */
+void cyxwiz_discovery_set_identity(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_identity_keypair_t *identity)
+{
+    if (discovery == NULL || identity == NULL) {
+        return;
+    }
+    memcpy(&discovery->identity, identity, sizeof(cyxwiz_identity_keypair_t));
+    discovery->has_identity = true;
+
+    /* Also derive and set X25519 pubkey for backwards compatibility */
+    cyxwiz_identity_to_x25519_pk(identity, discovery->pubkey);
+    discovery->has_pubkey = true;
+
+    CYXWIZ_DEBUG("Set Ed25519 identity for discovery (v2 mode)");
 }
 
 /*
@@ -130,33 +164,74 @@ void cyxwiz_discovery_set_pubkey(
  */
 static cyxwiz_error_t send_announce(cyxwiz_discovery_t *discovery)
 {
-    cyxwiz_disc_announce_t msg;
-    memset(&msg, 0, sizeof(msg));
-
-    msg.type = CYXWIZ_DISC_ANNOUNCE;
-    msg.version = CYXWIZ_PROTOCOL_VERSION;
-    memcpy(&msg.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
-    msg.capabilities = discovery->capabilities;
-    msg.port = 0;  /* Not used for mesh transports */
-
-    /* Include X25519 public key if available */
-    if (discovery->has_pubkey) {
-        memcpy(msg.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
-    }
-
-    /* Broadcast to all (use zero ID for broadcast) */
+    /* Broadcast to all (use 0xFF ID for broadcast) */
     cyxwiz_node_id_t broadcast_id;
     memset(&broadcast_id, 0xFF, sizeof(cyxwiz_node_id_t));
 
-    cyxwiz_error_t err = discovery->transport->ops->send(
-        discovery->transport,
-        &broadcast_id,
-        (uint8_t *)&msg,
-        sizeof(msg)
-    );
+    cyxwiz_error_t err;
 
-    if (err == CYXWIZ_OK) {
-        CYXWIZ_DEBUG("Sent discovery announcement");
+    /* Use v2 format if we have an identity keypair */
+    if (discovery->has_identity) {
+        cyxwiz_disc_announce_v2_t msg;
+        memset(&msg, 0, sizeof(msg));
+
+        msg.type = CYXWIZ_DISC_ANNOUNCE;
+        msg.version = CYXWIZ_PROTOCOL_VERSION_V2;
+        memcpy(&msg.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
+        msg.capabilities = discovery->capabilities;
+        msg.port = 0;
+
+        /* Include Ed25519 public key */
+        memcpy(msg.ed25519_pubkey, discovery->identity.public_key,
+               CYXWIZ_ED25519_PK_SIZE);
+
+        /* Generate Schnorr identity proof */
+        cyxwiz_proof_context_t ctx;
+        cyxwiz_proof_context_init(&ctx, (const uint8_t *)ANNOUNCE_PROOF_CONTEXT,
+                                   strlen(ANNOUNCE_PROOF_CONTEXT));
+
+        err = cyxwiz_schnorr_prove(&discovery->identity, &ctx, &msg.identity_proof);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to generate identity proof for announce");
+            return err;
+        }
+
+        err = discovery->transport->ops->send(
+            discovery->transport,
+            &broadcast_id,
+            (uint8_t *)&msg,
+            sizeof(msg)
+        );
+
+        if (err == CYXWIZ_OK) {
+            CYXWIZ_DEBUG("Sent discovery announcement (v2 with identity proof)");
+        }
+    } else {
+        /* Fall back to v1 format */
+        cyxwiz_disc_announce_t msg;
+        memset(&msg, 0, sizeof(msg));
+
+        msg.type = CYXWIZ_DISC_ANNOUNCE;
+        msg.version = CYXWIZ_PROTOCOL_VERSION_V1;
+        memcpy(&msg.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
+        msg.capabilities = discovery->capabilities;
+        msg.port = 0;
+
+        /* Include X25519 public key if available */
+        if (discovery->has_pubkey) {
+            memcpy(msg.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
+        }
+
+        err = discovery->transport->ops->send(
+            discovery->transport,
+            &broadcast_id,
+            (uint8_t *)&msg,
+            sizeof(msg)
+        );
+
+        if (err == CYXWIZ_OK) {
+            CYXWIZ_DEBUG("Sent discovery announcement (v1)");
+        }
     }
 
     return err;
@@ -202,33 +277,83 @@ static cyxwiz_error_t send_pong(
 }
 
 /*
- * Handle announcement message
+ * Send announcement ACK (can be v1 or v2 depending on identity)
  */
-static cyxwiz_error_t handle_announce(
+static cyxwiz_error_t send_announce_ack(
     cyxwiz_discovery_t *discovery,
-    const cyxwiz_node_id_t *from,
-    const cyxwiz_disc_announce_t *msg)
+    const cyxwiz_node_id_t *to)
 {
-    CYXWIZ_UNUSED(from);
+    cyxwiz_error_t err;
 
-    /* Ignore our own announcements */
-    if (cyxwiz_node_id_cmp(&msg->node_id, &discovery->local_id) == 0) {
-        return CYXWIZ_OK;
+    /* Use v2 format if we have an identity keypair */
+    if (discovery->has_identity) {
+        cyxwiz_disc_announce_v2_t ack;
+        memset(&ack, 0, sizeof(ack));
+
+        ack.type = CYXWIZ_DISC_ANNOUNCE_ACK;
+        ack.version = CYXWIZ_PROTOCOL_VERSION_V2;
+        memcpy(&ack.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
+        ack.capabilities = discovery->capabilities;
+        ack.port = 0;
+
+        /* Include Ed25519 public key */
+        memcpy(ack.ed25519_pubkey, discovery->identity.public_key,
+               CYXWIZ_ED25519_PK_SIZE);
+
+        /* Generate Schnorr identity proof */
+        cyxwiz_proof_context_t ctx;
+        cyxwiz_proof_context_init(&ctx, (const uint8_t *)ANNOUNCE_PROOF_CONTEXT,
+                                   strlen(ANNOUNCE_PROOF_CONTEXT));
+
+        err = cyxwiz_schnorr_prove(&discovery->identity, &ctx, &ack.identity_proof);
+        if (err != CYXWIZ_OK) {
+            return err;
+        }
+
+        return discovery->transport->ops->send(
+            discovery->transport,
+            to,
+            (uint8_t *)&ack,
+            sizeof(ack)
+        );
+    } else {
+        /* Fall back to v1 format */
+        cyxwiz_disc_announce_t ack;
+        memset(&ack, 0, sizeof(ack));
+
+        ack.type = CYXWIZ_DISC_ANNOUNCE_ACK;
+        ack.version = CYXWIZ_PROTOCOL_VERSION_V1;
+        memcpy(&ack.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
+        ack.capabilities = discovery->capabilities;
+        ack.port = 0;
+
+        if (discovery->has_pubkey) {
+            memcpy(ack.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
+        }
+
+        return discovery->transport->ops->send(
+            discovery->transport,
+            to,
+            (uint8_t *)&ack,
+            sizeof(ack)
+        );
     }
+}
 
-    /* Check protocol version */
-    if (msg->version != CYXWIZ_PROTOCOL_VERSION) {
-        CYXWIZ_WARN("Ignoring announcement with version %d (expected %d)",
-                   msg->version, CYXWIZ_PROTOCOL_VERSION);
-        return CYXWIZ_OK;
-    }
-
+/*
+ * Handle v1 announcement (no identity proof)
+ */
+static cyxwiz_error_t handle_announce_v1(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_disc_announce_t *msg,
+    bool is_ack)
+{
     /* Add peer to table */
     cyxwiz_error_t err = cyxwiz_peer_table_add(
         discovery->peer_table,
         &msg->node_id,
         discovery->transport->type,
-        0  /* RSSI not available from message */
+        0
     );
 
     if (err != CYXWIZ_OK) {
@@ -244,7 +369,6 @@ static cyxwiz_error_t handle_announce(
 
     /* Notify key exchange callback if pubkey present */
     if (discovery->key_callback != NULL) {
-        /* Check if pubkey is not all zeros */
         bool has_pubkey = false;
         for (size_t i = 0; i < CYXWIZ_PUBKEY_SIZE; i++) {
             if (msg->pubkey[i] != 0) {
@@ -258,81 +382,161 @@ static cyxwiz_error_t handle_announce(
         }
     }
 
-    /* Send acknowledgment (our own announcement) */
-    cyxwiz_disc_announce_t ack;
-    memset(&ack, 0, sizeof(ack));
-    ack.type = CYXWIZ_DISC_ANNOUNCE_ACK;
-    ack.version = CYXWIZ_PROTOCOL_VERSION;
-    memcpy(&ack.node_id, &discovery->local_id, sizeof(cyxwiz_node_id_t));
-    ack.capabilities = discovery->capabilities;
-    ack.port = 0;
-
-    /* Include our X25519 public key if available */
-    if (discovery->has_pubkey) {
-        memcpy(ack.pubkey, discovery->pubkey, CYXWIZ_PUBKEY_SIZE);
+    /* If it's an ACK, mark peer as connected */
+    if (is_ack) {
+        cyxwiz_peer_table_set_state(
+            discovery->peer_table,
+            &msg->node_id,
+            CYXWIZ_PEER_STATE_CONNECTED
+        );
     }
 
-    discovery->transport->ops->send(
-        discovery->transport,
-        &msg->node_id,
-        (uint8_t *)&ack,
-        sizeof(ack)
-    );
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&msg->node_id, hex_id);
+    CYXWIZ_DEBUG("Processed v1 %s from %.16s... (unverified identity)",
+                 is_ack ? "ACK" : "ANNOUNCE", hex_id);
 
     return CYXWIZ_OK;
 }
 
 /*
- * Handle announcement acknowledgment
+ * Handle v2 announcement (with identity proof)
  */
-static cyxwiz_error_t handle_announce_ack(
+static cyxwiz_error_t handle_announce_v2(
     cyxwiz_discovery_t *discovery,
-    const cyxwiz_node_id_t *from,
-    const cyxwiz_disc_announce_t *msg)
+    const cyxwiz_disc_announce_v2_t *msg,
+    bool is_ack)
 {
-    CYXWIZ_UNUSED(from);
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&msg->node_id, hex_id);
 
-    /* Ignore our own */
-    if (cyxwiz_node_id_cmp(&msg->node_id, &discovery->local_id) == 0) {
-        return CYXWIZ_OK;
+    /* Verify the node ID matches the Ed25519 public key */
+    if (!cyxwiz_identity_verify_node_id(msg->ed25519_pubkey, &msg->node_id)) {
+        CYXWIZ_WARN("v2 announce from %.16s...: node ID doesn't match pubkey",
+                    hex_id);
+        return CYXWIZ_ERR_PROOF_INVALID;
     }
 
-    /* Add/update peer */
-    cyxwiz_error_t err = cyxwiz_peer_table_add(
+    /* Verify the Schnorr identity proof */
+    cyxwiz_proof_context_t ctx;
+    cyxwiz_proof_context_init(&ctx, (const uint8_t *)ANNOUNCE_PROOF_CONTEXT,
+                               strlen(ANNOUNCE_PROOF_CONTEXT));
+
+    cyxwiz_error_t err = cyxwiz_schnorr_verify(
+        msg->ed25519_pubkey,
+        &msg->identity_proof,
+        &ctx
+    );
+
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("v2 announce from %.16s...: identity proof invalid", hex_id);
+        return CYXWIZ_ERR_PROOF_INVALID;
+    }
+
+    /* Proof is valid! Add peer to table */
+    err = cyxwiz_peer_table_add(
         discovery->peer_table,
         &msg->node_id,
         discovery->transport->type,
         0
     );
 
-    if (err == CYXWIZ_OK) {
-        cyxwiz_peer_table_set_capabilities(
-            discovery->peer_table,
-            &msg->node_id,
-            msg->capabilities
-        );
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
 
-        /* Mark as connected since they responded */
+    /* Update capabilities */
+    cyxwiz_peer_table_set_capabilities(
+        discovery->peer_table,
+        &msg->node_id,
+        msg->capabilities
+    );
+
+    /* Mark identity as verified */
+    cyxwiz_peer_table_set_identity_verified(
+        discovery->peer_table,
+        &msg->node_id,
+        msg->ed25519_pubkey
+    );
+
+    /* Derive X25519 public key from Ed25519 and notify callback */
+    if (discovery->key_callback != NULL) {
+        uint8_t x25519_pubkey[CYXWIZ_PUBKEY_SIZE];
+        /* Create a temporary keypair just for conversion */
+        cyxwiz_identity_keypair_t temp_kp;
+        memcpy(temp_kp.public_key, msg->ed25519_pubkey, CYXWIZ_ED25519_PK_SIZE);
+        memset(temp_kp.secret_key, 0, sizeof(temp_kp.secret_key));
+
+        if (cyxwiz_identity_to_x25519_pk(&temp_kp, x25519_pubkey) == CYXWIZ_OK) {
+            discovery->key_callback(&msg->node_id, x25519_pubkey,
+                                   discovery->key_user_data);
+        }
+    }
+
+    /* If it's an ACK, mark peer as connected */
+    if (is_ack) {
         cyxwiz_peer_table_set_state(
             discovery->peer_table,
             &msg->node_id,
             CYXWIZ_PEER_STATE_CONNECTED
         );
+    }
 
-        /* Notify key exchange callback if pubkey present */
-        if (discovery->key_callback != NULL) {
-            bool has_pubkey = false;
-            for (size_t i = 0; i < CYXWIZ_PUBKEY_SIZE; i++) {
-                if (msg->pubkey[i] != 0) {
-                    has_pubkey = true;
-                    break;
-                }
-            }
-            if (has_pubkey) {
-                discovery->key_callback(&msg->node_id, msg->pubkey,
-                                       discovery->key_user_data);
-            }
+    CYXWIZ_DEBUG("Processed v2 %s from %.16s... (identity VERIFIED)",
+                 is_ack ? "ACK" : "ANNOUNCE", hex_id);
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Handle announcement message (dispatches to v1 or v2 handler)
+ */
+static cyxwiz_error_t handle_announce(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len,
+    bool is_ack)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < 2) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    uint8_t version = data[1];
+
+    /* Check for own announcements by peeking at node_id field */
+    if (len >= sizeof(cyxwiz_disc_announce_t)) {
+        const cyxwiz_disc_announce_t *base = (const cyxwiz_disc_announce_t *)data;
+        if (cyxwiz_node_id_cmp(&base->node_id, &discovery->local_id) == 0) {
+            return CYXWIZ_OK;  /* Ignore our own */
         }
+    }
+
+    cyxwiz_error_t err;
+
+    if (version == CYXWIZ_PROTOCOL_VERSION_V2) {
+        if (len < sizeof(cyxwiz_disc_announce_v2_t)) {
+            CYXWIZ_WARN("v2 announce too short: %zu < %zu",
+                        len, sizeof(cyxwiz_disc_announce_v2_t));
+            return CYXWIZ_ERR_INVALID;
+        }
+        err = handle_announce_v2(discovery, (const cyxwiz_disc_announce_v2_t *)data, is_ack);
+    } else if (version == CYXWIZ_PROTOCOL_VERSION_V1) {
+        if (len < sizeof(cyxwiz_disc_announce_t)) {
+            return CYXWIZ_ERR_INVALID;
+        }
+        err = handle_announce_v1(discovery, (const cyxwiz_disc_announce_t *)data, is_ack);
+    } else {
+        CYXWIZ_WARN("Unknown announce version: %d", version);
+        return CYXWIZ_OK;  /* Ignore unknown versions */
+    }
+
+    /* Send ACK if this was an announce (not an ACK) */
+    if (!is_ack && err == CYXWIZ_OK) {
+        const cyxwiz_disc_announce_t *base = (const cyxwiz_disc_announce_t *)data;
+        send_announce_ack(discovery, &base->node_id);
     }
 
     return err;
@@ -478,14 +682,15 @@ cyxwiz_error_t cyxwiz_discovery_handle_message(
 
     switch (msg_type) {
         case CYXWIZ_DISC_ANNOUNCE:
+            /* Minimum size is v1, handle_announce will check version */
             if (len >= sizeof(cyxwiz_disc_announce_t)) {
-                return handle_announce(discovery, from, (const cyxwiz_disc_announce_t *)data);
+                return handle_announce(discovery, from, data, len, false);
             }
             break;
 
         case CYXWIZ_DISC_ANNOUNCE_ACK:
             if (len >= sizeof(cyxwiz_disc_announce_t)) {
-                return handle_announce_ack(discovery, from, (const cyxwiz_disc_announce_t *)data);
+                return handle_announce(discovery, from, data, len, true);
             }
             break;
 
