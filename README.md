@@ -360,6 +360,7 @@ cyxwiz/
 │   ├── transport.h          # Transport abstraction
 │   ├── crypto.h             # MPC crypto API
 │   ├── zkp.h                # Zero-knowledge proofs (Schnorr)
+│   ├── consensus.h          # PoUW consensus API
 │   ├── compute.h            # Job marketplace API
 │   ├── storage.h            # Distributed storage API
 │   ├── memory.h             # Secure memory utilities
@@ -377,7 +378,8 @@ cyxwiz/
 │   │   ├── routing.c        # Multi-hop message routing
 │   │   ├── onion.c          # Onion routing
 │   │   ├── compute.c        # Job marketplace
-│   │   └── storage.c        # Distributed storage
+│   │   ├── storage.c        # Distributed storage
+│   │   └── consensus.c      # PoUW consensus mechanism
 │   ├── crypto/              # SPDZ MPC implementation
 │   │   ├── crypto.c         # Context management
 │   │   ├── sharing.c        # Secret sharing
@@ -411,13 +413,13 @@ cyxwiz/
 - [x] SPDZ online computation (Beaver triples)
 - [x] Full threshold reconstruction (Shamir's Secret Sharing)
 
-### Phase 3: Protocol Layer
+### Phase 3: Protocol Layer ✅
 - [x] Compute protocol (job marketplace with MAC verification)
 - [x] Storage protocol (CyxCloud distributed storage with K-of-N threshold)
 - [x] Proof of Storage (Merkle-based storage verification)
 - [x] Schnorr identity proofs (zero-knowledge peer authentication)
+- [x] Consensus mechanism (Proof of Useful Work with committee validation)
 - [ ] Privacy protocol (extended ZKPs, anonymous credentials)
-- [ ] Consensus mechanism
 
 ### Phase 4: Production
 - [ ] Mobile support (iOS, Android)
@@ -462,6 +464,11 @@ cyxwiz/
 | Proof of Storage | ✅ | Merkle-based storage verification |
 | Anonymous PoS | ✅ | Anonymous storage verification via SURBs |
 | Anonymous Route Discovery | ✅ | SURB-based anonymous routing with destination tokens |
+| PoUW Consensus | ✅ | Proof of Useful Work with 2/3+1 Byzantine fault tolerance |
+| Validator Registration | ✅ | Schnorr proof-based validator identity verification |
+| Work Credits | ✅ | Earn validation rights through compute/storage work |
+| Committee Selection | ✅ | VRF-weighted selection based on work credits |
+| Slashing | ✅ | Penalties for misbehavior (equivocation = ban) |
 
 ### Message Types Implemented
 ```
@@ -474,6 +481,9 @@ Storage:      STORE_REQ/ACK/REJECT, RETRIEVE_REQ/RESP, DELETE_REQ/ACK,
               STORE_REQ_ANON, RETRIEVE_REQ_ANON, DELETE_REQ_ANON (anonymous with SURBs)
 Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL,
               POS_CHALLENGE_ANON, POS_REQUEST_COMMIT_ANON (anonymous verification)
+Consensus:    VALIDATOR_REGISTER, VALIDATOR_REG_ACK, WORK_CREDIT, VALIDATION_REQ,
+              VALIDATION_VOTE, VALIDATION_RESULT, JOB_VALIDATE_REQ, STORAGE_VALIDATE_REQ,
+              SLASH_REPORT, CREDIT_QUERY, CREDIT_RESPONSE, VALIDATOR_HEARTBEAT
 ```
 
 ---
