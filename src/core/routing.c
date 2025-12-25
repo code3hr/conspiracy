@@ -434,6 +434,19 @@ cyxwiz_error_t cyxwiz_router_send(
         return CYXWIZ_ERR_INVALID;
     }
 
+    /* Check if destination is broadcast (all 0xFF) - use full transport MTU */
+    cyxwiz_node_id_t broadcast_id;
+    memset(&broadcast_id, 0xFF, sizeof(cyxwiz_node_id_t));
+    if (cyxwiz_node_id_cmp(destination, &broadcast_id) == 0) {
+        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+            return CYXWIZ_ERR_PACKET_TOO_LARGE;
+        }
+        /* Broadcast directly via transport */
+        return router->transport->ops->send(
+            router->transport, destination, data, len);
+    }
+
+    /* For routed messages, enforce smaller payload limit */
     if (len > CYXWIZ_MAX_ROUTED_PAYLOAD) {
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }

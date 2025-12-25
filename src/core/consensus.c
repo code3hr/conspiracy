@@ -54,6 +54,7 @@ struct cyxwiz_consensus_ctx {
     bool running;
     uint64_t last_poll;
     uint64_t last_heartbeat;
+    uint64_t last_registration_attempt;
 
     /* Statistics */
     uint32_t total_earned;
@@ -327,6 +328,15 @@ cyxwiz_error_t cyxwiz_consensus_poll(
 
     /* Check for timed out rounds */
     check_round_timeouts(ctx, now_ms);
+
+    /* Retry registration if pending and not yet confirmed */
+    if (ctx->local_validator.state == CYXWIZ_VALIDATOR_PENDING && !ctx->is_registered) {
+        /* Retry every 10 seconds */
+        if (now_ms - ctx->last_registration_attempt > 10000) {
+            ctx->last_registration_attempt = now_ms;
+            cyxwiz_consensus_register_validator(ctx);
+        }
+    }
 
     /* Send heartbeat if registered */
     send_heartbeat(ctx, now_ms);
