@@ -249,8 +249,8 @@ static int test_range_proof_16(void)
     cyxwiz_pedersen_opening_t opening;
     cyxwiz_error_t err;
 
-    /* Use 65535 which has all bits = 1 (avoids Ed25519 zero-scalar issue) */
-    uint16_t value = 65535;
+    /* Test with mixed bits (1000 = 0b1111101000) */
+    uint16_t value = 1000;
     err = cyxwiz_range_proof_create_16(value, &proof, &opening);
     if (err != CYXWIZ_OK) {
         printf("create failed: %d ", err);
@@ -274,10 +274,8 @@ static int test_range_proof_mixed(void)
     cyxwiz_pedersen_opening_t opening;
     cyxwiz_error_t err;
 
-    /* TODO: Range proofs for values with 0 bits currently fail due to
-     * Ed25519 scalar multiplication by 0 returning identity point.
-     * For now, test with all-1s value (65535). */
-    uint16_t value = 65535;
+    /* Test with 0xAAAA = 0b1010101010101010 (alternating bits) */
+    uint16_t value = 0xAAAA;
 
     err = cyxwiz_range_proof_create_16(value, &proof, &opening);
     if (err != CYXWIZ_OK) {
@@ -316,6 +314,29 @@ static int test_range_proof_max(void)
     return 1;
 }
 
+/* Test range proof for minimum value (0) - verifies zero-bit fix */
+static int test_range_proof_zero(void)
+{
+    cyxwiz_range_proof_16_t proof;
+    cyxwiz_pedersen_opening_t opening;
+    cyxwiz_error_t err;
+
+    /* Value 0 = all 16 bits are 0, tests the zero-bit handling */
+    err = cyxwiz_range_proof_create_16(0, &proof, &opening);
+    if (err != CYXWIZ_OK) {
+        printf("create failed: %d ", err);
+        return 0;
+    }
+
+    err = cyxwiz_range_proof_verify_16(&proof);
+    if (err != CYXWIZ_OK) {
+        printf("verify failed: %d ", err);
+        return 0;
+    }
+
+    return 1;
+}
+
 /* Test range proof fails with tampered commitment */
 static int test_range_proof_tampered(void)
 {
@@ -323,8 +344,8 @@ static int test_range_proof_tampered(void)
     cyxwiz_pedersen_opening_t opening;
     cyxwiz_error_t err;
 
-    /* Use 65535 to avoid zero-bit issues */
-    err = cyxwiz_range_proof_create_16(65535, &proof, &opening);
+    /* Use value with mixed bits */
+    err = cyxwiz_range_proof_create_16(12345, &proof, &opening);
     if (err != CYXWIZ_OK) {
         printf("create failed: %d ", err);
         return 0;
@@ -363,10 +384,9 @@ static int test_range_proof_geq(void)
     cyxwiz_range_proof_16_t proof;
     cyxwiz_error_t err;
 
-    /* Use values that result in all-1s difference (65535 - 0 = 65535)
-     * to avoid zero-bit issues */
-    uint16_t value = 65535;
-    uint16_t threshold = 0;
+    /* Test proving value >= threshold with mixed-bit difference */
+    uint16_t value = 5000;      /* actual value */
+    uint16_t threshold = 1000;  /* minimum threshold */
     err = cyxwiz_range_proof_create_geq(value, threshold, &proof);
     if (err != CYXWIZ_OK) {
         printf("create_geq failed: %d ", err);
@@ -733,10 +753,9 @@ static int test_reputation_proof_create(void)
         return 0;
     }
 
-    /* Use credits that give all-1s difference (65535 - 0 = 65535)
-     * to avoid zero-bit issues in the underlying range proof */
-    uint32_t actual_credits = 65535;
-    uint16_t min_threshold = 0;
+    /* Prove we have at least 500 credits when we actually have 2000 */
+    uint32_t actual_credits = 2000;
+    uint16_t min_threshold = 500;
 
     err = cyxwiz_reputation_proof_create(actual_credits, min_threshold,
                                           &keypair, proof, &proof_len);
@@ -948,6 +967,7 @@ int main(void)
     TEST(range_proof_16);
     TEST(range_proof_mixed);
     TEST(range_proof_max);
+    TEST(range_proof_zero);
     TEST(range_proof_tampered);
     TEST(range_proof_size);
     TEST(range_proof_geq);

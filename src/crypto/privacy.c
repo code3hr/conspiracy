@@ -309,40 +309,53 @@ cyxwiz_error_t cyxwiz_pedersen_sub(
 #ifdef CYXWIZ_HAS_CRYPTO
 /*
  * Create commitment to a single bit: C_i = b_i*G + r_i*H
+ *
+ * For bit=0: C = 0*G + r*H = r*H (identity element optimization)
+ * For bit=1: C = 1*G + r*H = G + r*H
  */
 static cyxwiz_error_t commit_bit(
     uint8_t bit,
     const uint8_t *blinding,
     uint8_t *commitment_out)
 {
-    uint8_t bit_scalar[32];
-    uint8_t bG[32];
     uint8_t rH[32];
-
-    memset(bit_scalar, 0, 32);
-    bit_scalar[0] = bit;
-
-    /* Compute b * G */
-    if (crypto_scalarmult_ed25519_base_noclamp(bG, bit_scalar) != 0) {
-        return CYXWIZ_ERR_CRYPTO;
-    }
 
     /* Compute r * H */
     if (crypto_scalarmult_ed25519_noclamp(rH, blinding, pedersen_H) != 0) {
-        cyxwiz_secure_zero(bG, sizeof(bG));
         return CYXWIZ_ERR_CRYPTO;
     }
 
-    /* C = bG + rH */
-    if (crypto_core_ed25519_add(commitment_out, bG, rH) != 0) {
-        cyxwiz_secure_zero(bG, sizeof(bG));
-        cyxwiz_secure_zero(rH, sizeof(rH));
-        return CYXWIZ_ERR_CRYPTO;
+    if (bit == 0) {
+        /* C = 0*G + r*H = r*H (0*G is identity, adding identity is no-op) */
+        memcpy(commitment_out, rH, 32);
+    } else {
+        /* C = 1*G + r*H = G + r*H */
+        uint8_t one_scalar[32];
+        uint8_t G_point[32];
+
+        memset(one_scalar, 0, 32);
+        one_scalar[0] = 1;
+
+        /* Compute 1 * G = G (the base point) */
+        if (crypto_scalarmult_ed25519_base_noclamp(G_point, one_scalar) != 0) {
+            cyxwiz_secure_zero(rH, sizeof(rH));
+            cyxwiz_secure_zero(one_scalar, sizeof(one_scalar));
+            return CYXWIZ_ERR_CRYPTO;
+        }
+
+        /* C = G + rH */
+        if (crypto_core_ed25519_add(commitment_out, G_point, rH) != 0) {
+            cyxwiz_secure_zero(rH, sizeof(rH));
+            cyxwiz_secure_zero(G_point, sizeof(G_point));
+            cyxwiz_secure_zero(one_scalar, sizeof(one_scalar));
+            return CYXWIZ_ERR_CRYPTO;
+        }
+
+        cyxwiz_secure_zero(G_point, sizeof(G_point));
+        cyxwiz_secure_zero(one_scalar, sizeof(one_scalar));
     }
 
-    cyxwiz_secure_zero(bG, sizeof(bG));
     cyxwiz_secure_zero(rH, sizeof(rH));
-    cyxwiz_secure_zero(bit_scalar, sizeof(bit_scalar));
 
     return CYXWIZ_OK;
 }
@@ -459,22 +472,35 @@ cyxwiz_error_t cyxwiz_range_proof_create_16(
     memcpy(opening_out->value, value_scalar, 32);
     memcpy(opening_out->blinding, total_blinding, 32);
 
-    /* Compute value commitment */
+    /* Compute value commitment: C = v*G + r*H */
     {
-        uint8_t vG[32], rH[32];
-        if (crypto_scalarmult_ed25519_base_noclamp(vG, value_scalar) != 0) {
-            err = CYXWIZ_ERR_CRYPTO;
-            goto cleanup;
-        }
+        uint8_t rH[32];
+
+        /* Compute r * H */
         if (crypto_scalarmult_ed25519_noclamp(rH, total_blinding, pedersen_H) != 0) {
             err = CYXWIZ_ERR_CRYPTO;
             goto cleanup;
         }
-        if (crypto_core_ed25519_add(proof_out->commitment, vG, rH) != 0) {
-            err = CYXWIZ_ERR_CRYPTO;
-            goto cleanup;
+
+        if (value == 0) {
+            /* C = 0*G + r*H = r*H (0*G is identity, adding it is no-op) */
+            memcpy(proof_out->commitment, rH, 32);
+        } else {
+            /* C = v*G + r*H */
+            uint8_t vG[32];
+            if (crypto_scalarmult_ed25519_base_noclamp(vG, value_scalar) != 0) {
+                cyxwiz_secure_zero(rH, sizeof(rH));
+                err = CYXWIZ_ERR_CRYPTO;
+                goto cleanup;
+            }
+            if (crypto_core_ed25519_add(proof_out->commitment, vG, rH) != 0) {
+                cyxwiz_secure_zero(vG, sizeof(vG));
+                cyxwiz_secure_zero(rH, sizeof(rH));
+                err = CYXWIZ_ERR_CRYPTO;
+                goto cleanup;
+            }
+            cyxwiz_secure_zero(vG, sizeof(vG));
         }
-        cyxwiz_secure_zero(vG, sizeof(vG));
         cyxwiz_secure_zero(rH, sizeof(rH));
     }
 
