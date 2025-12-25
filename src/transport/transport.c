@@ -134,6 +134,16 @@ void cyxwiz_transport_set_peer_callback(
     transport->peer_user_data = user_data;
 }
 
+void cyxwiz_transport_set_local_id(
+    cyxwiz_transport_t *transport,
+    const cyxwiz_node_id_t *local_id)
+{
+    if (transport == NULL || local_id == NULL) {
+        return;
+    }
+    memcpy(&transport->local_id, local_id, sizeof(cyxwiz_node_id_t));
+}
+
 /* Error strings */
 const char *cyxwiz_strerror(cyxwiz_error_t err)
 {

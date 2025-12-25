@@ -345,6 +345,7 @@ int main(int argc, char *argv[])
         if (err != CYXWIZ_OK) {
             CYXWIZ_ERROR("Failed to create UDP transport: %s", cyxwiz_strerror(err));
         } else {
+            cyxwiz_transport_set_local_id(udp_transport, &local_id);
             cyxwiz_transport_set_peer_callback(udp_transport, on_peer_discovered, NULL);
             cyxwiz_transport_set_recv_callback(udp_transport, on_data_received, NULL);
             primary_transport = udp_transport;
@@ -363,6 +364,7 @@ int main(int argc, char *argv[])
         if (err != CYXWIZ_OK) {
             CYXWIZ_ERROR("Failed to create WiFi transport: %s", cyxwiz_strerror(err));
         } else {
+            cyxwiz_transport_set_local_id(wifi_transport, &local_id);
             cyxwiz_transport_set_peer_callback(wifi_transport, on_peer_discovered, NULL);
             cyxwiz_transport_set_recv_callback(wifi_transport, on_data_received, NULL);
             primary_transport = wifi_transport;

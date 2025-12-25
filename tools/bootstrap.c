@@ -226,6 +226,7 @@ static void handle_register(const struct sockaddr_in *from, const uint8_t *data,
     if (peer != NULL) {
         printf("Registered: %s... from %s:%d (total: %zu)\n",
                hex_id, ip_str, ntohs(addr.port), g_peer_count);
+        fflush(stdout);
     }
 
     /* Send ACK */
@@ -265,6 +266,10 @@ static void handle_register(const struct sockaddr_in *from, const uint8_t *data,
         sendto(g_socket, (const char *)buf, (int)total_len, 0,
                (const struct sockaddr *)from, sizeof(*from));
         printf("Sent %zu peers to %s:%d\n", entry_count, ip_str, ntohs(addr.port));
+        fflush(stdout);
+    } else {
+        printf("No peers to send (first node)\n");
+        fflush(stdout);
     }
 }
 

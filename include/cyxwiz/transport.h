@@ -122,6 +122,12 @@ void cyxwiz_transport_set_peer_callback(
     void *user_data
 );
 
+/* Set local node ID (required before using transport for peer discovery) */
+void cyxwiz_transport_set_local_id(
+    cyxwiz_transport_t *transport,
+    const cyxwiz_node_id_t *local_id
+);
+
 /* Get transport type name */
 const char *cyxwiz_transport_type_name(cyxwiz_transport_type_t type);
 
