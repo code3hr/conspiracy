@@ -474,6 +474,101 @@ TEST(test_callbacks)
     teardown();
 }
 
+/* ============ Anonymous Voting Tests ============ */
+
+#ifdef CYXWIZ_HAS_CRYPTO
+TEST(test_anon_vote_null_params)
+{
+    setup();
+
+    cyxwiz_consensus_ctx_t *ctx = NULL;
+    cyxwiz_error_t err = cyxwiz_consensus_create(&ctx, router, peer_table, &identity);
+    ASSERT_OK(err);
+
+    uint8_t round_id[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    cyxwiz_credential_t cred;
+    memset(&cred, 0, sizeof(cred));
+    cred.cred_type = CYXWIZ_CRED_VOTE_ELIGIBLE;
+
+    /* NULL context */
+    err = cyxwiz_consensus_vote_anonymous(NULL, round_id, true, &cred);
+    ASSERT_EQ(err, CYXWIZ_ERR_INVALID);
+
+    /* NULL round_id */
+    err = cyxwiz_consensus_vote_anonymous(ctx, NULL, true, &cred);
+    ASSERT_EQ(err, CYXWIZ_ERR_INVALID);
+
+    /* NULL credential */
+    err = cyxwiz_consensus_vote_anonymous(ctx, round_id, true, NULL);
+    ASSERT_EQ(err, CYXWIZ_ERR_INVALID);
+
+    cyxwiz_consensus_destroy(ctx);
+    teardown();
+}
+
+TEST(test_anon_vote_wrong_cred_type)
+{
+    setup();
+
+    cyxwiz_consensus_ctx_t *ctx = NULL;
+    cyxwiz_error_t err = cyxwiz_consensus_create(&ctx, router, peer_table, &identity);
+    ASSERT_OK(err);
+
+    uint8_t round_id[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    cyxwiz_credential_t cred;
+    memset(&cred, 0, sizeof(cred));
+    cred.cred_type = CYXWIZ_CRED_SERVICE_ACCESS; /* Wrong type */
+
+    /* Should reject wrong credential type */
+    err = cyxwiz_consensus_vote_anonymous(ctx, round_id, true, &cred);
+    ASSERT_EQ(err, CYXWIZ_ERR_CREDENTIAL_INVALID);
+
+    cyxwiz_consensus_destroy(ctx);
+    teardown();
+}
+
+TEST(test_round_allows_anonymous)
+{
+    setup();
+
+    cyxwiz_consensus_ctx_t *ctx = NULL;
+    cyxwiz_error_t err = cyxwiz_consensus_create(&ctx, router, peer_table, &identity);
+    ASSERT_OK(err);
+
+    /* Unknown round should allow anonymous by default */
+    uint8_t unknown_round[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    bool allows = cyxwiz_consensus_round_allows_anonymous(ctx, unknown_round);
+    ASSERT(allows);
+
+    /* NULL context should return false */
+    allows = cyxwiz_consensus_round_allows_anonymous(NULL, unknown_round);
+    ASSERT(!allows);
+
+    /* NULL round_id should return false */
+    allows = cyxwiz_consensus_round_allows_anonymous(ctx, NULL);
+    ASSERT(!allows);
+
+    cyxwiz_consensus_destroy(ctx);
+    teardown();
+}
+
+TEST(test_consensus_round_anon_fields)
+{
+    /* Verify consensus round structure has anonymous voting fields */
+    cyxwiz_consensus_round_t round;
+    memset(&round, 0, sizeof(round));
+
+    /* Set anonymous vote counts */
+    round.anon_votes_valid = 5;
+    round.anon_votes_invalid = 3;
+    round.allows_anonymous = true;
+
+    ASSERT_EQ(round.anon_votes_valid, 5);
+    ASSERT_EQ(round.anon_votes_invalid, 3);
+    ASSERT(round.allows_anonymous);
+}
+#endif
+
 /* ============ Main ============ */
 
 int main(void)
@@ -522,6 +617,16 @@ int main(void)
 
     printf("\nCallback Tests:\n");
     RUN_TEST(test_callbacks);
+
+    printf("\nAnonymous Voting Tests:\n");
+#ifdef CYXWIZ_HAS_CRYPTO
+    RUN_TEST(test_anon_vote_null_params);
+    RUN_TEST(test_anon_vote_wrong_cred_type);
+    RUN_TEST(test_round_allows_anonymous);
+    RUN_TEST(test_consensus_round_anon_fields);
+#else
+    printf("  (skipped - requires crypto)\n");
+#endif
 
     printf("\n======================\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);

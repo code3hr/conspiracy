@@ -10,6 +10,7 @@
 #include "cyxwiz/routing.h"
 #include "cyxwiz/peer.h"
 #include "cyxwiz/crypto.h"
+#include "cyxwiz/privacy.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
@@ -630,6 +631,7 @@ cyxwiz_error_t cyxwiz_consensus_validate_job(
     round->result = CYXWIZ_VALIDATION_PENDING;
     round->started_at = ctx->last_poll;
     round->active = true;
+    round->allows_anonymous = true; /* Enable anonymous voting by default */
 
     /* Set target */
     memcpy(round->target.job.job_id, job_id, 8);
@@ -698,6 +700,7 @@ cyxwiz_error_t cyxwiz_consensus_validate_storage(
     round->result = CYXWIZ_VALIDATION_PENDING;
     round->started_at = ctx->last_poll;
     round->active = true;
+    round->allows_anonymous = true; /* Enable anonymous voting by default */
 
     /* Set target */
     memcpy(round->target.storage.storage_id, storage_id, 8);
@@ -818,6 +821,82 @@ cyxwiz_error_t cyxwiz_consensus_vote(
 
     CYXWIZ_DEBUG("Cast vote: %s for round", valid ? "VALID" : "INVALID");
     return CYXWIZ_OK;
+}
+
+/* ============ Anonymous Voting ============ */
+
+cyxwiz_error_t cyxwiz_consensus_vote_anonymous(
+    cyxwiz_consensus_ctx_t *ctx,
+    const uint8_t *round_id,
+    bool valid,
+    const cyxwiz_credential_t *validator_cred)
+{
+    if (ctx == NULL || round_id == NULL || validator_cred == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Verify credential type is VOTE_ELIGIBLE */
+    if (validator_cred->cred_type != CYXWIZ_CRED_VOTE_ELIGIBLE &&
+        validator_cred->cred_type != CYXWIZ_CRED_VALIDATOR) {
+        CYXWIZ_WARN("Anonymous vote requires vote eligibility credential");
+        return CYXWIZ_ERR_CREDENTIAL_INVALID;
+    }
+
+    /* Check if round allows anonymous voting */
+    if (!cyxwiz_consensus_round_allows_anonymous(ctx, round_id)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Create anonymous vote message using privacy protocol */
+    uint8_t vote_msg[256];
+    size_t vote_len;
+    cyxwiz_error_t err = cyxwiz_privacy_vote_anonymous(
+        validator_cred,
+        round_id,
+        valid,
+        vote_msg,
+        &vote_len
+    );
+
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to create anonymous vote: %d", err);
+        return err;
+    }
+
+    /* Broadcast the anonymous vote
+     * Note: For maximum privacy, this should be sent via onion routing
+     * to hide the sender's identity. For now, we broadcast directly. */
+    cyxwiz_node_id_t broadcast;
+    memset(&broadcast, 0xFF, sizeof(broadcast));
+    err = cyxwiz_router_send(ctx->router, &broadcast, vote_msg, vote_len);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to broadcast anonymous vote");
+        return err;
+    }
+
+    CYXWIZ_DEBUG("Cast anonymous vote: %s", valid ? "VALID" : "INVALID");
+    return CYXWIZ_OK;
+#endif
+}
+
+bool cyxwiz_consensus_round_allows_anonymous(
+    const cyxwiz_consensus_ctx_t *ctx,
+    const uint8_t *round_id)
+{
+    if (ctx == NULL || round_id == NULL) {
+        return false;
+    }
+
+    int idx = find_round_index(ctx, round_id);
+    if (idx < 0) {
+        /* Unknown round - default to allowing anonymous for flexibility */
+        return true;
+    }
+
+    return ctx->rounds[idx].allows_anonymous;
 }
 
 /* ============ Message Handling ============ */
@@ -1013,9 +1092,9 @@ static cyxwiz_error_t handle_validation_vote(
     }
     round->vote_count++;
 
-    /* Check for quorum */
-    int valid_count = popcount32(round->votes_valid);
-    int invalid_count = popcount32(round->votes_invalid);
+    /* Check for quorum (including anonymous votes) */
+    int valid_count = popcount32(round->votes_valid) + round->anon_votes_valid;
+    int invalid_count = popcount32(round->votes_invalid) + round->anon_votes_invalid;
     int total_votes = valid_count + invalid_count;
 
     int quorum_needed = (round->committee_size * CYXWIZ_QUORUM_THRESHOLD + 99) / 100;
@@ -1082,6 +1161,126 @@ static cyxwiz_error_t handle_validator_heartbeat(
     return CYXWIZ_OK;
 }
 
+/*
+ * Handle anonymous vote message (CYXWIZ_MSG_ANON_VOTE = 0x77)
+ *
+ * Anonymous votes use the privacy protocol's credential system
+ * to prove validator eligibility without revealing identity.
+ */
+static cyxwiz_error_t handle_anon_vote(
+    cyxwiz_consensus_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_anon_vote_msg_t *msg)
+{
+    CYXWIZ_UNUSED(from);
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Find the round */
+    int idx = find_round_index(ctx, msg->round_id);
+    if (idx < 0) {
+        CYXWIZ_DEBUG("Anonymous vote for unknown round");
+        return CYXWIZ_OK; /* Unknown round, ignore */
+    }
+
+    cyxwiz_consensus_round_t *round = &ctx->rounds[idx];
+
+    /* Check if round allows anonymous voting */
+    if (!round->allows_anonymous) {
+        CYXWIZ_WARN("Anonymous vote rejected: round requires identified voting");
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Verify the credential show proof */
+    /* We accept credentials from any registered issuer (simplified) */
+    cyxwiz_error_t err = cyxwiz_cred_show_verify(
+        &msg->cred_proof,
+        CYXWIZ_CRED_VOTE_ELIGIBLE,
+        ctx->identity.public_key, /* Use our key as issuer for now */
+        ctx->last_poll
+    );
+
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Invalid anonymous vote credential proof");
+        return CYXWIZ_ERR_CREDENTIAL_INVALID;
+    }
+
+    /* Verify vote commitment and proof (simplified - check commitment is valid point) */
+    if (crypto_core_ed25519_is_valid_point(msg->vote_commitment) != 1) {
+        CYXWIZ_WARN("Invalid vote commitment in anonymous vote");
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Record anonymous vote */
+    if (msg->vote != 0) {
+        round->anon_votes_valid++;
+    } else {
+        round->anon_votes_invalid++;
+    }
+    round->vote_count++;
+
+    CYXWIZ_DEBUG("Received anonymous vote: %s", msg->vote ? "VALID" : "INVALID");
+
+    /* Check for quorum including anonymous votes */
+    int valid_count = popcount32(round->votes_valid) + round->anon_votes_valid;
+    int invalid_count = popcount32(round->votes_invalid) + round->anon_votes_invalid;
+    int total_votes = valid_count + invalid_count;
+
+    /* For anonymous voting, we use a fixed effective committee size
+     * since we don't know how many eligible voters there are */
+    int effective_committee = round->committee_size > 0 ?
+                              round->committee_size : CYXWIZ_MIN_COMMITTEE_SIZE;
+    int quorum_needed = (effective_committee * CYXWIZ_QUORUM_THRESHOLD + 99) / 100;
+
+    if (valid_count >= quorum_needed) {
+        round->result = CYXWIZ_VALIDATION_VALID;
+        round->completed_at = ctx->last_poll;
+        round->active = false;
+        ctx->active_round_count--;
+
+        CYXWIZ_INFO("Consensus reached (with anon votes): VALID (%d/%d votes)",
+                    valid_count, total_votes);
+
+        if (ctx->on_validation_complete) {
+            ctx->on_validation_complete(round, CYXWIZ_VALIDATION_VALID,
+                                        ctx->validation_user_data);
+        }
+
+        /* Broadcast result */
+        cyxwiz_validation_result_msg_t result_msg;
+        memset(&result_msg, 0, sizeof(result_msg));
+        result_msg.type = CYXWIZ_MSG_VALIDATION_RESULT;
+        memcpy(result_msg.round_id, round->round_id, CYXWIZ_CONSENSUS_ID_SIZE);
+        result_msg.result = CYXWIZ_VALIDATION_VALID;
+        result_msg.votes_valid = (uint8_t)valid_count;
+        result_msg.votes_invalid = (uint8_t)invalid_count;
+
+        cyxwiz_node_id_t broadcast;
+        memset(&broadcast, 0xFF, sizeof(broadcast));
+        cyxwiz_router_send(ctx->router, &broadcast,
+                           (uint8_t *)&result_msg, sizeof(result_msg));
+
+    } else if (invalid_count >= quorum_needed) {
+        round->result = CYXWIZ_VALIDATION_INVALID;
+        round->completed_at = ctx->last_poll;
+        round->active = false;
+        ctx->active_round_count--;
+
+        CYXWIZ_INFO("Consensus reached (with anon votes): INVALID (%d/%d votes)",
+                    invalid_count, total_votes);
+
+        if (ctx->on_validation_complete) {
+            ctx->on_validation_complete(round, CYXWIZ_VALIDATION_INVALID,
+                                        ctx->validation_user_data);
+        }
+    }
+
+    return CYXWIZ_OK;
+#endif
+}
+
 cyxwiz_error_t cyxwiz_consensus_handle_message(
     cyxwiz_consensus_ctx_t *ctx,
     const cyxwiz_node_id_t *from,
@@ -1127,6 +1326,13 @@ cyxwiz_error_t cyxwiz_consensus_handle_message(
             if (len >= sizeof(cyxwiz_validator_heartbeat_msg_t)) {
                 return handle_validator_heartbeat(ctx, from,
                     (const cyxwiz_validator_heartbeat_msg_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_ANON_VOTE:
+            if (len >= sizeof(cyxwiz_anon_vote_msg_t)) {
+                return handle_anon_vote(ctx, from,
+                    (const cyxwiz_anon_vote_msg_t *)data);
             }
             break;
 

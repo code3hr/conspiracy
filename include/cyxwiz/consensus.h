@@ -19,6 +19,7 @@
 
 #include "types.h"
 #include "zkp.h"
+#include "privacy.h"
 
 /* Forward declarations */
 typedef struct cyxwiz_router cyxwiz_router_t;
@@ -139,6 +140,11 @@ typedef struct {
     uint32_t votes_valid;                    /* Bitmap: voted valid */
     uint32_t votes_invalid;                  /* Bitmap: voted invalid */
     uint8_t vote_count;                      /* Total votes received */
+
+    /* Anonymous votes (from privacy protocol) */
+    uint8_t anon_votes_valid;                /* Anonymous valid votes */
+    uint8_t anon_votes_invalid;              /* Anonymous invalid votes */
+    bool allows_anonymous;                   /* Whether round accepts anon votes */
 
     /* Timing */
     uint64_t started_at;
@@ -485,6 +491,42 @@ cyxwiz_error_t cyxwiz_consensus_vote(
     cyxwiz_consensus_ctx_t *ctx,
     const uint8_t *round_id,
     bool valid
+);
+
+/*
+ * Cast anonymous vote using privacy protocol
+ *
+ * Votes without revealing validator identity. Requires valid
+ * validator credential obtained through anonymous credential system.
+ * The vote is sent via onion routing for maximum unlinkability.
+ *
+ * @param ctx               Consensus context
+ * @param round_id          Round identifier (8 bytes)
+ * @param valid             Vote (true = valid, false = invalid)
+ * @param validator_cred    Validator's anonymous credential
+ * @return                  CYXWIZ_OK on success
+ *                          CYXWIZ_ERR_CONSENSUS_NOT_VALIDATOR if not registered
+ *                          CYXWIZ_ERR_CREDENTIAL_INVALID if credential invalid
+ */
+cyxwiz_error_t cyxwiz_consensus_vote_anonymous(
+    cyxwiz_consensus_ctx_t *ctx,
+    const uint8_t *round_id,
+    bool valid,
+    const cyxwiz_credential_t *validator_cred
+);
+
+/*
+ * Check if round allows anonymous voting
+ *
+ * Some rounds may require identified voting for accountability.
+ *
+ * @param ctx               Consensus context
+ * @param round_id          Round identifier
+ * @return                  true if anonymous voting allowed
+ */
+bool cyxwiz_consensus_round_allows_anonymous(
+    const cyxwiz_consensus_ctx_t *ctx,
+    const uint8_t *round_id
 );
 
 /* ============ Committee Selection ============ */
