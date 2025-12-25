@@ -51,6 +51,10 @@ typedef enum {
     CYXWIZ_ERR_POS_INVALID_BLOCK = -30, /* Block index out of range */
     CYXWIZ_ERR_INSUFFICIENT_RELAYS = -31, /* Not enough relay nodes for SURB */
     CYXWIZ_ERR_PROOF_INVALID = -32,       /* ZKP verification failed */
+    CYXWIZ_ERR_CONSENSUS_NO_QUORUM = -33, /* Consensus quorum not reached */
+    CYXWIZ_ERR_CONSENSUS_SLASHED = -34,   /* Validator is slashed */
+    CYXWIZ_ERR_CONSENSUS_NOT_VALIDATOR = -35, /* Not a registered validator */
+    CYXWIZ_ERR_CONSENSUS_INSUFFICIENT_CREDITS = -36, /* Not enough work credits */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -125,7 +129,21 @@ typedef enum {
     CYXWIZ_MSG_POS_VERIFY_FAIL = 0x54,    /* Owner reports proof invalid */
     CYXWIZ_MSG_POS_REQUEST_COMMIT = 0x55, /* Owner requests commitment (retry) */
     CYXWIZ_MSG_POS_CHALLENGE_ANON = 0x56, /* Anonymous challenge with SURB for proof */
-    CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON = 0x57 /* Anonymous commitment request with SURB */
+    CYXWIZ_MSG_POS_REQUEST_COMMIT_ANON = 0x57, /* Anonymous commitment request with SURB */
+
+    /* Consensus messages (0x60-0x6B) */
+    CYXWIZ_MSG_VALIDATOR_REGISTER = 0x60,   /* Register as validator with Schnorr proof */
+    CYXWIZ_MSG_VALIDATOR_REG_ACK = 0x61,    /* Registration confirmed/rejected */
+    CYXWIZ_MSG_WORK_CREDIT = 0x62,          /* Report completed work for credits */
+    CYXWIZ_MSG_VALIDATION_REQ = 0x63,       /* Request validation round */
+    CYXWIZ_MSG_VALIDATION_VOTE = 0x64,      /* Cast validation vote with proof */
+    CYXWIZ_MSG_VALIDATION_RESULT = 0x65,    /* Announce consensus result */
+    CYXWIZ_MSG_JOB_VALIDATE_REQ = 0x66,     /* Request job re-execution for validation */
+    CYXWIZ_MSG_STORAGE_VALIDATE_REQ = 0x67, /* Coordinated PoS challenge */
+    CYXWIZ_MSG_SLASH_REPORT = 0x68,         /* Report validator misbehavior */
+    CYXWIZ_MSG_CREDIT_QUERY = 0x69,         /* Query validator credits */
+    CYXWIZ_MSG_CREDIT_RESPONSE = 0x6A,      /* Credit balance response */
+    CYXWIZ_MSG_VALIDATOR_HEARTBEAT = 0x6B   /* Validator availability beacon */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

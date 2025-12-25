@@ -107,16 +107,18 @@ if(CYXWIZ_TRANSPORT_UDP)
     endif()
 endif()
 
-# Core modules (peer discovery, routing, compute)
+# Core modules (peer discovery, routing, compute, consensus)
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
     src/core/discovery.c
     src/core/routing.c
     src/core/compute.c
     src/core/storage.c
+    src/core/consensus.c
 )
 add_compile_definitions(CYXWIZ_HAS_COMPUTE=1)
 add_compile_definitions(CYXWIZ_HAS_STORAGE=1)
+add_compile_definitions(CYXWIZ_HAS_CONSENSUS=1)
 
 # Onion routing (requires crypto)
 if(CYXWIZ_HAS_CRYPTO)
@@ -215,6 +217,10 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_storage tests/test_storage.c)
         target_link_libraries(test_storage PRIVATE cyxwiz)
         add_test(NAME test_storage COMMAND test_storage)
+
+        add_executable(test_consensus tests/test_consensus.c)
+        target_link_libraries(test_consensus PRIVATE cyxwiz)
+        add_test(NAME test_consensus COMMAND test_consensus)
     endif()
 endif()
 
