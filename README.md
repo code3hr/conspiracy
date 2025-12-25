@@ -483,6 +483,7 @@ cyxwiz/
 | Validator Registration | ✅ | Schnorr proof-based validator identity verification |
 | Work Credits | ✅ | Earn validation rights through compute/storage work |
 | Committee Selection | ✅ | VRF-weighted selection based on work credits |
+| Anonymous Consensus Voting | ✅ | Vote in validation rounds without revealing validator identity |
 | Slashing | ✅ | Penalties for misbehavior (equivocation = ban) |
 
 ### Message Types Implemented
@@ -498,7 +499,7 @@ Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL,
               POS_CHALLENGE_ANON, POS_REQUEST_COMMIT_ANON (anonymous verification)
 Consensus:    VALIDATOR_REGISTER, VALIDATOR_REG_ACK, WORK_CREDIT, VALIDATION_REQ,
               VALIDATION_VOTE, VALIDATION_RESULT, JOB_VALIDATE_REQ, STORAGE_VALIDATE_REQ,
-              SLASH_REPORT, CREDIT_QUERY, CREDIT_RESPONSE, VALIDATOR_HEARTBEAT
+              SLASH_REPORT, CREDIT_QUERY, CREDIT_RESPONSE, VALIDATOR_HEARTBEAT, ANON_VOTE
 Privacy:      PEDERSEN_COMMIT, PEDERSEN_OPEN, RANGE_PROOF, CRED_ISSUE_REQ/RESP,
               CRED_SHOW, CRED_VERIFY, ANON_VOTE, SERVICE_TOKEN_REQ/USE, REPUTATION_PROOF
 ```
