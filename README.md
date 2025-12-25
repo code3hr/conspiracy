@@ -599,6 +599,75 @@ cyxwiz_onion_send(onion_ctx, circuit, message, len);
 
 ---
 
+## Example: Anonymous Consensus Voting
+
+Vote in consensus rounds without revealing your validator identity:
+
+```c
+#include "cyxwiz/consensus.h"
+#include "cyxwiz/privacy.h"
+#include "cyxwiz/crypto.h"
+
+// Step 1: Obtain a validator credential (one-time setup)
+// Request credential from network issuer
+cyxwiz_cred_request_t request;
+uint8_t blinding[32];
+cyxwiz_cred_request_create(
+    CYXWIZ_CRED_VOTE_ELIGIBLE,   // Credential type
+    my_identity.public_key,      // Your identity (attribute)
+    32,
+    &request,
+    blinding                      // Keep secret for unblinding
+);
+
+// Send request to issuer, receive blinded signature
+// ... network exchange ...
+
+// Unblind to get usable credential
+cyxwiz_credential_t validator_cred;
+cyxwiz_cred_unblind(
+    blinded_sig,
+    blinding,
+    issuer_pubkey,
+    my_identity.public_key, 32,
+    expires_at,
+    &validator_cred
+);
+
+// Step 2: Cast anonymous vote in a validation round
+// When you receive a VALIDATION_REQ for a round you want to vote on:
+uint8_t round_id[8];  // From VALIDATION_REQ message
+bool vote = true;     // true = valid, false = invalid
+
+// Check if round allows anonymous voting
+if (cyxwiz_consensus_round_allows_anonymous(consensus_ctx, round_id)) {
+    // Cast anonymous vote - your identity is hidden
+    cyxwiz_error_t err = cyxwiz_consensus_vote_anonymous(
+        consensus_ctx,
+        round_id,
+        vote,
+        &validator_cred   // Proves eligibility without revealing identity
+    );
+
+    if (err == CYXWIZ_OK) {
+        // Vote cast anonymously - no one knows which validator you are
+    }
+} else {
+    // Round requires identified voting, use regular vote
+    cyxwiz_consensus_vote(consensus_ctx, round_id, vote);
+}
+```
+
+**How it works:**
+- Credential proves you're an eligible validator without revealing *which* validator
+- Each vote showing is unlinkable to other showings of the same credential
+- Vote is broadcast to the network - observers see a valid vote but not who cast it
+- Quorum is reached by combining anonymous and identified votes
+
+**Use case:** Validators who want to vote without being targeted for their voting patterns
+
+---
+
 ## Future Use Cases (Roadmap)
 
 ### For Individuals
