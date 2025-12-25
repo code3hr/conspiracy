@@ -25,6 +25,14 @@
 #include "cyxwiz/storage.h"
 #endif
 
+#ifdef CYXWIZ_HAS_CONSENSUS
+#include "cyxwiz/consensus.h"
+#endif
+
+#ifdef CYXWIZ_HAS_PRIVACY
+#include "cyxwiz/privacy.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +66,10 @@ static cyxwiz_compute_ctx_t *g_compute = NULL;
 #endif
 #ifdef CYXWIZ_HAS_STORAGE
 static cyxwiz_storage_ctx_t *g_storage = NULL;
+#endif
+#ifdef CYXWIZ_HAS_CONSENSUS
+static cyxwiz_consensus_ctx_t *g_consensus = NULL;
+static cyxwiz_identity_keypair_t g_identity;
 #endif
 
 static void on_peer_discovered(
@@ -129,6 +141,18 @@ static void on_data_received(
         /* Storage messages (STORE_REQ, RETRIEVE_REQ, etc.) */
         if (g_storage != NULL) {
             cyxwiz_storage_handle_message(g_storage, from, data, len);
+        }
+#endif
+#ifdef CYXWIZ_HAS_CONSENSUS
+    } else if (msg_type >= 0x60 && msg_type <= 0x6F) {
+        /* Consensus messages (VALIDATOR_REGISTER, VOTE, etc.) */
+        if (g_consensus != NULL) {
+            cyxwiz_consensus_handle_message(g_consensus, from, data, len);
+        }
+    } else if (msg_type >= 0x70 && msg_type <= 0x7F) {
+        /* Privacy messages (ANON_VOTE, CRED_SHOW, etc.) */
+        if (g_consensus != NULL) {
+            cyxwiz_consensus_handle_message(g_consensus, from, data, len);
         }
 #endif
     } else {
@@ -423,6 +447,31 @@ int main(int argc, char *argv[])
                 CYXWIZ_INFO("Storage protocol enabled (provider mode)");
             }
 #endif
+
+#ifdef CYXWIZ_HAS_CONSENSUS
+            /* Generate identity keypair for consensus */
+            err = cyxwiz_identity_keygen(&g_identity);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to generate identity: %s", cyxwiz_strerror(err));
+            } else {
+                /* Create consensus context */
+                err = cyxwiz_consensus_create(&g_consensus, g_router, peer_table, &g_identity);
+                if (err != CYXWIZ_OK) {
+                    CYXWIZ_ERROR("Failed to create consensus context: %s", cyxwiz_strerror(err));
+                } else {
+                    /* Initialize Pedersen parameters for privacy protocol */
+                    cyxwiz_pedersen_init();
+
+                    /* Register as validator */
+                    err = cyxwiz_consensus_register_validator(g_consensus);
+                    if (err == CYXWIZ_OK) {
+                        CYXWIZ_INFO("Consensus protocol enabled (validator mode)");
+                    } else {
+                        CYXWIZ_WARN("Validator registration pending: %s", cyxwiz_strerror(err));
+                    }
+                }
+            }
+#endif
         }
     }
 
@@ -463,6 +512,13 @@ int main(int argc, char *argv[])
         }
 #endif
 
+#ifdef CYXWIZ_HAS_CONSENSUS
+        /* Poll consensus context (handles round timeouts, heartbeats) */
+        if (g_consensus != NULL) {
+            cyxwiz_consensus_poll(g_consensus, now);
+        }
+#endif
+
         /* Poll all transports */
         if (udp_transport != NULL) {
             udp_transport->ops->poll(udp_transport, 50);
@@ -478,6 +534,15 @@ int main(int argc, char *argv[])
 
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
+
+#ifdef CYXWIZ_HAS_CONSENSUS
+    /* Destroy consensus context */
+    if (g_consensus != NULL) {
+        cyxwiz_consensus_destroy(g_consensus);
+        g_consensus = NULL;
+    }
+    cyxwiz_identity_destroy(&g_identity);
+#endif
 
 #ifdef CYXWIZ_HAS_STORAGE
     /* Destroy storage context */

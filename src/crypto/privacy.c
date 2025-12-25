@@ -118,7 +118,6 @@ cyxwiz_error_t cyxwiz_pedersen_commit(
     }
 
     uint8_t r_full[64];
-    uint8_t vG[32];  /* v * G */
     uint8_t rH[32];  /* r * H */
 
     /* Copy value to opening */
@@ -128,30 +127,46 @@ cyxwiz_error_t cyxwiz_pedersen_commit(
     randombytes_buf(r_full, 64);
     crypto_core_ed25519_scalar_reduce(opening_out->blinding, r_full);
 
-    /* Compute v * G */
-    if (crypto_scalarmult_ed25519_base_noclamp(vG, value) != 0) {
-        cyxwiz_secure_zero(r_full, sizeof(r_full));
-        return CYXWIZ_ERR_CRYPTO;
-    }
-
     /* Compute r * H */
     if (crypto_scalarmult_ed25519_noclamp(rH, opening_out->blinding, pedersen_H) != 0) {
         cyxwiz_secure_zero(r_full, sizeof(r_full));
-        cyxwiz_secure_zero(vG, sizeof(vG));
         return CYXWIZ_ERR_CRYPTO;
     }
 
-    /* Compute C = vG + rH */
-    if (crypto_core_ed25519_add(commit_out->point, vG, rH) != 0) {
-        cyxwiz_secure_zero(r_full, sizeof(r_full));
+    /* Check if value is zero (all bytes are 0) */
+    int value_is_zero = 1;
+    for (int i = 0; i < 32; i++) {
+        if (value[i] != 0) {
+            value_is_zero = 0;
+            break;
+        }
+    }
+
+    if (value_is_zero) {
+        /* C = 0*G + r*H = r*H (0*G is identity, adding it is no-op) */
+        memcpy(commit_out->point, rH, 32);
+    } else {
+        /* Compute v * G */
+        uint8_t vG[32];
+        if (crypto_scalarmult_ed25519_base_noclamp(vG, value) != 0) {
+            cyxwiz_secure_zero(r_full, sizeof(r_full));
+            cyxwiz_secure_zero(rH, sizeof(rH));
+            return CYXWIZ_ERR_CRYPTO;
+        }
+
+        /* Compute C = vG + rH */
+        if (crypto_core_ed25519_add(commit_out->point, vG, rH) != 0) {
+            cyxwiz_secure_zero(r_full, sizeof(r_full));
+            cyxwiz_secure_zero(vG, sizeof(vG));
+            cyxwiz_secure_zero(rH, sizeof(rH));
+            return CYXWIZ_ERR_CRYPTO;
+        }
+
         cyxwiz_secure_zero(vG, sizeof(vG));
-        cyxwiz_secure_zero(rH, sizeof(rH));
-        return CYXWIZ_ERR_CRYPTO;
     }
 
     /* Clean up */
     cyxwiz_secure_zero(r_full, sizeof(r_full));
-    cyxwiz_secure_zero(vG, sizeof(vG));
     cyxwiz_secure_zero(rH, sizeof(rH));
 
     return CYXWIZ_OK;

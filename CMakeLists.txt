@@ -228,6 +228,10 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_privacy tests/test_privacy.c)
         target_link_libraries(test_privacy PRIVATE cyxwiz)
         add_test(NAME test_privacy COMMAND test_privacy)
+
+        add_executable(test_anon_voting_e2e tests/test_anon_voting_e2e.c)
+        target_link_libraries(test_anon_voting_e2e PRIVATE cyxwiz)
+        add_test(NAME test_anon_voting_e2e COMMAND test_anon_voting_e2e)
     endif()
 endif()
 
