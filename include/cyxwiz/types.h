@@ -55,6 +55,12 @@ typedef enum {
     CYXWIZ_ERR_CONSENSUS_SLASHED = -34,   /* Validator is slashed */
     CYXWIZ_ERR_CONSENSUS_NOT_VALIDATOR = -35, /* Not a registered validator */
     CYXWIZ_ERR_CONSENSUS_INSUFFICIENT_CREDITS = -36, /* Not enough work credits */
+    CYXWIZ_ERR_COMMITMENT_INVALID = -37,  /* Pedersen commitment verification failed */
+    CYXWIZ_ERR_RANGE_PROOF_FAILED = -38,  /* Range proof verification failed */
+    CYXWIZ_ERR_CREDENTIAL_EXPIRED = -39,  /* Credential has expired */
+    CYXWIZ_ERR_CREDENTIAL_INVALID = -40,  /* Credential verification failed */
+    CYXWIZ_ERR_TOKEN_EXPIRED = -41,       /* Service token has expired */
+    CYXWIZ_ERR_TOKEN_INSUFFICIENT = -42,  /* Insufficient token units */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
@@ -143,7 +149,21 @@ typedef enum {
     CYXWIZ_MSG_SLASH_REPORT = 0x68,         /* Report validator misbehavior */
     CYXWIZ_MSG_CREDIT_QUERY = 0x69,         /* Query validator credits */
     CYXWIZ_MSG_CREDIT_RESPONSE = 0x6A,      /* Credit balance response */
-    CYXWIZ_MSG_VALIDATOR_HEARTBEAT = 0x6B   /* Validator availability beacon */
+    CYXWIZ_MSG_VALIDATOR_HEARTBEAT = 0x6B,  /* Validator availability beacon */
+
+    /* Privacy messages (0x70-0x7B) */
+    CYXWIZ_MSG_PEDERSEN_COMMIT = 0x70,      /* Announce Pedersen commitment */
+    CYXWIZ_MSG_PEDERSEN_OPEN = 0x71,        /* Reveal commitment opening */
+    CYXWIZ_MSG_RANGE_PROOF = 0x72,          /* Range proof for value */
+    CYXWIZ_MSG_CRED_ISSUE_REQ = 0x73,       /* Request credential issuance */
+    CYXWIZ_MSG_CRED_ISSUE_RESP = 0x74,      /* Credential issuance response */
+    CYXWIZ_MSG_CRED_SHOW = 0x75,            /* Present credential anonymously */
+    CYXWIZ_MSG_CRED_VERIFY = 0x76,          /* Credential verification result */
+    CYXWIZ_MSG_ANON_VOTE = 0x77,            /* Anonymous vote with credential proof */
+    CYXWIZ_MSG_SERVICE_TOKEN_REQ = 0x78,    /* Request service access token */
+    CYXWIZ_MSG_SERVICE_TOKEN = 0x79,        /* Service token issuance */
+    CYXWIZ_MSG_SERVICE_TOKEN_USE = 0x7A,    /* Use service token */
+    CYXWIZ_MSG_REPUTATION_PROOF = 0x7B      /* Prove minimum reputation */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

@@ -135,8 +135,11 @@ if(CYXWIZ_HAS_CRYPTO)
         src/crypto/sharing.c
         src/crypto/mac.c
         src/crypto/zkp.c
+        src/crypto/privacy.c
+        src/crypto/credentials.c
     )
     add_compile_definitions(CYXWIZ_HAS_CRYPTO=1)
+    add_compile_definitions(CYXWIZ_HAS_PRIVACY=1)
 endif()
 
 # Static library
@@ -221,6 +224,10 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_consensus tests/test_consensus.c)
         target_link_libraries(test_consensus PRIVATE cyxwiz)
         add_test(NAME test_consensus COMMAND test_consensus)
+
+        add_executable(test_privacy tests/test_privacy.c)
+        target_link_libraries(test_privacy PRIVATE cyxwiz)
+        add_test(NAME test_privacy COMMAND test_privacy)
     endif()
 endif()
 
