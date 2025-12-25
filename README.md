@@ -360,6 +360,7 @@ cyxwiz/
 │   ├── transport.h          # Transport abstraction
 │   ├── crypto.h             # MPC crypto API
 │   ├── zkp.h                # Zero-knowledge proofs (Schnorr)
+│   ├── privacy.h            # Privacy primitives (Pedersen, credentials)
 │   ├── consensus.h          # PoUW consensus API
 │   ├── compute.h            # Job marketplace API
 │   ├── storage.h            # Distributed storage API
@@ -385,6 +386,8 @@ cyxwiz/
 │   │   ├── sharing.c        # Secret sharing
 │   │   ├── mac.c            # Information-theoretic MACs
 │   │   ├── zkp.c            # Schnorr identity proofs
+│   │   ├── privacy.c        # Pedersen commitments, range proofs
+│   │   ├── credentials.c    # Anonymous credentials, service tokens
 │   │   └── primitives.c     # libsodium wrappers
 │   └── util/                # Utilities
 │
@@ -419,7 +422,7 @@ cyxwiz/
 - [x] Proof of Storage (Merkle-based storage verification)
 - [x] Schnorr identity proofs (zero-knowledge peer authentication)
 - [x] Consensus mechanism (Proof of Useful Work with committee validation)
-- [ ] Privacy protocol (extended ZKPs, anonymous credentials)
+- [x] Privacy protocol (Pedersen commitments, range proofs, anonymous credentials)
 
 ### Phase 4: Production
 - [ ] Mobile support (iOS, Android)
@@ -443,6 +446,18 @@ cyxwiz/
 | Beaver Triples | ✅ | Secure multiplication preprocessing |
 | Schnorr Identity Proofs | ✅ | Zero-knowledge peer authentication (64 bytes) |
 | Ed25519 Identity Keys | ✅ | Master identity with X25519 derivation |
+
+### Privacy Layer
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Pedersen Commitments | ✅ | Hiding commitments (C = v*G + r*H) |
+| Homomorphic Operations | ✅ | Add/subtract commitments without opening |
+| Range Proofs (16-bit) | ✅ | Prove value in [0, 65535] (96 bytes) |
+| Anonymous Credentials | ✅ | Blind Schnorr signatures for unlinkable issuance |
+| Credential Showing | ✅ | Prove credential ownership without revealing identity |
+| Service Tokens | ✅ | Unlinkable tokens for compute/storage/bandwidth |
+| Reputation Proofs | ✅ | Prove credits >= threshold without revealing amount |
+| Anonymous Voting | ✅ | Vote in consensus without revealing validator identity |
 
 ### Network Layer
 | Feature | Status | Description |
@@ -484,6 +499,8 @@ Proof of Storage: POS_COMMITMENT, POS_CHALLENGE, POS_PROOF, POS_VERIFY_OK/FAIL,
 Consensus:    VALIDATOR_REGISTER, VALIDATOR_REG_ACK, WORK_CREDIT, VALIDATION_REQ,
               VALIDATION_VOTE, VALIDATION_RESULT, JOB_VALIDATE_REQ, STORAGE_VALIDATE_REQ,
               SLASH_REPORT, CREDIT_QUERY, CREDIT_RESPONSE, VALIDATOR_HEARTBEAT
+Privacy:      PEDERSEN_COMMIT, PEDERSEN_OPEN, RANGE_PROOF, CRED_ISSUE_REQ/RESP,
+              CRED_SHOW, CRED_VERIFY, ANON_VOTE, SERVICE_TOKEN_REQ/USE, REPUTATION_PROOF
 ```
 
 ---
