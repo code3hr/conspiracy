@@ -224,8 +224,34 @@ cmake -B build -DCYXWIZ_BUILD_TESTS=OFF
 
 ### Running a Node
 
+**Single node (local testing):**
 ```bash
-./build/cyxwizd
+./build/cyxwizd          # Linux/macOS
+.uild\Release\cyxwizd  # Windows
+```
+
+**Multi-node network with bootstrap server:**
+```bash
+# Terminal 1: Start bootstrap server for peer discovery
+./build/cyxwiz-bootstrap 9999
+
+# Terminal 2: Start first daemon
+CYXWIZ_BOOTSTRAP=127.0.0.1:9999 ./build/cyxwizd
+
+# Terminal 3: Start second daemon
+CYXWIZ_BOOTSTRAP=127.0.0.1:9999 ./build/cyxwizd
+```
+
+**Windows (PowerShell):**
+```powershell
+# Terminal 1
+.uild\Release\cyxwiz-bootstrap.exe 9999
+
+# Terminal 2
+$env:CYXWIZ_BOOTSTRAP="127.0.0.1:9999"; .uild\Release\cyxwizd.exe
+
+# Terminal 3
+$env:CYXWIZ_BOOTSTRAP="127.0.0.1:9999"; .uild\Release\cyxwizd.exe
 ```
 
 Output:
@@ -241,10 +267,26 @@ Output:
  Version 0.1.0
 
 [INFO] Starting CyxWiz node daemon...
-[INFO] Crypto subsystem initialized (libsodium 1.0.18)
-[INFO] Created crypto context: 3-of-5, party 1
-[INFO] Created WiFi Direct transport
+[INFO] Crypto subsystem initialized (libsodium 1.0.20)
+[INFO] Local node ID: 7f6dfc16f02c56f1...
+[INFO] UDP transport bound to port 49229
+[INFO] Discovery started
+[INFO] Router started
+[INFO] Onion routing enabled
+[INFO] Compute protocol enabled (worker mode)
+[INFO] Storage protocol enabled (provider mode)
+[INFO] Consensus protocol enabled (validator mode)
 [INFO] Node running. Press Ctrl+C to stop.
+
+# When peers connect:
+[INFO] Peer 6932079b1d45d9b5... state: unknown -> discovered
+[INFO] Peer 6932079b1d45d9b5... state: discovered -> connected
+[INFO] Registered new validator (total: 1)
+[INFO] Validator registration confirmed
+
+# Consensus voting (automatic test after 30s with 2+ validators):
+[INFO] Started job validation round (committee size: 2)
+[INFO] Consensus reached: VALID (2/2 votes)
 ```
 
 ### Quick Start: Using the Library

@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsodium-dev
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+    - name: Build
+      run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+    - name: Run tests
+      working-directory: build
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+
+    - name: Package
+      run: |
+        mkdir -p dist
+        cp build/cyxwizd dist/
+        cp build/cyxwiz-bootstrap dist/
+        cp README.md dist/
+        cp LICENSE dist/ 2>/dev/null || echo "No LICENSE file"
+        tar -czvf cyxwiz-linux-x64.tar.gz -C dist .
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cyxwiz-linux-x64
+        path: cyxwiz-linux-x64.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: brew install libsodium
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+    - name: Build
+      run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+    - name: Run tests
+      working-directory: build
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+
+    - name: Package
+      run: |
+        mkdir -p dist
+        cp build/cyxwizd dist/
+        cp build/cyxwiz-bootstrap dist/
+        cp README.md dist/
+        cp LICENSE dist/ 2>/dev/null || echo "No LICENSE file"
+        tar -czvf cyxwiz-macos-x64.tar.gz -C dist .
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cyxwiz-macos-x64
+        path: cyxwiz-macos-x64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install vcpkg
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        .\vcpkg\bootstrap-vcpkg.bat
+        .\vcpkg\vcpkg install libsodium:x64-windows
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{github.workspace}}/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+    - name: Build
+      run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+    - name: Run tests
+      working-directory: build
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+
+    - name: Package
+      run: |
+        New-Item -ItemType Directory -Force -Path dist
+        Copy-Item build\Release\cyxwizd.exe dist\
+        Copy-Item build\Release\cyxwiz-bootstrap.exe dist\
+        Copy-Item README.md dist\
+        if (Test-Path LICENSE) { Copy-Item LICENSE dist\ }
+        Compress-Archive -Path dist\* -DestinationPath cyxwiz-windows-x64.zip
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cyxwiz-windows-x64
+        path: cyxwiz-windows-x64.zip
+
+  release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/cyxwiz-linux-x64/cyxwiz-linux-x64.tar.gz
+          artifacts/cyxwiz-macos-x64/cyxwiz-macos-x64.tar.gz
+          artifacts/cyxwiz-windows-x64/cyxwiz-windows-x64.zip
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
