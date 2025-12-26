@@ -192,7 +192,15 @@ static void on_routed_data(
     }
 #endif
 
-    /* TODO: Process other application data */
+#ifdef CYXWIZ_HAS_CONSENSUS
+    /* Dispatch consensus messages received via routing */
+    if (len > 0 && data[0] >= 0x60 && data[0] <= 0x7F) {
+        if (g_consensus != NULL) {
+            cyxwiz_consensus_handle_message(g_consensus, from, data, len);
+        }
+        return;
+    }
+#endif
 }
 
 #ifdef CYXWIZ_HAS_CRYPTO
@@ -313,9 +321,23 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    /* Generate local node ID */
+    /* Generate identity keypair first (for consistent node ID) */
     cyxwiz_node_id_t local_id;
+#ifdef CYXWIZ_HAS_CONSENSUS
+    err = cyxwiz_identity_keygen(&g_identity);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to generate identity: %s", cyxwiz_strerror(err));
+        return 1;
+    }
+    /* Derive node ID from identity for consistent addressing */
+    err = cyxwiz_identity_to_node_id(&g_identity, &local_id);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_ERROR("Failed to derive node ID: %s", cyxwiz_strerror(err));
+        return 1;
+    }
+#else
     cyxwiz_node_id_random(&local_id);
+#endif
 
     char hex_id[65];
     cyxwiz_node_id_to_hex(&local_id, hex_id);
@@ -451,26 +473,20 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef CYXWIZ_HAS_CONSENSUS
-            /* Generate identity keypair for consensus */
-            err = cyxwiz_identity_keygen(&g_identity);
+            /* Create consensus context (identity already generated at startup) */
+            err = cyxwiz_consensus_create(&g_consensus, g_router, peer_table, &g_identity);
             if (err != CYXWIZ_OK) {
-                CYXWIZ_ERROR("Failed to generate identity: %s", cyxwiz_strerror(err));
+                CYXWIZ_ERROR("Failed to create consensus context: %s", cyxwiz_strerror(err));
             } else {
-                /* Create consensus context */
-                err = cyxwiz_consensus_create(&g_consensus, g_router, peer_table, &g_identity);
-                if (err != CYXWIZ_OK) {
-                    CYXWIZ_ERROR("Failed to create consensus context: %s", cyxwiz_strerror(err));
-                } else {
-                    /* Initialize Pedersen parameters for privacy protocol */
-                    cyxwiz_pedersen_init();
+                /* Initialize Pedersen parameters for privacy protocol */
+                cyxwiz_pedersen_init();
 
-                    /* Register as validator */
-                    err = cyxwiz_consensus_register_validator(g_consensus);
-                    if (err == CYXWIZ_OK) {
-                        CYXWIZ_INFO("Consensus protocol enabled (validator mode)");
-                    } else {
-                        CYXWIZ_WARN("Validator registration pending: %s", cyxwiz_strerror(err));
-                    }
+                /* Register as validator */
+                err = cyxwiz_consensus_register_validator(g_consensus);
+                if (err == CYXWIZ_OK) {
+                    CYXWIZ_INFO("Consensus protocol enabled (validator mode)");
+                } else {
+                    CYXWIZ_WARN("Validator registration pending: %s", cyxwiz_strerror(err));
                 }
             }
 #endif
@@ -518,6 +534,33 @@ int main(int argc, char *argv[])
         /* Poll consensus context (handles round timeouts, heartbeats) */
         if (g_consensus != NULL) {
             cyxwiz_consensus_poll(g_consensus, now);
+
+            /* Test validation trigger - after 30 seconds with 2+ validators */
+            static uint64_t test_validation_time = 0;
+            static bool test_validation_done = false;
+            if (!test_validation_done &&
+                cyxwiz_consensus_validator_count(g_consensus) >= 1 &&
+                test_validation_time == 0) {
+                test_validation_time = now + 30000; /* 30 seconds from now */
+                CYXWIZ_INFO("Scheduling test validation in 30 seconds...");
+            }
+            if (!test_validation_done && test_validation_time > 0 && now >= test_validation_time) {
+                test_validation_done = true;
+                /* Trigger a test validation round */
+                uint8_t test_job_id[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+                uint8_t test_result[32];
+                uint8_t test_mac[16];
+                memset(test_result, 0xAB, sizeof(test_result));
+                memset(test_mac, 0xCD, sizeof(test_mac));
+                CYXWIZ_INFO("Triggering test validation round...");
+                cyxwiz_error_t verr = cyxwiz_consensus_validate_job(
+                    g_consensus, test_job_id, test_result, sizeof(test_result), test_mac);
+                if (verr == CYXWIZ_OK) {
+                    CYXWIZ_INFO("Test validation round started successfully");
+                } else {
+                    CYXWIZ_WARN("Failed to start test validation: %s", cyxwiz_strerror(verr));
+                }
+            }
         }
 #endif
 

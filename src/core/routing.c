@@ -446,14 +446,9 @@ cyxwiz_error_t cyxwiz_router_send(
             router->transport, destination, data, len);
     }
 
-    /* For routed messages, enforce smaller payload limit */
-    if (len > CYXWIZ_MAX_ROUTED_PAYLOAD) {
-        return CYXWIZ_ERR_PACKET_TOO_LARGE;
-    }
-
     /* Check if destination is us */
     if (cyxwiz_node_id_cmp(destination, &router->local_id) == 0) {
-        /* Deliver to self */
+        /* Deliver to self - no size limit for local delivery */
         if (router->on_delivery != NULL) {
             router->on_delivery(&router->local_id, data, len, router->user_data);
         }
@@ -462,9 +457,17 @@ cyxwiz_error_t cyxwiz_router_send(
 
     /* Check if destination is a direct peer */
     if (is_direct_peer(router, destination)) {
-        /* Send directly (no routing needed) */
+        /* Send directly (no routing needed) - uses full transport MTU */
+        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+            return CYXWIZ_ERR_PACKET_TOO_LARGE;
+        }
         return router->transport->ops->send(
             router->transport, destination, data, len);
+    }
+
+    /* For multi-hop routed messages, enforce smaller payload limit */
+    if (len > CYXWIZ_MAX_ROUTED_PAYLOAD) {
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
     /* Check if we have a cached route */

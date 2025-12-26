@@ -684,6 +684,13 @@ cyxwiz_error_t cyxwiz_consensus_validate_job(
     }
 
     CYXWIZ_INFO("Started job validation round (committee size: %u)", round->committee_size);
+
+    /* Initiator votes VALID for their own proposal */
+    cyxwiz_error_t vote_err = cyxwiz_consensus_vote(ctx, round->round_id, true);
+    if (vote_err != CYXWIZ_OK) {
+        CYXWIZ_DEBUG("Initiator vote failed (may not be in committee): %s", cyxwiz_strerror(vote_err));
+    }
+
     return CYXWIZ_OK;
 }
 
@@ -747,6 +754,13 @@ cyxwiz_error_t cyxwiz_consensus_validate_storage(
     }
 
     CYXWIZ_INFO("Started storage validation round (committee size: %u)", round->committee_size);
+
+    /* Initiator votes VALID for their own proposal */
+    cyxwiz_error_t vote_err = cyxwiz_consensus_vote(ctx, round->round_id, true);
+    if (vote_err != CYXWIZ_OK) {
+        CYXWIZ_DEBUG("Initiator vote failed (may not be in committee): %s", cyxwiz_strerror(vote_err));
+    }
+
     return CYXWIZ_OK;
 }
 
@@ -765,17 +779,9 @@ cyxwiz_error_t cyxwiz_consensus_vote(
 
     int idx = find_round_index(ctx, round_id);
     if (idx < 0) {
-        /* Create local round entry for tracking */
-        int slot = find_free_round_slot(ctx);
-        if (slot < 0) {
-            return CYXWIZ_ERR_QUEUE_FULL;
-        }
-        idx = slot;
-        memset(&ctx->rounds[idx], 0, sizeof(cyxwiz_consensus_round_t));
-        memcpy(ctx->rounds[idx].round_id, round_id, CYXWIZ_CONSENSUS_ID_SIZE);
-        ctx->rounds[idx].active = true;
-        ctx->rounds[idx].started_at = ctx->last_poll;
-        ctx->active_round_count++;
+        /* Round not found - caller should have created it first */
+        CYXWIZ_WARN("Cannot vote on unknown round");
+        return CYXWIZ_ERR_INVALID;
     }
 
     cyxwiz_consensus_round_t *round = &ctx->rounds[idx];
@@ -978,14 +984,16 @@ static cyxwiz_error_t handle_validator_register(
 
     CYXWIZ_INFO("Registered new validator (total: %zu)", ctx->validator_count);
 
-    /* Send ACK */
+    /* Send ACK via broadcast (ensures delivery before routing is established) */
     cyxwiz_validator_reg_ack_msg_t ack;
     memset(&ack, 0, sizeof(ack));
     ack.type = CYXWIZ_MSG_VALIDATOR_REG_ACK;
     memcpy(&ack.node_id, &msg->node_id, sizeof(cyxwiz_node_id_t));
     ack.result = CYXWIZ_VALIDATION_VALID;
 
-    cyxwiz_router_send(ctx->router, &msg->node_id, (uint8_t *)&ack, sizeof(ack));
+    cyxwiz_node_id_t broadcast;
+    memset(&broadcast, 0xFF, sizeof(broadcast));
+    cyxwiz_router_send(ctx->router, &broadcast, (uint8_t *)&ack, sizeof(ack));
 
     return CYXWIZ_OK;
 #endif
@@ -1039,6 +1047,68 @@ static cyxwiz_error_t handle_work_credit(
     return CYXWIZ_OK;
 }
 
+static cyxwiz_error_t handle_validation_req(
+    cyxwiz_consensus_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_validation_req_msg_t *msg)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (!ctx->is_registered) {
+        return CYXWIZ_OK; /* Not a validator */
+    }
+
+    /* Check if round already exists */
+    int idx = find_round_index(ctx, msg->round_id);
+    if (idx >= 0) {
+        return CYXWIZ_OK; /* Already know this round */
+    }
+
+    /* Create the round entry with committee */
+    int slot = find_free_round_slot(ctx);
+    if (slot < 0) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    cyxwiz_consensus_round_t *round = &ctx->rounds[slot];
+    memset(round, 0, sizeof(cyxwiz_consensus_round_t));
+    memcpy(round->round_id, msg->round_id, CYXWIZ_CONSENSUS_ID_SIZE);
+    round->type = (cyxwiz_validation_type_t)msg->validation_type;
+    round->result = CYXWIZ_VALIDATION_PENDING;
+    round->started_at = ctx->last_poll;
+    round->active = true;
+    round->allows_anonymous = true;
+
+    /* Select committee using the seed from the message */
+    cyxwiz_error_t err = cyxwiz_consensus_select_committee(
+        ctx, msg->committee_seed, round->committee, &round->committee_size);
+    if (err != CYXWIZ_OK) {
+        round->active = false;
+        return CYXWIZ_OK;
+    }
+
+    ctx->active_round_count++;
+
+    /* Check if we're in the committee */
+    bool in_committee = false;
+    for (uint8_t i = 0; i < round->committee_size; i++) {
+        if (cyxwiz_node_id_cmp(&round->committee[i], &ctx->local_id) == 0) {
+            in_committee = true;
+            break;
+        }
+    }
+
+    if (!in_committee) {
+        CYXWIZ_DEBUG("Not in committee for round, ignoring");
+        round->active = false;
+        ctx->active_round_count--;
+        return CYXWIZ_OK;
+    }
+
+    CYXWIZ_INFO("Received validation request, casting vote");
+    return cyxwiz_consensus_vote(ctx, msg->round_id, true);
+}
+
 static cyxwiz_error_t handle_validation_vote(
     cyxwiz_consensus_ctx_t *ctx,
     const cyxwiz_node_id_t *from,
@@ -1046,16 +1116,23 @@ static cyxwiz_error_t handle_validation_vote(
 {
     CYXWIZ_UNUSED(from);
 
+    char voter_hex[65];
+    cyxwiz_node_id_to_hex(&msg->validator_id, voter_hex);
+    CYXWIZ_DEBUG("Received vote from %.16s... (vote=%d)", voter_hex, msg->vote);
+
     int idx = find_round_index(ctx, msg->round_id);
     if (idx < 0) {
+        CYXWIZ_DEBUG("Vote for unknown round (active rounds: %d)", ctx->active_round_count);
         return CYXWIZ_OK; /* Unknown round */
     }
 
+    CYXWIZ_DEBUG("Found round at index %d (committee_size=%d)", idx, ctx->rounds[idx].committee_size);
     cyxwiz_consensus_round_t *round = &ctx->rounds[idx];
 
 #ifdef CYXWIZ_HAS_CRYPTO
     /* Verify vote proof */
     const cyxwiz_validator_t *voter = cyxwiz_consensus_get_validator(ctx, &msg->validator_id);
+    CYXWIZ_DEBUG("Voter lookup: %p, identity_verified=%d", (void*)voter, voter ? voter->identity_verified : -1);
     if (voter == NULL || !voter->identity_verified) {
         CYXWIZ_WARN("Vote from unknown/unverified validator");
         return CYXWIZ_ERR_CONSENSUS_NOT_VALIDATOR;
@@ -1076,7 +1153,9 @@ static cyxwiz_error_t handle_validation_vote(
 
     /* Find committee member index */
     int member_idx = find_committee_member(round, &msg->validator_id);
+    CYXWIZ_DEBUG("Committee member index: %d", member_idx);
     if (member_idx < 0) {
+        CYXWIZ_DEBUG("Voter not in committee, ignoring vote");
         return CYXWIZ_OK; /* Not in committee */
     }
 
@@ -1322,6 +1401,13 @@ cyxwiz_error_t cyxwiz_consensus_handle_message(
             if (len >= sizeof(cyxwiz_work_credit_msg_t)) {
                 return handle_work_credit(ctx, from,
                     (const cyxwiz_work_credit_msg_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_VALIDATION_REQ:
+            if (len >= sizeof(cyxwiz_validation_req_msg_t)) {
+                return handle_validation_req(ctx, from,
+                    (const cyxwiz_validation_req_msg_t *)data);
             }
             break;
 

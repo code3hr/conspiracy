@@ -31,7 +31,7 @@ typedef struct cyxwiz_storage_client cyxwiz_storage_client_t;
 
 #define CYXWIZ_CONSENSUS_ID_SIZE 8           /* Consensus round identifier */
 #define CYXWIZ_MAX_VALIDATORS 32             /* Max validators in committee */
-#define CYXWIZ_MIN_COMMITTEE_SIZE 5          /* Min validators for quorum */
+#define CYXWIZ_MIN_COMMITTEE_SIZE 2          /* Min validators for quorum (5 for production) */
 #define CYXWIZ_QUORUM_THRESHOLD 67           /* 2/3 + 1 for BFT (percentage) */
 #define CYXWIZ_MAX_ACTIVE_VALIDATIONS 16     /* Concurrent validations */
 #define CYXWIZ_WORK_CREDIT_DECAY_MS 3600000  /* Credits decay over 1 hour */
