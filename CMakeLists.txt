@@ -236,6 +236,10 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_anon_voting_e2e tests/test_anon_voting_e2e.c)
         target_link_libraries(test_anon_voting_e2e PRIVATE cyxwiz)
         add_test(NAME test_anon_voting_e2e COMMAND test_anon_voting_e2e)
+
+        add_executable(test_anon_msg_e2e tests/test_anon_msg_e2e.c)
+        target_link_libraries(test_anon_msg_e2e PRIVATE cyxwiz)
+        add_test(NAME test_anon_msg_e2e COMMAND test_anon_msg_e2e)
     endif()
 endif()
 

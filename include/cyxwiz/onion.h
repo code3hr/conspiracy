@@ -25,14 +25,26 @@
 #define CYXWIZ_MAX_CIRCUITS 16          /* Max active circuits */
 #define CYXWIZ_CIRCUIT_TIMEOUT_MS 60000 /* Circuit expires after 60s */
 #define CYXWIZ_PUBKEY_SIZE 32           /* X25519 public key size */
+#define CYXWIZ_EPHEMERAL_SIZE 32        /* Ephemeral public key per layer */
 
-/* Maximum payload per hop count */
-#define CYXWIZ_ONION_PAYLOAD_1HOP 173   /* 1-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_2HOP 101   /* 2-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_3HOP 29    /* 3-hop onion payload */
+/*
+ * Maximum payload per hop count (with ephemeral keys)
+ * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
+ * Plus next_hop (32) for non-final layers
+ * Final layer: zero_hop (32) + payload
+ *
+ * 1-hop: 250 - 5(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 141 bytes
+ * 2-hop: 141 - 32(eph) - 40(enc) - 32(next_hop) = 37 bytes
+ * 3-hop: would be negative, so we limit to 2 hops with ephemeral keys
+ *
+ * Revised payload sizes:
+ */
+#define CYXWIZ_ONION_PAYLOAD_1HOP 141   /* 1-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_2HOP 37    /* 2-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_3HOP 0     /* 3-hop not supported with ephemeral */
 
-/* Onion message header size: type (1) + circuit_id (4) = 5 bytes */
-#define CYXWIZ_ONION_HEADER_SIZE 5
+/* Onion message header size: type (1) + circuit_id (4) + ephemeral (32) = 37 bytes */
+#define CYXWIZ_ONION_HEADER_SIZE 37
 
 /* Maximum encrypted payload in onion packet */
 #define CYXWIZ_ONION_MAX_ENCRYPTED (CYXWIZ_MAX_PACKET_SIZE - CYXWIZ_ONION_HEADER_SIZE)
@@ -42,6 +54,9 @@
 /*
  * Onion-routed data message (0x24)
  * Total packet fits in 250 bytes
+ *
+ * Format: type (1) + circuit_id (4) + ephemeral_pub (32) + encrypted_data
+ * The ephemeral_pub is used by the receiver to derive the layer key via ECDH.
  */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
@@ -49,7 +64,8 @@
 typedef struct {
     uint8_t type;                        /* CYXWIZ_MSG_ONION_DATA */
     uint32_t circuit_id;                 /* Circuit ID for replies */
-    /* encrypted data follows (up to 245 bytes) */
+    uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE]; /* Ephemeral public key for this hop */
+    /* encrypted data follows (up to 213 bytes) */
 }
 #ifdef __GNUC__
 __attribute__((packed))
@@ -61,13 +77,15 @@ cyxwiz_onion_data_t;
 
 /*
  * Decrypted onion layer structure
- * Each layer contains next_hop (or zeros for final) and inner data
+ * Non-final layer: next_hop (32) + next_ephemeral (32) + inner_encrypted
+ * Final layer: zero_hop (32) + payload
  */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
 #endif
 typedef struct {
     cyxwiz_node_id_t next_hop;           /* Next hop (0x00...00 = final destination) */
+    uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE]; /* Ephemeral key for next hop (if not final) */
     /* inner data follows */
 }
 #ifdef __GNUC__
@@ -85,7 +103,8 @@ typedef struct {
     uint32_t circuit_id;
     uint8_t hop_count;
     cyxwiz_node_id_t hops[CYXWIZ_MAX_ONION_HOPS];
-    uint8_t keys[CYXWIZ_MAX_ONION_HOPS][CYXWIZ_KEY_SIZE];  /* Per-hop keys */
+    uint8_t keys[CYXWIZ_MAX_ONION_HOPS][CYXWIZ_KEY_SIZE];  /* Per-hop derived keys */
+    uint8_t ephemeral_pubs[CYXWIZ_MAX_ONION_HOPS][CYXWIZ_EPHEMERAL_SIZE]; /* Per-hop ephemeral pubkeys */
     uint64_t created_at;
     bool active;
 } cyxwiz_circuit_t;
@@ -320,20 +339,22 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
 /*
  * Wrap payload in onion layers (build onion from inside out)
  *
- * @param payload       The payload to wrap
- * @param payload_len   Payload length
- * @param hops          Array of hop node IDs
- * @param keys          Array of per-hop keys (one per hop)
- * @param hop_count     Number of hops
- * @param onion_out     Output buffer (must be large enough)
- * @param onion_len     Output: actual onion length
- * @return              CYXWIZ_OK on success
+ * @param payload        The payload to wrap
+ * @param payload_len    Payload length
+ * @param hops           Array of hop node IDs
+ * @param keys           Array of per-hop keys (one per hop)
+ * @param ephemeral_pubs Array of ephemeral public keys (one per hop)
+ * @param hop_count      Number of hops
+ * @param onion_out      Output buffer (must be large enough)
+ * @param onion_len      Output: actual onion length
+ * @return               CYXWIZ_OK on success
  */
 cyxwiz_error_t cyxwiz_onion_wrap(
     const uint8_t *payload,
     size_t payload_len,
     const cyxwiz_node_id_t *hops,
     const uint8_t (*keys)[CYXWIZ_KEY_SIZE],
+    const uint8_t (*ephemeral_pubs)[CYXWIZ_EPHEMERAL_SIZE],
     uint8_t hop_count,
     uint8_t *onion_out,
     size_t *onion_len
@@ -342,19 +363,21 @@ cyxwiz_error_t cyxwiz_onion_wrap(
 /*
  * Unwrap one onion layer (peel outer encryption)
  *
- * @param onion         The onion data
- * @param onion_len     Onion length
- * @param key           Key for this layer
- * @param next_hop_out  Output: next hop (zeros if final destination)
- * @param inner_out     Output: inner data
- * @param inner_len     Output: inner data length
- * @return              CYXWIZ_OK on success, CYXWIZ_ERR_CRYPTO if tampered
+ * @param onion             The onion data
+ * @param onion_len         Onion length
+ * @param key               Key for this layer
+ * @param next_hop_out      Output: next hop (zeros if final destination)
+ * @param next_ephemeral_out Output: ephemeral key for next hop (NULL if not needed)
+ * @param inner_out         Output: inner data
+ * @param inner_len         Output: inner data length
+ * @return                  CYXWIZ_OK on success, CYXWIZ_ERR_CRYPTO if tampered
  */
 cyxwiz_error_t cyxwiz_onion_unwrap(
     const uint8_t *onion,
     size_t onion_len,
     const uint8_t *key,
     cyxwiz_node_id_t *next_hop_out,
+    uint8_t *next_ephemeral_out,
     uint8_t *inner_out,
     size_t *inner_len
 );

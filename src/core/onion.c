@@ -307,6 +307,13 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
     uint8_t hop_count,
     cyxwiz_circuit_t **circuit_out)
 {
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(hops);
+    CYXWIZ_UNUSED(hop_count);
+    CYXWIZ_UNUSED(circuit_out);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
     if (ctx == NULL || hops == NULL || circuit_out == NULL) {
         return CYXWIZ_ERR_INVALID;
     }
@@ -316,7 +323,7 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
         return CYXWIZ_ERR_INVALID;
     }
 
-    /* Check we have keys for all hops */
+    /* Check we have peer pubkeys for all hops (needed for ephemeral ECDH) */
     for (uint8_t i = 0; i < hop_count; i++) {
         if (!cyxwiz_onion_has_key(ctx, &hops[i])) {
             CYXWIZ_ERROR("No shared key with hop %u", i);
@@ -344,23 +351,49 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
     circuit->created_at = cyxwiz_time_ms();
     circuit->active = true;
 
-    /* Copy hops and derive per-hop keys */
+    /*
+     * Generate ephemeral keypairs for each hop and derive per-hop keys.
+     * Each hop will use ECDH between the ephemeral pubkey and their private key
+     * to derive the layer key. This allows multi-hop routing since each hop
+     * can independently derive the correct key without knowing the sender.
+     */
     for (uint8_t i = 0; i < hop_count; i++) {
         memcpy(&circuit->hops[i], &hops[i], sizeof(cyxwiz_node_id_t));
 
-        /* Get shared secret for this hop */
+        /* Get peer's public key for ECDH */
         cyxwiz_peer_key_t *peer_key = find_peer_key(ctx, &hops[i]);
         if (peer_key == NULL) {
             circuit->active = false;
             return CYXWIZ_ERR_NO_KEY;
         }
 
-        /* Derive hop key */
-        cyxwiz_error_t err = cyxwiz_onion_derive_hop_key(
-            peer_key->shared_secret,
-            &ctx->local_id,
-            &hops[i],
+        /* Generate ephemeral X25519 keypair for this hop */
+        uint8_t ephemeral_sk[CYXWIZ_KEY_SIZE];
+        crypto_box_keypair(circuit->ephemeral_pubs[i], ephemeral_sk);
+
+        /* Compute ephemeral shared secret: ephemeral_sk * peer_pubkey */
+        uint8_t ephemeral_shared[CYXWIZ_KEY_SIZE];
+        if (crypto_scalarmult(ephemeral_shared, ephemeral_sk, peer_key->peer_pubkey) != 0) {
+            cyxwiz_secure_zero(ephemeral_sk, sizeof(ephemeral_sk));
+            circuit->active = false;
+            CYXWIZ_ERROR("Failed to compute ephemeral shared secret");
+            return CYXWIZ_ERR_CRYPTO;
+        }
+
+        /* Derive hop key from ephemeral shared secret */
+        /* Use a simple context for key derivation */
+        uint8_t context[32];
+        memcpy(context, "cyxwiz_eph_layer", 16);
+        memcpy(context + 16, circuit->ephemeral_pubs[i], 16);
+
+        cyxwiz_error_t err = cyxwiz_crypto_derive_key(
+            ephemeral_shared, CYXWIZ_KEY_SIZE,
+            context, sizeof(context),
             circuit->keys[i]);
+
+        /* Zero sensitive ephemeral data */
+        cyxwiz_secure_zero(ephemeral_sk, sizeof(ephemeral_sk));
+        cyxwiz_secure_zero(ephemeral_shared, sizeof(ephemeral_shared));
 
         if (err != CYXWIZ_OK) {
             circuit->active = false;
@@ -369,10 +402,11 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
     }
 
     ctx->circuit_count++;
-    CYXWIZ_INFO("Built circuit %u with %u hops", circuit->circuit_id, hop_count);
+    CYXWIZ_INFO("Built circuit %u with %u hops (ephemeral keys)", circuit->circuit_id, hop_count);
 
     *circuit_out = circuit;
     return CYXWIZ_OK;
+#endif
 }
 
 void cyxwiz_onion_destroy_circuit(
@@ -385,6 +419,7 @@ void cyxwiz_onion_destroy_circuit(
 
     if (circuit->active) {
         cyxwiz_secure_zero(circuit->keys, sizeof(circuit->keys));
+        cyxwiz_secure_zero(circuit->ephemeral_pubs, sizeof(circuit->ephemeral_pubs));
         circuit->active = false;
         ctx->circuit_count--;
         CYXWIZ_DEBUG("Destroyed circuit %u", circuit->circuit_id);
@@ -416,15 +451,34 @@ size_t cyxwiz_onion_max_payload(uint8_t hop_count)
         return 0;
     }
 
-    /* Start with max encrypted size */
+    /*
+     * With ephemeral keys, the packet structure is:
+     * Header: type(1) + circuit_id(4) + ephemeral(32) = 37 bytes
+     * Then encrypted layers, each containing:
+     *   - next_hop (32)
+     *   - next_ephemeral (32) for non-final layers
+     *   - AEAD overhead (40)
+     *   - inner data
+     * Final layer: zero_hop (32) + payload
+     */
     size_t size = CYXWIZ_ONION_MAX_ENCRYPTED;
 
-    /* Each layer removes: AEAD overhead (40) + next_hop (32) */
+    /*
+     * Each intermediate layer adds: AEAD overhead (40) + next_hop (32) + next_ephemeral (32)
+     * Final layer adds: AEAD overhead (40) + zero_hop (32)
+     */
     for (uint8_t i = 0; i < hop_count; i++) {
-        if (size <= CYXWIZ_ONION_OVERHEAD + CYXWIZ_NODE_ID_LEN) {
+        size_t layer_overhead = CYXWIZ_ONION_OVERHEAD + CYXWIZ_NODE_ID_LEN;
+
+        /* Non-final layers also include next_ephemeral */
+        if (i < hop_count - 1) {
+            layer_overhead += CYXWIZ_EPHEMERAL_SIZE;
+        }
+
+        if (size <= layer_overhead) {
             return 0;
         }
-        size -= CYXWIZ_ONION_OVERHEAD + CYXWIZ_NODE_ID_LEN;
+        size -= layer_overhead;
     }
 
     return size;
@@ -437,15 +491,24 @@ cyxwiz_error_t cyxwiz_onion_wrap(
     size_t payload_len,
     const cyxwiz_node_id_t *hops,
     const uint8_t (*keys)[CYXWIZ_KEY_SIZE],
+    const uint8_t (*ephemeral_pubs)[CYXWIZ_EPHEMERAL_SIZE],
     uint8_t hop_count,
     uint8_t *onion_out,
     size_t *onion_len)
 {
 #ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(payload);
+    CYXWIZ_UNUSED(payload_len);
+    CYXWIZ_UNUSED(hops);
+    CYXWIZ_UNUSED(keys);
+    CYXWIZ_UNUSED(ephemeral_pubs);
+    CYXWIZ_UNUSED(hop_count);
+    CYXWIZ_UNUSED(onion_out);
+    CYXWIZ_UNUSED(onion_len);
     return CYXWIZ_ERR_NOT_INITIALIZED;
 #else
     if (payload == NULL || hops == NULL || keys == NULL ||
-        onion_out == NULL || onion_len == NULL) {
+        ephemeral_pubs == NULL || onion_out == NULL || onion_len == NULL) {
         return CYXWIZ_ERR_INVALID;
     }
 
@@ -466,10 +529,15 @@ cyxwiz_error_t cyxwiz_onion_wrap(
     uint8_t *next = buffer2;
     size_t current_len;
 
-    /* Start with innermost layer: zeros for next_hop (final) + payload */
+    /*
+     * Build onion from inside out.
+     * Final layer: zero_hop (32) + payload
+     * Each intermediate layer decrypts to: next_hop (32) + next_ephemeral (32) + inner
+     */
     cyxwiz_node_id_t zero_hop;
     memset(&zero_hop, 0, sizeof(zero_hop));
 
+    /* Innermost layer: zeros for next_hop (final destination marker) + payload */
     memcpy(current, &zero_hop, sizeof(cyxwiz_node_id_t));
     memcpy(current + sizeof(cyxwiz_node_id_t), payload, payload_len);
     current_len = sizeof(cyxwiz_node_id_t) + payload_len;
@@ -487,11 +555,19 @@ cyxwiz_error_t cyxwiz_onion_wrap(
             return err;
         }
 
-        /* For non-final layers, prepend next_hop */
+        /* For non-outermost layers, prepend next_hop + next_ephemeral */
         if (i > 0) {
-            memmove(next + sizeof(cyxwiz_node_id_t), next, encrypted_len);
+            /* Make room for next_hop + next_ephemeral */
+            size_t header_size = sizeof(cyxwiz_node_id_t) + CYXWIZ_EPHEMERAL_SIZE;
+            memmove(next + header_size, next, encrypted_len);
+
+            /* next_hop: where to forward after decryption at hop i-1 */
             memcpy(next, &hops[i], sizeof(cyxwiz_node_id_t));
-            encrypted_len += sizeof(cyxwiz_node_id_t);
+
+            /* next_ephemeral: the ephemeral key for hop i */
+            memcpy(next + sizeof(cyxwiz_node_id_t), ephemeral_pubs[i], CYXWIZ_EPHEMERAL_SIZE);
+
+            encrypted_len += header_size;
         }
 
         /* Swap buffers */
@@ -513,10 +589,18 @@ cyxwiz_error_t cyxwiz_onion_unwrap(
     size_t onion_len,
     const uint8_t *key,
     cyxwiz_node_id_t *next_hop_out,
+    uint8_t *next_ephemeral_out,
     uint8_t *inner_out,
     size_t *inner_len)
 {
 #ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(onion);
+    CYXWIZ_UNUSED(onion_len);
+    CYXWIZ_UNUSED(key);
+    CYXWIZ_UNUSED(next_hop_out);
+    CYXWIZ_UNUSED(next_ephemeral_out);
+    CYXWIZ_UNUSED(inner_out);
+    CYXWIZ_UNUSED(inner_len);
     return CYXWIZ_ERR_NOT_INITIALIZED;
 #else
     if (onion == NULL || key == NULL || next_hop_out == NULL ||
@@ -551,9 +635,34 @@ cyxwiz_error_t cyxwiz_onion_unwrap(
     /* Extract next_hop */
     memcpy(next_hop_out, decrypted, sizeof(cyxwiz_node_id_t));
 
+    /*
+     * If next_hop is non-zero (relay), the next 32 bytes are the ephemeral key
+     * for the next hop. If next_hop is zero (final destination), the remaining
+     * data is the payload with no ephemeral key.
+     */
+    size_t offset = sizeof(cyxwiz_node_id_t);
+
+    if (!cyxwiz_node_id_is_zero(next_hop_out)) {
+        /* Non-final: extract next_ephemeral */
+        if (decrypted_len < sizeof(cyxwiz_node_id_t) + CYXWIZ_EPHEMERAL_SIZE) {
+            CYXWIZ_ERROR("Decrypted layer missing ephemeral key");
+            return CYXWIZ_ERR_INVALID;
+        }
+
+        if (next_ephemeral_out != NULL) {
+            memcpy(next_ephemeral_out, decrypted + offset, CYXWIZ_EPHEMERAL_SIZE);
+        }
+        offset += CYXWIZ_EPHEMERAL_SIZE;
+    } else {
+        /* Final destination: no ephemeral key */
+        if (next_ephemeral_out != NULL) {
+            memset(next_ephemeral_out, 0, CYXWIZ_EPHEMERAL_SIZE);
+        }
+    }
+
     /* Rest is inner data */
-    size_t inner_data_len = decrypted_len - sizeof(cyxwiz_node_id_t);
-    memcpy(inner_out, decrypted + sizeof(cyxwiz_node_id_t), inner_data_len);
+    size_t inner_data_len = decrypted_len - offset;
+    memcpy(inner_out, decrypted + offset, inner_data_len);
     *inner_len = inner_data_len;
 
     return CYXWIZ_OK;
@@ -569,6 +678,10 @@ cyxwiz_error_t cyxwiz_onion_send(
     size_t len)
 {
 #ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(circuit);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
     return CYXWIZ_ERR_NOT_INITIALIZED;
 #else
     if (ctx == NULL || circuit == NULL || data == NULL) {
@@ -586,7 +699,7 @@ cyxwiz_error_t cyxwiz_onion_send(
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
-    /* Build onion */
+    /* Build onion with ephemeral keys */
     uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
@@ -594,6 +707,7 @@ cyxwiz_error_t cyxwiz_onion_send(
         data, len,
         circuit->hops,
         (const uint8_t (*)[CYXWIZ_KEY_SIZE])circuit->keys,
+        (const uint8_t (*)[CYXWIZ_EPHEMERAL_SIZE])circuit->ephemeral_pubs,
         circuit->hop_count,
         onion, &onion_len);
 
@@ -601,7 +715,11 @@ cyxwiz_error_t cyxwiz_onion_send(
         return err;
     }
 
-    /* Build packet: type + circuit_id + onion */
+    /*
+     * Build packet: type (1) + circuit_id (4) + ephemeral_pub (32) + onion
+     * The ephemeral_pub for the first hop is included in the header so the
+     * first relay can derive the decryption key via ECDH.
+     */
     uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
     size_t packet_len = 0;
 
@@ -614,6 +732,11 @@ cyxwiz_error_t cyxwiz_onion_send(
     packet[packet_len++] = (circuit->circuit_id >> 8) & 0xFF;
     packet[packet_len++] = circuit->circuit_id & 0xFF;
 
+    /* Ephemeral public key for first hop */
+    memcpy(packet + packet_len, circuit->ephemeral_pubs[0], CYXWIZ_EPHEMERAL_SIZE);
+    packet_len += CYXWIZ_EPHEMERAL_SIZE;
+
+    /* Encrypted onion data */
     memcpy(packet + packet_len, onion, onion_len);
     packet_len += onion_len;
 
@@ -631,14 +754,19 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
     size_t len)
 {
 #ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
     return CYXWIZ_ERR_NOT_INITIALIZED;
 #else
     if (ctx == NULL || from == NULL || data == NULL) {
         return CYXWIZ_ERR_INVALID;
     }
 
+    /* Header: type (1) + circuit_id (4) + ephemeral_pub (32) = 37 bytes */
     if (len < CYXWIZ_ONION_HEADER_SIZE) {
-        CYXWIZ_ERROR("Onion packet too short");
+        CYXWIZ_ERROR("Onion packet too short: %zu < %d", len, CYXWIZ_ONION_HEADER_SIZE);
         return CYXWIZ_ERR_INVALID;
     }
 
@@ -652,23 +780,35 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
                           ((uint32_t)data[3] << 8) |
                           (uint32_t)data[4];
 
+    /* Extract ephemeral public key from header */
+    const uint8_t *ephemeral_pub = data + 5;
+
     const uint8_t *onion = data + CYXWIZ_ONION_HEADER_SIZE;
     size_t onion_len = len - CYXWIZ_ONION_HEADER_SIZE;
 
-    /* Find shared key with sender */
-    cyxwiz_peer_key_t *peer_key = find_peer_key(ctx, from);
-    if (peer_key == NULL) {
-        CYXWIZ_WARN("No shared key with sender");
-        return CYXWIZ_ERR_NO_KEY;
+    /*
+     * Derive layer key using ECDH with the ephemeral public key.
+     * shared_secret = my_private_key * ephemeral_pub
+     * This allows any hop to decrypt without knowing the original sender.
+     */
+    uint8_t ephemeral_shared[CYXWIZ_KEY_SIZE];
+    if (crypto_scalarmult(ephemeral_shared, ctx->secret_key, ephemeral_pub) != 0) {
+        CYXWIZ_ERROR("Failed to compute ECDH with ephemeral key");
+        return CYXWIZ_ERR_CRYPTO;
     }
 
-    /* Derive the hop key for this direction */
+    /* Derive hop key from ephemeral shared secret */
     uint8_t hop_key[CYXWIZ_KEY_SIZE];
-    cyxwiz_error_t err = cyxwiz_onion_derive_hop_key(
-        peer_key->shared_secret,
-        from,
-        &ctx->local_id,
+    uint8_t context[32];
+    memcpy(context, "cyxwiz_eph_layer", 16);
+    memcpy(context + 16, ephemeral_pub, 16);
+
+    cyxwiz_error_t err = cyxwiz_crypto_derive_key(
+        ephemeral_shared, CYXWIZ_KEY_SIZE,
+        context, sizeof(context),
         hop_key);
+
+    cyxwiz_secure_zero(ephemeral_shared, sizeof(ephemeral_shared));
 
     if (err != CYXWIZ_OK) {
         return err;
@@ -676,11 +816,12 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
 
     /* Unwrap one layer */
     cyxwiz_node_id_t next_hop;
+    uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE];
     uint8_t inner[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t inner_len;
 
     err = cyxwiz_onion_unwrap(onion, onion_len, hop_key,
-                              &next_hop, inner, &inner_len);
+                              &next_hop, next_ephemeral, inner, &inner_len);
 
     cyxwiz_secure_zero(hop_key, sizeof(hop_key));
 
@@ -695,13 +836,18 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         CYXWIZ_DEBUG("Onion reached destination, delivering %zu bytes", inner_len);
 
         if (ctx->callback != NULL) {
+            /* Note: 'from' is the immediate sender, not the original sender
+             * (which is hidden by the onion routing) */
             ctx->callback(from, inner, inner_len, ctx->user_data);
         }
     } else {
         /* Forward to next hop */
         CYXWIZ_DEBUG("Forwarding onion to next hop");
 
-        /* Build new packet with inner data */
+        /*
+         * Build new packet with the next_ephemeral in the header
+         * and the inner data as the encrypted payload.
+         */
         uint8_t forward_packet[CYXWIZ_MAX_PACKET_SIZE];
         size_t forward_len = 0;
 
@@ -714,6 +860,11 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         forward_packet[forward_len++] = (circuit_id >> 8) & 0xFF;
         forward_packet[forward_len++] = circuit_id & 0xFF;
 
+        /* Include the next_ephemeral in the forwarded packet header */
+        memcpy(forward_packet + forward_len, next_ephemeral, CYXWIZ_EPHEMERAL_SIZE);
+        forward_len += CYXWIZ_EPHEMERAL_SIZE;
+
+        /* Inner encrypted data */
         memcpy(forward_packet + forward_len, inner, inner_len);
         forward_len += inner_len;
 

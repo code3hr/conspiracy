@@ -556,21 +556,21 @@ static void cmd_anon(const char *args)
     char hex_id[65];
     cyxwiz_node_id_to_hex(&peer->id, hex_id);
 
-    /* Check if we have enough peers for onion routing (need 3 hops) */
+    /* Check if we have a peer to send to */
     size_t peer_count = g_peer_table ? cyxwiz_peer_table_count(g_peer_table) : 0;
-    if (peer_count < 3) {
-        printf("  Error: Need at least 3 peers for onion routing (have %zu)\n", peer_count);
+    if (peer_count < 1) {
+        printf("  Error: Need at least 1 peer for anonymous messaging\n");
         return;
     }
 
-    /* Send via onion */
+    /* Send via onion (direct 1-hop if only 1 peer, or 2-hop with relay) */
     size_t msg_len = strlen(message);
     if (msg_len > 100) msg_len = 100;  /* Onion payload is limited */
 
     cyxwiz_error_t err = cyxwiz_onion_send_to(g_onion, &peer->id,
                                                (const uint8_t *)message, msg_len);
     if (err == CYXWIZ_OK) {
-        printf("  Sent anonymously to %.16s... (3-hop onion)\n", hex_id);
+        printf("  Sent anonymously to %.16s...\n", hex_id);
     } else {
         printf("  Error sending: %s\n", cyxwiz_strerror(err));
     }
