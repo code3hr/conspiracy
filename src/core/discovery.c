@@ -238,25 +238,6 @@ static cyxwiz_error_t send_announce(cyxwiz_discovery_t *discovery)
 }
 
 /*
- * Send ping to a peer
- */
-static cyxwiz_error_t send_ping(
-    cyxwiz_discovery_t *discovery,
-    const cyxwiz_node_id_t *peer_id)
-{
-    cyxwiz_disc_ping_t msg;
-    msg.type = CYXWIZ_DISC_PING;
-    msg.timestamp = cyxwiz_time_ms();
-
-    return discovery->transport->ops->send(
-        discovery->transport,
-        peer_id,
-        (uint8_t *)&msg,
-        sizeof(msg)
-    );
-}
-
-/*
  * Send pong in response to ping
  */
 static cyxwiz_error_t send_pong(
