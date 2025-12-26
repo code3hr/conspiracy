@@ -169,17 +169,6 @@ static bool last_sent_to(const cyxwiz_node_id_t *expected)
     return memcmp(&g_mock_state.sent_to[idx], expected, sizeof(cyxwiz_node_id_t)) == 0;
 }
 
-/* Check if any sent message was to a specific destination */
-static bool any_sent_to(const cyxwiz_node_id_t *expected)
-{
-    for (size_t i = 0; i < g_mock_state.send_count; i++) {
-        if (memcmp(&g_mock_state.sent_to[i], expected, sizeof(cyxwiz_node_id_t)) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /* Check if a broadcast was sent */
 static bool broadcast_sent(void)
 {
