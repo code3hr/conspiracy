@@ -311,20 +311,6 @@ static cyxwiz_udp_peer_t *find_peer(cyxwiz_udp_state_t *state, const cyxwiz_node
     return NULL;
 }
 
-/* Find a peer by endpoint */
-static cyxwiz_udp_peer_t *find_peer_by_endpoint(cyxwiz_udp_state_t *state,
-                                                 const cyxwiz_endpoint_t *ep)
-{
-    for (size_t i = 0; i < CYXWIZ_MAX_UDP_PEERS; i++) {
-        if (state->peers[i].active &&
-            state->peers[i].public_addr.ip == ep->ip &&
-            state->peers[i].public_addr.port == ep->port) {
-            return &state->peers[i];
-        }
-    }
-    return NULL;
-}
-
 /* Add or update a peer */
 static cyxwiz_udp_peer_t *add_or_update_peer(cyxwiz_udp_state_t *state,
                                               const cyxwiz_node_id_t *id,

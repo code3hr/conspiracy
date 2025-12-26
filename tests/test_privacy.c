@@ -5,6 +5,11 @@
  * service tokens, and reputation proofs.
  */
 
+/* Disable MSVC warning C4127: conditional expression is constant */
+#ifdef _MSC_VER
+#pragma warning(disable: 4127)
+#endif
+
 #include "cyxwiz/types.h"
 #include "cyxwiz/privacy.h"
 #include "cyxwiz/crypto.h"
