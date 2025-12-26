@@ -40,9 +40,13 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <conio.h>
 #define sleep_ms(ms) Sleep(ms)
 #else
 #include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
@@ -254,16 +258,391 @@ static void on_onion_delivery(
     size_t len,
     void *user_data)
 {
-    CYXWIZ_UNUSED(data);
     CYXWIZ_UNUSED(user_data);
 
     char hex_id[65];
     cyxwiz_node_id_to_hex(from, hex_id);
-    CYXWIZ_INFO("Received %zu bytes via onion from %.16s...", len, hex_id);
 
-    /* TODO: Process application data received via onion routing */
+    /* Print the received message */
+    printf("\n");
+    printf("  ╔══════════════════════════════════════════════╗\n");
+    printf("  ║  ANONYMOUS MESSAGE RECEIVED                  ║\n");
+    printf("  ╠══════════════════════════════════════════════╣\n");
+    printf("  ║  From: %.16s... (via onion)       ║\n", hex_id);
+    printf("  ║  Size: %zu bytes                              \n", len);
+    printf("  ╠══════════════════════════════════════════════╣\n");
+
+    /* Print message content (if printable) */
+    if (len > 0 && data != NULL) {
+        printf("  ║  \"");
+        for (size_t i = 0; i < len && i < 50; i++) {
+            if (data[i] >= 32 && data[i] < 127) {
+                putchar(data[i]);
+            } else {
+                putchar('.');
+            }
+        }
+        if (len > 50) {
+            printf("...");
+        }
+        printf("\"\n");
+    }
+
+    printf("  ╚══════════════════════════════════════════════╝\n");
+    printf("\n> ");
+    fflush(stdout);
+
+    CYXWIZ_INFO("Received %zu bytes via onion from %.16s...", len, hex_id);
 }
 #endif
+
+/* ============ Interactive Commands ============ */
+
+static char g_cmd_buffer[256];
+static size_t g_cmd_len = 0;
+static cyxwiz_peer_table_t *g_peer_table = NULL;
+static cyxwiz_node_id_t g_local_id;
+
+/* Check if stdin has input available (non-blocking) */
+static int stdin_available(void)
+{
+#ifdef _WIN32
+    return _kbhit();
+#else
+    fd_set fds;
+    struct timeval tv = {0, 0};
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
+#endif
+}
+
+/* Read a character from stdin (non-blocking) */
+static int read_char(void)
+{
+#ifdef _WIN32
+    if (_kbhit()) {
+        return _getch();
+    }
+    return -1;
+#else
+    if (stdin_available()) {
+        return getchar();
+    }
+    return -1;
+#endif
+}
+
+/* Find peer by ID prefix (hex string) */
+static const cyxwiz_peer_t *find_peer_by_prefix(const char *prefix)
+{
+    if (g_peer_table == NULL || prefix == NULL) {
+        return NULL;
+    }
+
+    size_t prefix_len = strlen(prefix);
+    if (prefix_len < 4) {
+        return NULL;  /* Need at least 4 hex chars */
+    }
+
+    for (size_t i = 0; i < cyxwiz_peer_table_count(g_peer_table); i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(g_peer_table, i);
+        if (peer == NULL) continue;
+
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+        if (strncmp(hex_id, prefix, prefix_len) == 0) {
+            return peer;
+        }
+    }
+
+    return NULL;
+}
+
+/* Print command help */
+static void cmd_help(void)
+{
+    printf("\n");
+    printf("  Available Commands:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  /help                    Show this help\n");
+    printf("  /status                  Show node status\n");
+    printf("  /peers                   List connected peers\n");
+    printf("  /send <peer_id> <msg>    Send direct message\n");
+    printf("  /anon <peer_id> <msg>    Send anonymous message\n");
+    printf("  /quit                    Exit the daemon\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+    printf("  Note: peer_id can be first 8+ hex chars\n");
+    printf("\n");
+}
+
+/* Print node status */
+static void cmd_status(void)
+{
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&g_local_id, hex_id);
+
+    printf("\n");
+    printf("  Node Status:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  Node ID:     %.16s...\n", hex_id);
+    printf("  Peers:       %zu connected\n",
+           g_peer_table ? cyxwiz_peer_table_count(g_peer_table) : 0);
+
+#ifdef CYXWIZ_HAS_CONSENSUS
+    if (g_consensus != NULL) {
+        printf("  Validators:  %zu registered\n",
+               cyxwiz_consensus_validator_count(g_consensus));
+    }
+#endif
+
+#ifdef CYXWIZ_HAS_CRYPTO
+    printf("  Onion:       %s\n", g_onion != NULL ? "enabled" : "disabled");
+#endif
+
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+}
+
+/* List connected peers */
+static void cmd_peers(void)
+{
+    if (g_peer_table == NULL) {
+        printf("  No peer table available\n");
+        return;
+    }
+
+    size_t count = cyxwiz_peer_table_count(g_peer_table);
+    printf("\n");
+    printf("  Connected Peers (%zu):\n", count);
+    printf("  ───────────────────────────────────────────────\n");
+
+    if (count == 0) {
+        printf("  (no peers connected)\n");
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(g_peer_table, i);
+        if (peer == NULL) continue;
+
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+        printf("  [%zu] %.16s...  %s\n",
+               i + 1, hex_id,
+               cyxwiz_peer_state_name(peer->state));
+    }
+
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+}
+
+/* Send direct message */
+static void cmd_send(const char *args)
+{
+    if (args == NULL || *args == '\0') {
+        printf("  Usage: /send <peer_id> <message>\n");
+        return;
+    }
+
+    /* Parse peer ID and message */
+    char peer_prefix[32];
+    const char *message = NULL;
+
+    const char *space = strchr(args, ' ');
+    if (space == NULL) {
+        printf("  Usage: /send <peer_id> <message>\n");
+        return;
+    }
+
+    size_t prefix_len = (size_t)(space - args);
+    if (prefix_len >= sizeof(peer_prefix)) {
+        prefix_len = sizeof(peer_prefix) - 1;
+    }
+    memcpy(peer_prefix, args, prefix_len);
+    peer_prefix[prefix_len] = '\0';
+
+    message = space + 1;
+    while (*message == ' ') message++;
+
+    if (*message == '\0') {
+        printf("  Usage: /send <peer_id> <message>\n");
+        return;
+    }
+
+    /* Find peer */
+    const cyxwiz_peer_t *peer = find_peer_by_prefix(peer_prefix);
+    if (peer == NULL) {
+        printf("  Error: No peer found matching '%s'\n", peer_prefix);
+        return;
+    }
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+    /* Send via router */
+    if (g_router == NULL) {
+        printf("  Error: Router not available\n");
+        return;
+    }
+
+    /* Create a simple text message (type 0x01 = PING with text payload) */
+    uint8_t msg_buf[256];
+    size_t msg_len = strlen(message);
+    if (msg_len > 200) msg_len = 200;
+
+    msg_buf[0] = 0x01;  /* PING message type */
+    memcpy(msg_buf + 1, message, msg_len);
+
+    cyxwiz_error_t err = cyxwiz_router_send(g_router, &peer->id, msg_buf, msg_len + 1);
+    if (err == CYXWIZ_OK) {
+        printf("  Sent to %.16s...: \"%s\"\n", hex_id, message);
+    } else {
+        printf("  Error sending: %s\n", cyxwiz_strerror(err));
+    }
+}
+
+/* Send anonymous message via onion routing */
+static void cmd_anon(const char *args)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    printf("  Error: Onion routing not available (no crypto)\n");
+    return;
+#else
+    if (g_onion == NULL) {
+        printf("  Error: Onion routing not initialized\n");
+        return;
+    }
+
+    if (args == NULL || *args == '\0') {
+        printf("  Usage: /anon <peer_id> <message>\n");
+        return;
+    }
+
+    /* Parse peer ID and message */
+    char peer_prefix[32];
+    const char *message = NULL;
+
+    const char *space = strchr(args, ' ');
+    if (space == NULL) {
+        printf("  Usage: /anon <peer_id> <message>\n");
+        return;
+    }
+
+    size_t prefix_len = (size_t)(space - args);
+    if (prefix_len >= sizeof(peer_prefix)) {
+        prefix_len = sizeof(peer_prefix) - 1;
+    }
+    memcpy(peer_prefix, args, prefix_len);
+    peer_prefix[prefix_len] = '\0';
+
+    message = space + 1;
+    while (*message == ' ') message++;
+
+    if (*message == '\0') {
+        printf("  Usage: /anon <peer_id> <message>\n");
+        return;
+    }
+
+    /* Find peer */
+    const cyxwiz_peer_t *peer = find_peer_by_prefix(peer_prefix);
+    if (peer == NULL) {
+        printf("  Error: No peer found matching '%s'\n", peer_prefix);
+        return;
+    }
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+    /* Check if we have enough peers for onion routing (need 3 hops) */
+    size_t peer_count = g_peer_table ? cyxwiz_peer_table_count(g_peer_table) : 0;
+    if (peer_count < 3) {
+        printf("  Error: Need at least 3 peers for onion routing (have %zu)\n", peer_count);
+        return;
+    }
+
+    /* Send via onion */
+    size_t msg_len = strlen(message);
+    if (msg_len > 100) msg_len = 100;  /* Onion payload is limited */
+
+    cyxwiz_error_t err = cyxwiz_onion_send_to(g_onion, &peer->id,
+                                               (const uint8_t *)message, msg_len);
+    if (err == CYXWIZ_OK) {
+        printf("  Sent anonymously to %.16s... (3-hop onion)\n", hex_id);
+    } else {
+        printf("  Error sending: %s\n", cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/* Process a complete command */
+static void process_command(const char *cmd)
+{
+    /* Skip leading whitespace */
+    while (*cmd == ' ') cmd++;
+
+    if (*cmd == '\0') {
+        return;
+    }
+
+    /* Check for command prefix */
+    if (cmd[0] != '/') {
+        printf("  Unknown input. Type /help for commands.\n");
+        return;
+    }
+
+    /* Parse command */
+    if (strcmp(cmd, "/help") == 0 || strcmp(cmd, "/?") == 0) {
+        cmd_help();
+    } else if (strcmp(cmd, "/status") == 0) {
+        cmd_status();
+    } else if (strcmp(cmd, "/peers") == 0) {
+        cmd_peers();
+    } else if (strncmp(cmd, "/send ", 6) == 0) {
+        cmd_send(cmd + 6);
+    } else if (strncmp(cmd, "/anon ", 6) == 0) {
+        cmd_anon(cmd + 6);
+    } else if (strcmp(cmd, "/quit") == 0 || strcmp(cmd, "/exit") == 0) {
+        printf("  Shutting down...\n");
+        g_running = false;
+    } else {
+        printf("  Unknown command: %s\n", cmd);
+        printf("  Type /help for available commands.\n");
+    }
+}
+
+/* Poll for interactive input */
+static void poll_interactive(void)
+{
+    int ch;
+    while ((ch = read_char()) != -1) {
+        if (ch == '\n' || ch == '\r') {
+            /* Command complete */
+            g_cmd_buffer[g_cmd_len] = '\0';
+            if (g_cmd_len > 0) {
+                printf("\n");
+                process_command(g_cmd_buffer);
+                printf("> ");
+                fflush(stdout);
+            }
+            g_cmd_len = 0;
+        } else if (ch == 127 || ch == 8) {
+            /* Backspace */
+            if (g_cmd_len > 0) {
+                g_cmd_len--;
+                printf("\b \b");
+                fflush(stdout);
+            }
+        } else if (ch >= 32 && ch < 127 && g_cmd_len < sizeof(g_cmd_buffer) - 1) {
+            /* Regular character */
+            g_cmd_buffer[g_cmd_len++] = (char)ch;
+            putchar(ch);
+            fflush(stdout);
+        }
+    }
+}
 
 static void print_banner(void)
 {
@@ -493,10 +872,18 @@ int main(int argc, char *argv[])
         }
     }
 
-    CYXWIZ_INFO("Node running. Press Ctrl+C to stop.");
+    /* Set up global pointers for interactive commands */
+    g_peer_table = peer_table;
+    memcpy(&g_local_id, &local_id, sizeof(local_id));
+
+    CYXWIZ_INFO("Node running. Type /help for commands, Ctrl+C to stop.");
+    printf("\n> ");
+    fflush(stdout);
 
     /* Main event loop */
     while (g_running) {
+        /* Poll for interactive commands */
+        poll_interactive();
         uint64_t now = cyxwiz_time_ms();
 
         /* Poll discovery (sends announcements, cleans stale peers) */
