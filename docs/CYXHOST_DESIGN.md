@@ -1,17 +1,32 @@
-# CyxHost: Decentralized Web Hosting Protocol
+# CyxHost: Decentralized Deployment Platform
 
-## Design Document v1.0
+## Design Document v1.1
 
 ---
 
 ## Executive Summary
 
-CyxHost extends the CyxWiz Protocol to enable **decentralized web hosting** where anyone can:
-- **Host services** on their PC and earn work credits
+CyxHost extends the CyxWiz Protocol to enable **decentralized deployment** where anyone can:
+- **Deploy services** on the network (web apps, Docker containers, APIs, bots)
+- **Host infrastructure** on their PC and earn work credits
 - **Access services** anonymously through the mesh network
 - **Publish content** without revealing their identity or location
 
-The network's existing security infrastructure (onion routing, anonymous credentials, consensus) provides the foundation for a censorship-resistant hosting layer.
+The network's existing security infrastructure (onion routing, anonymous credentials, consensus) provides the foundation for a censorship-resistant deployment platform.
+
+### Deployment Types
+
+CyxHost supports multiple deployment models:
+
+| Type | Description | Use Cases |
+|------|-------------|-----------|
+| **Web Hosting** | Static/dynamic websites | Blogs, landing pages, SPAs |
+| **Docker Containers** | Full containerized apps | Databases, backends, workers |
+| **API Services** | HTTP/REST endpoints | Microservices, webhooks |
+| **TCP Services** | Raw TCP tunnels | Game servers, SSH proxies |
+| **Custom Protocols** | User-defined services | Chat, streaming, P2P apps |
+
+This does **not** change the main goal - it extends it. The core mission remains: decentralized, anonymous, censorship-resistant infrastructure. Docker support simply enables more complex deployments.
 
 ---
 
@@ -605,6 +620,124 @@ The protocol is designed to fit within existing message size constraints while e
 
 ---
 
-*Document Version: 1.0*
+## Docker Container Deployment
+
+### Overview
+
+Nodes with Docker installed can host containers for others. This enables full application deployment:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONTAINER DEPLOYMENT FLOW                     │
+│                                                                  │
+│  Publisher                    Network                    Host    │
+│      │                           │                         │     │
+│      │   1. CONTAINER_IMAGE     │                         │     │
+│      │      (chunked via storage)                         │     │
+│      ├───────────────────────────►                         │     │
+│      │                           │                         │     │
+│      │   2. CONTAINER_DEPLOY    │                         │     │
+│      ├───────────────────────────┼────────────────────────►│     │
+│      │                           │                         │     │
+│      │                           │   3. Pull image from    │     │
+│      │                           │      storage layer      │     │
+│      │                           │◄────────────────────────┤     │
+│      │                           │                         │     │
+│      │   4. CONTAINER_STATUS    │   5. docker run         │     │
+│      │◄──────────────────────────┼─────(sandboxed)─────────│     │
+│      │                           │                         │     │
+│      │   6. Service available   │                         │     │
+│      │      via onion routing   │                         │     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Container Message Types (0x90-0x97)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0x90 | CONTAINER_IMAGE_CHUNK | Image layer data |
+| 0x91 | CONTAINER_DEPLOY | Request container start |
+| 0x92 | CONTAINER_STATUS | Container state update |
+| 0x93 | CONTAINER_STOP | Request container stop |
+| 0x94 | CONTAINER_LOGS | Request log output |
+| 0x95 | CONTAINER_EXEC | Execute command in container |
+| 0x96 | CONTAINER_STATS | Resource usage |
+| 0x97 | CONTAINER_MIGRATE | Move container to another host |
+
+### Container Deployment Spec
+
+```c
+/* Container deployment request */
+typedef struct {
+    uint8_t type;                    /* 0x91 */
+    uint8_t image_hash[32];          /* SHA-256 of container image */
+    uint8_t container_name[32];      /* Service name for routing */
+    uint16_t exposed_port;           /* Port to expose via CyxHost */
+    uint8_t cpu_limit;               /* CPU % limit (1-100) */
+    uint16_t memory_mb;              /* Memory limit in MB */
+    uint16_t credits_per_hour;       /* Cost to run */
+    uint32_t max_runtime_hours;      /* Auto-stop after this time */
+    uint8_t env_count;               /* Environment variable count */
+    /* Followed by: env_count × (key[32] + value[64]) */
+} cyxwiz_container_deploy_msg_t;
+```
+
+### Container Security
+
+- **Sandboxing**: All containers run with restricted capabilities
+- **Network isolation**: Only exposed ports accessible via CyxHost
+- **Resource limits**: CPU, memory, disk enforced per contract
+- **No privileged mode**: Never run with --privileged
+- **Read-only root**: Container filesystems are read-only by default
+- **Seccomp profiles**: System calls restricted to safe subset
+
+### Host Requirements for Container Support
+
+```
+Host with Docker support must have:
+- Docker Engine 20.10+ or Podman 4.0+
+- Minimum 2GB RAM available for containers
+- At least 10GB disk space
+- Container runtime configured for rootless mode (recommended)
+```
+
+---
+
+## Terms of Service
+
+### Prohibited Content
+
+**Hosting or distributing any of the following items will result in a permanent account ban:**
+
+| Category | Description |
+|----------|-------------|
+| **Mirrors / Userbots** | Automated accounts, mirror bots, spam bots |
+| **Crypto Miners** | Cryptocurrency mining software or scripts |
+| **DMCA Protected Content** | Copyrighted material without authorization |
+| **Torrent Aggregators** | Piracy indexes, torrent tracking sites |
+| **VNC / Virtual Desktops** | Remote desktop services, VNC servers |
+| **Anything Illegal** | Content violating applicable laws |
+
+### Enforcement
+
+The network uses a decentralized moderation system:
+1. **Community reporting**: Users can flag prohibited content
+2. **Consensus voting**: Validators vote on takedown requests
+3. **Automatic filtering**: Known malicious content hashed and blocked
+4. **Credit slashing**: Violators lose staked work credits
+5. **Network ban**: Repeat offenders blacklisted by consensus
+
+### Fair Use Policy
+
+Hosts may also set their own policies:
+- Bandwidth limits per service
+- Connection rate limits
+- Content type restrictions
+- Geographic restrictions
+
+---
+
+*Document Version: 1.1*
 *Status: Design Phase*
 *Author: CyxWiz Protocol Team*
