@@ -730,11 +730,9 @@ cyxwiz_error_t cyxwiz_reputation_proof_create(
         return CYXWIZ_ERR_CRYPTO;
     }
 
-    /* Create range proof for (actual - min) >= 0 */
+    /* Create range proof for (actual - min) >= 0
+     * Note: uint16_t is capped at 65535 by definition, no bounds check needed */
     uint16_t shifted = (uint16_t)(actual_credits - min_threshold);
-    if (shifted > 65535) {
-        shifted = 65535;  /* Cap at 16-bit range */
-    }
 
     cyxwiz_pedersen_opening_t opening;
     cyxwiz_error_t err = cyxwiz_range_proof_create_16(shifted, &msg->range_proof, &opening);
