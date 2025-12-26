@@ -710,6 +710,150 @@ if (cyxwiz_consensus_round_allows_anonymous(consensus_ctx, round_id)) {
 
 ---
 
+## CyxHost: Decentralized Web Hosting (Planned)
+
+The CyxWiz network's secure infrastructure enables **decentralized web hosting** - users can offer to host services on their PCs, and clients can access them anonymously.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      CYXHOST PROTOCOL                            │
+│                                                                  │
+│   Client                              Host Provider              │
+│     │                                      │                     │
+│     │  "I want to access my-blog"          │  "I host my-blog"   │
+│     ▼                                      ▼                     │
+│  ┌──────────┐    Onion Routing      ┌──────────────┐            │
+│  │  CyxHost │◄─────────────────────►│  CyxHost     │            │
+│  │  Client  │    (anonymous)        │  Server      │            │
+│  └──────────┘                       └──────┬───────┘            │
+│                                            │                     │
+│                                     ┌──────▼───────┐            │
+│                                     │ Local HTTP   │            │
+│                                     │ Server:8080  │            │
+│                                     └──────────────┘            │
+│                                                                  │
+├──────────────────────────────────────────────────────────────────┤
+│   Built on: Compute Layer + Storage Layer + Onion Routing        │
+│   Security: Anonymous credentials + Work credits + Consensus     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+| Step | Action |
+|------|--------|
+| 1. Register | Host proves eligibility with anonymous credential |
+| 2. Announce | Host advertises service to network |
+| 3. Discover | Client queries for service hosts |
+| 4. Connect | Request routed through onion network |
+| 5. Serve | Host proxies to local HTTP server |
+| 6. Respond | Response returns via anonymous SURB |
+
+### Message Types (0x80-0x8F)
+
+```
+Hosting:      SERVICE_REGISTER, SERVICE_UNREGISTER, SERVICE_QUERY,
+              SERVICE_ANNOUNCE, SERVICE_REQUEST, SERVICE_RESPONSE,
+              SERVICE_STREAM_START, SERVICE_STREAM_CHUNK, SERVICE_STREAM_END,
+              SERVICE_HEALTH
+```
+
+### Example: Host a Website
+
+```c
+#include "cyxwiz/hosting.h"
+
+// Step 1: Enable hosting on your node
+cyxwiz_host_ctx_t *host;
+cyxwiz_host_create(&host, router, consensus_ctx);
+
+// Step 2: Register your service with anonymous credential
+cyxwiz_service_config_t config = {
+    .name = "my-blog",
+    .type = CYXWIZ_SERVICE_HTTP,
+    .local_port = 8080,           // Your local web server
+    .max_connections = 100,
+    .require_payment = true,      // Earn work credits
+    .credits_per_request = 1
+};
+
+cyxwiz_host_register(host, &config, &my_host_credential);
+
+// Step 3: Start serving - requests arrive automatically
+cyxwiz_host_start(host);
+
+// Incoming requests are proxied to localhost:8080
+// You earn work credits for each request served
+```
+
+### Example: Access a Hosted Service
+
+```c
+#include "cyxwiz/hosting.h"
+
+// Step 1: Create client
+cyxwiz_host_client_t *client;
+cyxwiz_host_client_create(&client, router, onion_ctx);
+
+// Step 2: Discover hosts for service
+cyxwiz_host_query(client, "my-blog", on_hosts_found);
+
+// Step 3: Send request (routed anonymously)
+cyxwiz_http_request_t req = {
+    .method = "GET",
+    .path = "/posts/hello-world",
+    .headers = "Accept: text/html
+"
+};
+
+cyxwiz_host_request(client, "my-blog", &req, on_response);
+
+// Response arrives via SURB - host never knows who you are
+```
+
+### Security Features
+
+| Feature | How It Works |
+|---------|--------------|
+| **Anonymous Hosting** | Credential proves host eligibility without revealing identity |
+| **Anonymous Access** | Onion routing + SURBs hide client identity |
+| **Verified Hosts** | Consensus validates host reputation via work credits |
+| **DDoS Resistant** | Work credit requirement + rate limiting |
+| **Censorship Resistant** | No central registry, services discovered via P2P |
+| **Payment Optional** | Hosts can require credits or serve free |
+
+### Use Cases
+
+```
+✅ Personal websites without revealing your IP
+✅ Anonymous APIs and microservices
+✅ Censorship-resistant blogs and forums
+✅ Private file sharing portals
+✅ Whistleblower submission systems
+✅ Decentralized social media backends
+✅ Anonymous e-commerce storefronts
+```
+
+### Infrastructure Reuse
+
+CyxHost builds entirely on existing CyxWiz infrastructure:
+
+| Component | Reuses |
+|-----------|--------|
+| Service Discovery | Peer announcements + consensus |
+| Request Routing | Onion routing + SURBs |
+| Session Storage | CyxCloud distributed storage |
+| Authentication | Anonymous credentials |
+| Payment | Work credits system |
+| Health Checks | Validator heartbeat patterns |
+| Load Balancing | Worker selection algorithms |
+
+**Status:** Planned for Phase 4 - the secure network infrastructure is ready.
+
+---
+
 ## Future Use Cases (Roadmap)
 
 ### For Individuals
