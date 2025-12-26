@@ -1330,10 +1330,17 @@ cyxwiz_error_t cyxwiz_compute_result_mac(
     }
 
     /* Use crypto context's MAC function */
-    uint8_t buf[CYXWIZ_JOB_ID_SIZE + CYXWIZ_JOB_MAX_PAYLOAD];
+    /* Buffer must be zero-initialized because cyxwiz_crypto_compute_mac
+     * always hashes CYXWIZ_KEY_SIZE bytes regardless of actual data length */
+    uint8_t buf[CYXWIZ_KEY_SIZE];
+    memset(buf, 0, CYXWIZ_KEY_SIZE);
     memcpy(buf, job_id->bytes, CYXWIZ_JOB_ID_SIZE);
-    if (result_len > 0 && result != NULL) {
-        memcpy(buf + CYXWIZ_JOB_ID_SIZE, result, result_len);
+    size_t copy_len = result_len;
+    if (copy_len > CYXWIZ_KEY_SIZE - CYXWIZ_JOB_ID_SIZE) {
+        copy_len = CYXWIZ_KEY_SIZE - CYXWIZ_JOB_ID_SIZE;
+    }
+    if (copy_len > 0 && result != NULL) {
+        memcpy(buf + CYXWIZ_JOB_ID_SIZE, result, copy_len);
     }
 
     return cyxwiz_crypto_compute_mac(ctx->crypto_ctx, buf, mac_out);
