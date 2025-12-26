@@ -33,9 +33,11 @@ typedef int ssize_t;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 typedef int socket_t;
 #define SOCKET_INVALID (-1)
 #define SOCKET_ERROR_CODE errno

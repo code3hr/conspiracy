@@ -4,6 +4,11 @@
  * Tests for the Proof of Useful Work consensus mechanism.
  */
 
+/* Disable MSVC warning C4127: conditional expression is constant */
+#ifdef _MSC_VER
+#pragma warning(disable: 4127)
+#endif
+
 #include "cyxwiz/consensus.h"
 #include "cyxwiz/crypto.h"
 #include "cyxwiz/peer.h"
