@@ -2715,7 +2715,8 @@ static cyxwiz_error_t send_pos_proof_msg(
     /* Get proof path */
     uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
     uint8_t depth, positions;
-    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+    merkle_get_proof((const uint8_t (*)[CYXWIZ_POS_HASH_SIZE])tree,
+                     tree_size, num_leaves, block_index, path, &depth, &positions);
 
     /* Extract block data */
     size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
@@ -2859,7 +2860,8 @@ static cyxwiz_error_t send_pos_proof_via_surb(
     /* Get proof path */
     uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
     uint8_t depth, positions;
-    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+    merkle_get_proof((const uint8_t (*)[CYXWIZ_POS_HASH_SIZE])tree,
+                     tree_size, num_leaves, block_index, path, &depth, &positions);
 
     /* Extract block data */
     size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
@@ -3038,7 +3040,8 @@ static cyxwiz_error_t handle_pos_proof(
 
     /* Verify the proof */
     bool valid = merkle_verify_path(block_data, msg->block_len, msg->block_index,
-                                    path, msg->proof_depth, msg->sibling_positions,
+                                    (const uint8_t (*)[CYXWIZ_POS_HASH_SIZE])path,
+                                    msg->proof_depth, msg->sibling_positions,
                                     challenge->commitment.merkle_root);
 
     char id_hex[17];
@@ -3411,7 +3414,8 @@ cyxwiz_error_t cyxwiz_pos_generate_proof(
     /* Get proof path */
     uint8_t path[CYXWIZ_POS_MAX_PROOF_DEPTH][CYXWIZ_POS_HASH_SIZE];
     uint8_t depth, positions;
-    merkle_get_proof(tree, tree_size, num_leaves, block_index, path, &depth, &positions);
+    merkle_get_proof((const uint8_t (*)[CYXWIZ_POS_HASH_SIZE])tree,
+                     tree_size, num_leaves, block_index, path, &depth, &positions);
 
     /* Extract block data */
     size_t block_offset = (size_t)block_index * CYXWIZ_POS_BLOCK_SIZE;
@@ -3496,7 +3500,8 @@ cyxwiz_error_t cyxwiz_pos_verify_proof(
 
     /* Verify the proof */
     *valid_out = merkle_verify_path(block_data, msg->block_len, msg->block_index,
-                                    path, msg->proof_depth, msg->sibling_positions,
+                                    (const uint8_t (*)[CYXWIZ_POS_HASH_SIZE])path,
+                                    msg->proof_depth, msg->sibling_positions,
                                     commitment->merkle_root);
 
     if (*valid_out && reason_out != NULL) {

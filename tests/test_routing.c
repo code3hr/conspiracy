@@ -632,7 +632,7 @@ static int test_anon_send_validation(void)
     return 1;
 }
 
-/* Test payload size limit */
+/* Test payload size limit for multi-hop routes */
 static int test_payload_size_limit(void)
 {
     cyxwiz_peer_table_t *peer_table = NULL;
@@ -648,11 +648,11 @@ static int test_payload_size_limit(void)
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
     cyxwiz_router_start(router);
 
-    /* Add destination as peer so we have a route */
-    cyxwiz_peer_table_add(peer_table, &dest_id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
-    cyxwiz_peer_table_set_state(peer_table, &dest_id, CYXWIZ_PEER_STATE_CONNECTED);
+    /* Do NOT add destination as direct peer - test multi-hop routing limits.
+     * For multi-hop routes, CYXWIZ_MAX_ROUTED_PAYLOAD (48 bytes) is the limit.
+     * For direct peers, CYXWIZ_MAX_PACKET_SIZE (256 bytes) is the limit. */
 
-    /* Send exactly max payload */
+    /* Send exactly max routed payload - should succeed (queued for route discovery) */
     uint8_t data[CYXWIZ_MAX_ROUTED_PAYLOAD];
     memset(data, 0xAA, sizeof(data));
     err = cyxwiz_router_send(router, &dest_id, data, CYXWIZ_MAX_ROUTED_PAYLOAD);
@@ -663,7 +663,7 @@ static int test_payload_size_limit(void)
         return 0;
     }
 
-    /* Send over max payload should fail */
+    /* Send over max routed payload should fail immediately */
     uint8_t big_data[CYXWIZ_MAX_ROUTED_PAYLOAD + 1];
     memset(big_data, 0xBB, sizeof(big_data));
     err = cyxwiz_router_send(router, &dest_id, big_data, sizeof(big_data));
