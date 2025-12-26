@@ -164,7 +164,7 @@ static int test_wrap_unwrap_2hop(void)
     /* Wrap with 2 hops */
     cyxwiz_error_t err = cyxwiz_onion_wrap(
         payload, payload_len,
-        hops, keys, 2,
+        hops, (const uint8_t (*)[CYXWIZ_KEY_SIZE])keys, 2,
         onion, &onion_len
     );
     if (err != CYXWIZ_OK) {
@@ -245,7 +245,7 @@ static int test_wrap_unwrap_3hop(void)
     /* Wrap with 3 hops */
     cyxwiz_error_t err = cyxwiz_onion_wrap(
         payload, payload_len,
-        hops, keys, 3,
+        hops, (const uint8_t (*)[CYXWIZ_KEY_SIZE])keys, 3,
         onion, &onion_len
     );
     if (err != CYXWIZ_OK) {
@@ -481,7 +481,7 @@ static int test_invalid_hop_count(void)
     /* 0 hops should fail */
     cyxwiz_error_t err = cyxwiz_onion_wrap(
         payload, payload_len,
-        hops, keys, 0,
+        hops, (const uint8_t (*)[CYXWIZ_KEY_SIZE])keys, 0,
         onion, &onion_len
     );
     if (err == CYXWIZ_OK) {
@@ -491,7 +491,7 @@ static int test_invalid_hop_count(void)
     /* 4 hops (> MAX) should fail */
     err = cyxwiz_onion_wrap(
         payload, payload_len,
-        hops, keys, 4,
+        hops, (const uint8_t (*)[CYXWIZ_KEY_SIZE])keys, 4,
         onion, &onion_len
     );
     if (err == CYXWIZ_OK) {
