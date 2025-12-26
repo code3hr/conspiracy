@@ -49,8 +49,8 @@ cyxwiz_error_t cyxwiz_crypto_create(
         return CYXWIZ_ERR_INVALID;
     }
 
-    /* Validate parameters */
-    if (num_parties < 2 || num_parties > CYXWIZ_MAX_PARTIES) {
+    /* Validate parameters (upper bound check is implicit since uint8_t max = 255 = CYXWIZ_MAX_PARTIES) */
+    if (num_parties < 2) {
         CYXWIZ_ERROR("Invalid num_parties: %d (must be 2-%d)", num_parties, CYXWIZ_MAX_PARTIES);
         return CYXWIZ_ERR_INVALID;
     }
