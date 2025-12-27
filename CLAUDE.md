@@ -32,8 +32,11 @@ ctest --test-dir build
 # Run a single test
 ./build/test_transport
 
-# Run daemon
+# Run daemon (interactive mode)
 ./build/cyxwizd
+
+# Run daemon (batch mode for scripting)
+./build/cyxwizd --batch < commands.txt
 ```
 
 ### Build Options
@@ -68,6 +71,11 @@ include/cyxwiz/       Public headers
   routing.h           Mesh routing (route discovery, source routing)
   onion.h             Onion routing (layered encryption, circuits)
   crypto.h            MPC crypto (secret sharing, encryption, MACs)
+  compute.h           Compute job marketplace
+  storage.h           Distributed storage (K-of-N threshold)
+  consensus.h         PoUW consensus with validators
+  zkp.h               Zero-knowledge proofs
+  privacy.h           Anonymous credentials
   memory.h            Secure memory (zeroing, constant-time compare)
   log.h               Logging
 
@@ -77,22 +85,30 @@ src/
     discovery.c       Peer discovery protocol (with X25519 key exchange)
     routing.c         Mesh routing implementation
     onion.c           Onion routing implementation
+    compute.c         Distributed compute job marketplace
+    storage.c         K-of-N threshold storage (CyxCloud)
+    consensus.c       PoUW consensus with work credits
   transport/          Transport drivers
     transport.c       Transport manager (create/destroy)
-    wifi_direct.c     WiFi Direct driver (stub)
-    bluetooth.c       Bluetooth mesh driver (stub)
-    lora.c            LoRa driver (stub)
+    udp.c             UDP/Internet with NAT traversal (STUN)
+    wifi_direct.c     WiFi Direct (Linux wpa_supplicant)
+    wifi_direct_win.cpp  WiFi Direct Windows wrapper
+    bluetooth.c       Bluetooth (Linux BlueZ L2CAP)
+    bluetooth_win.cpp Bluetooth Windows wrapper (RFCOMM)
+    lora.c            LoRa (Serial AT + Linux SPI for SX127x)
   crypto/             SPDZ-based MPC crypto
     crypto.c          Context management
     primitives.c      libsodium wrappers (encrypt, hash, random)
     sharing.c         Secret sharing (additive + threshold)
     mac.c             Information-theoretic MACs
+    zkp.c             Zero-knowledge proofs (Schnorr)
+    privacy.c         Anonymous credentials
   util/
     memory.c          Secure memory implementation
     log.c             Logging implementation
 
-daemon/main.c         Node daemon entry point
-tests/                Unit tests
+daemon/main.c         Node daemon with interactive commands
+tests/                Unit tests (14 test suites)
 ```
 
 ## Transport Abstraction
@@ -322,6 +338,67 @@ cyxwiz_onion_unwrap(onion, len, key, &next_hop, inner, &inner_len);
 2. **Consensus Layer** - Proof of Useful Work + stake-weighted validation
 3. **Protocol Layer** - Compute, Storage, Privacy protocols
 4. **Application Layer** - UIs, wallets, SDKs
+
+## Daemon Commands
+
+The daemon (`cyxwizd`) provides interactive commands:
+
+```bash
+# Information
+/help                    # Show all commands
+/status                  # Node status (ID, peers, validators)
+/peers                   # List connected peers
+
+# Messaging
+/send <peer_id> <msg>    # Send direct message
+/anon <peer_id> <msg>    # Send via onion routing
+
+# Storage (CyxCloud)
+/store <data>            # Store data (returns 16-char hex ID)
+/retrieve <storage_id>   # Retrieve by storage ID
+/storage                 # Storage status
+
+# Compute
+/compute <data>          # Submit job to worker
+/jobs                    # List active jobs
+
+# Consensus
+/validators              # Validator status
+/credits                 # Work credit balance
+
+# Control
+/quit                    # Shutdown
+```
+
+### Batch Mode
+
+For scripting/testing, use `--batch` flag:
+```bash
+echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
+```
+
+## Transport Drivers
+
+### WiFi Direct (`wifi_direct.c`)
+- Linux: wpa_supplicant control interface (`/var/run/wpa_supplicant`)
+- Windows: WinRT wrapper (`wifi_direct_win.cpp`)
+- P2P group formation, UDP data socket on port 19850
+
+### Bluetooth (`bluetooth.c`)
+- Linux: BlueZ L2CAP sockets
+- Windows: RFCOMM via Winsock (`bluetooth_win.cpp`)
+- Device discovery, connection management
+
+### LoRa (`lora.c`)
+- Serial: AT command modules (RYLR890/RYLR896)
+- SPI: Direct SX127x register access (Linux)
+- CSMA/CA collision avoidance
+- Environment variables: `CYXWIZ_LORA_SERIAL`, `CYXWIZ_LORA_SPI`, `CYXWIZ_LORA_FREQ`
+
+### UDP (`udp.c`)
+- NAT traversal via STUN (Google, Cloudflare servers)
+- UDP hole punching for peer-to-peer
+- Bootstrap server for peer discovery
 
 ## Security Considerations
 
