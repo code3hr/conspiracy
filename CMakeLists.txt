@@ -90,11 +90,31 @@ set(CYXWIZ_SOURCES
 if(CYXWIZ_TRANSPORT_WIFI)
     list(APPEND CYXWIZ_SOURCES src/transport/wifi_direct.c)
     add_compile_definitions(CYXWIZ_HAS_WIFI=1)
+    if(WIN32)
+        # Enable C++ for Windows WiFi Direct wrapper
+        enable_language(CXX)
+        set(CMAKE_CXX_STANDARD 17)
+        set(CMAKE_CXX_STANDARD_REQUIRED ON)
+        list(APPEND CYXWIZ_SOURCES src/transport/wifi_direct_win.cpp)
+        # Link Windows networking libraries
+        list(APPEND CYXWIZ_PLATFORM_LIBS iphlpapi windowsapp)
+    endif()
 endif()
 
 if(CYXWIZ_TRANSPORT_BLUETOOTH)
     list(APPEND CYXWIZ_SOURCES src/transport/bluetooth.c)
     add_compile_definitions(CYXWIZ_HAS_BLUETOOTH=1)
+    if(WIN32)
+        # Enable C++ for Windows Bluetooth wrapper (if not already enabled by WiFi)
+        if(NOT CYXWIZ_TRANSPORT_WIFI)
+            enable_language(CXX)
+            set(CMAKE_CXX_STANDARD 17)
+            set(CMAKE_CXX_STANDARD_REQUIRED ON)
+        endif()
+        list(APPEND CYXWIZ_SOURCES src/transport/bluetooth_win.cpp)
+        # Link Windows Bluetooth libraries
+        list(APPEND CYXWIZ_PLATFORM_LIBS bthprops ws2_32)
+    endif()
 endif()
 
 if(CYXWIZ_TRANSPORT_LORA)
@@ -156,6 +176,10 @@ if(CYXWIZ_HAS_CRYPTO)
         target_include_directories(cyxwiz PUBLIC ${SODIUM_INCLUDE_DIRS})
     endif()
     target_link_libraries(cyxwiz PUBLIC ${SODIUM_TARGET})
+    # Use static libsodium on Windows
+    if(WIN32)
+        target_compile_definitions(cyxwiz PUBLIC SODIUM_STATIC=1)
+    endif()
 endif()
 
 # Link platform-specific libraries (e.g., Winsock for UDP on Windows)

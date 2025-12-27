@@ -34,13 +34,69 @@ Both are anonymous. No accounts. No identity.
 ### Starting a Node
 
 ```bash
-# Basic start
+# Basic start (interactive mode)
 ./cyxwizd
 
-# With options (planned)
-./cyxwizd --party-id 1 --threshold 3 --parties 5
-./cyxwizd --transport wifi,bluetooth,lora
-./cyxwizd --log-level debug
+# Batch mode (for scripting/testing)
+./cyxwizd --batch
+./cyxwizd -b < commands.txt
+
+# Show help
+./cyxwizd --help
+```
+
+### Interactive Commands
+
+Once the daemon is running, use these commands at the `>` prompt:
+
+```bash
+# Information
+/help                    # Show all commands
+/status                  # Show node status (ID, peers, validators)
+/peers                   # List connected peers
+
+# Messaging
+/send <peer_id> <msg>    # Send direct message to peer
+/anon <peer_id> <msg>    # Send anonymous message via onion routing
+
+# Storage (CyxCloud)
+/store <data>            # Store data across peers (returns storage ID)
+/retrieve <storage_id>   # Retrieve stored data by 16-char hex ID
+/storage                 # Show storage status
+
+# Compute
+/compute <data>          # Submit compute job to worker
+/jobs                    # List active jobs
+
+# Consensus
+/validators              # List validators and registration status
+/credits                 # Show work credits and earning rates
+
+# Control
+/quit                    # Graceful shutdown
+```
+
+Example session:
+```
+> /status
+  Node ID:     c9ead21bcf6133fb...
+  Peers:       3 connected
+  Validators:  2 registered
+  Onion:       enabled
+
+> /storage
+  Provider mode:     enabled
+  Active operations: 0
+  Stored items:      5
+  Storage used:      12480 bytes
+
+> /credits
+  Current balance: 42 credits
+  Credits are earned by:
+    - Completing compute jobs: +10
+    - Passing storage proofs:  +5
+    - Validation participation: +2
+    - Correct validation vote:  +3
 ```
 
 ### Node Types
@@ -273,14 +329,18 @@ cyxwiz_onion_send(onion, circuit, message, len);  // 29 bytes max for 3-hop
 [✓] Proof of Storage (Merkle tree challenges)
 [✓] Compute job marketplace (with MAC verification)
 [✓] Chunked transfers (for large payloads)
+[✓] PoUW Consensus (validators, work credits, committee selection)
+[✓] Interactive daemon commands (/store, /compute, /validators, /credits)
+[✓] Batch mode for scripting (--batch flag)
 ```
 
-### Infrastructure Ready (Need Hardware Integration)
+### Transport Drivers Implemented
 
 ```
-[~] WiFi Direct transport (API ready, needs platform-specific driver)
-[~] Bluetooth transport (API ready, needs platform-specific driver)
-[~] LoRa transport (API ready, needs hardware integration)
+[✓] WiFi Direct transport (Linux wpa_supplicant + Windows WinRT stubs)
+[✓] Bluetooth transport (Linux BlueZ + Windows RFCOMM)
+[✓] LoRa transport (Serial AT commands + Linux SPI for SX127x)
+[✓] UDP transport with NAT traversal (STUN + hole punching)
 ```
 
 ### Planned
@@ -288,8 +348,8 @@ cyxwiz_onion_send(onion, circuit, message, len);  // 29 bytes max for 3-hop
 ```
 [ ] WASM sandbox for compute jobs
 [ ] Token integration (CYWZ)
-[ ] Consensus mechanism
 [ ] Mobile SDKs (iOS, Android)
+[ ] CyxHost platform (serverless deployment)
 ```
 
 ---
@@ -796,14 +856,16 @@ cyxwiz alert broadcast "Tsunami warning" --priority critical
 7. ~~**Proof of Storage** - Merkle-based verification~~ ✓
 8. ~~**Job Protocol** - Compute marketplace with MAC verification~~ ✓
 
-### In Progress
-9. **Real Transports** - WiFi Direct/Bluetooth/LoRa hardware integration
-10. **WASM Sandbox** - Secure code execution environment
+### Completed
+9. ~~**Real Transports** - WiFi Direct/Bluetooth/LoRa drivers~~ ✓
+10. ~~**Consensus Mechanism** - PoUW validators with work credits~~ ✓
+11. ~~**Interactive Commands** - CLI for storage/compute/consensus~~ ✓
 
 ### Planned
-11. **Token Integration** - CYWZ payments
-12. **Consensus Mechanism** - Validator network
-13. **Mobile SDKs** - iOS/Android libraries
+12. **WASM Sandbox** - Secure code execution environment
+13. **Token Integration** - CYWZ payments
+14. **Mobile SDKs** - iOS/Android libraries
+15. **CyxHost** - Serverless deployment platform
 
 ---
 

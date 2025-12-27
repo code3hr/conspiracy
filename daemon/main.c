@@ -1,3 +1,8 @@
+/* Disable MSVC security warnings for standard C functions */
+#ifdef _MSC_VER
+#pragma warning(disable: 4996)
+#endif
+
 /*
  * CyxWiz Protocol - Node Daemon
  *
@@ -51,6 +56,7 @@
 #endif
 
 static volatile bool g_running = true;
+static bool g_batch_mode = false;
 
 static void signal_handler(int sig)
 {
@@ -371,10 +377,22 @@ static void cmd_help(void)
     printf("  /peers                   List connected peers\n");
     printf("  /send <peer_id> <msg>    Send direct message\n");
     printf("  /anon <peer_id> <msg>    Send anonymous message\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  /store <data>            Store data (returns ID)\n");
+    printf("  /retrieve <storage_id>   Retrieve stored data\n");
+    printf("  /storage                 Show storage status\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  /compute <data>          Submit compute job\n");
+    printf("  /jobs                    List active jobs\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  /validators              List validators\n");
+    printf("  /credits                 Show work credits\n");
+    printf("  ───────────────────────────────────────────────\n");
     printf("  /quit                    Exit the daemon\n");
     printf("  ───────────────────────────────────────────────\n");
     printf("\n");
     printf("  Note: peer_id can be first 8+ hex chars\n");
+    printf("        storage_id is 16 hex chars\n");
     printf("\n");
 }
 
@@ -577,6 +595,353 @@ static void cmd_anon(const char *args)
 #endif
 }
 
+/* Store data */
+static void cmd_store(const char *args)
+{
+#ifndef CYXWIZ_HAS_STORAGE
+    printf("  Error: Storage not available (no crypto)\n");
+    return;
+#else
+    if (g_storage == NULL) {
+        printf("  Error: Storage not initialized\n");
+        return;
+    }
+
+    if (args == NULL || *args == '\0') {
+        printf("  Usage: /store <data>\n");
+        return;
+    }
+
+    /* Get connected peers as providers */
+    if (g_peer_table == NULL) {
+        printf("  Error: No peer table available\n");
+        return;
+    }
+
+    size_t peer_count = cyxwiz_peer_table_count(g_peer_table);
+    if (peer_count < 2) {
+        printf("  Error: Need at least 2 peers for distributed storage\n");
+        printf("  Current peers: %zu\n", peer_count);
+        return;
+    }
+
+    /* Collect provider IDs (up to 5 peers, threshold 3) */
+    cyxwiz_node_id_t providers[5];
+    size_t num_providers = 0;
+    uint8_t threshold = 3;
+
+    for (size_t i = 0; i < peer_count && num_providers < 5; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(g_peer_table, i);
+        if (peer != NULL && peer->state == CYXWIZ_PEER_STATE_CONNECTED) {
+            memcpy(&providers[num_providers], &peer->id, sizeof(cyxwiz_node_id_t));
+            num_providers++;
+        }
+    }
+
+    if (num_providers < 2) {
+        printf("  Error: Need at least 2 connected peers\n");
+        return;
+    }
+
+    /* Adjust threshold for small networks */
+    if (num_providers < 3) {
+        threshold = (uint8_t)num_providers;
+    }
+
+    /* Store the data */
+    cyxwiz_storage_id_t storage_id;
+    size_t data_len = strlen(args);
+    if (data_len > CYXWIZ_STORAGE_MAX_PAYLOAD - 40) {
+        data_len = CYXWIZ_STORAGE_MAX_PAYLOAD - 40;
+    }
+
+    cyxwiz_error_t err = cyxwiz_storage_store(
+        g_storage,
+        providers,
+        num_providers,
+        threshold,
+        (const uint8_t *)args,
+        data_len,
+        CYXWIZ_STORAGE_DEFAULT_TTL_SEC,
+        &storage_id
+    );
+
+    if (err == CYXWIZ_OK) {
+        char hex_id[17];
+        cyxwiz_storage_id_to_hex(&storage_id, hex_id);
+        printf("\n");
+        printf("  Storage initiated:\n");
+        printf("  ───────────────────────────────────────────────\n");
+        printf("  Storage ID: %s\n", hex_id);
+        printf("  Providers:  %zu (threshold %u)\n", num_providers, threshold);
+        printf("  TTL:        1 hour\n");
+        printf("  ───────────────────────────────────────────────\n");
+        printf("\n  Use '/retrieve %s' to get data back\n\n", hex_id);
+    } else {
+        printf("  Error storing: %s\n", cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/* Retrieve stored data */
+static void cmd_retrieve(const char *args)
+{
+#ifndef CYXWIZ_HAS_STORAGE
+    printf("  Error: Storage not available (no crypto)\n");
+    return;
+#else
+    if (g_storage == NULL) {
+        printf("  Error: Storage not initialized\n");
+        return;
+    }
+
+    if (args == NULL || *args == '\0') {
+        printf("  Usage: /retrieve <storage_id>\n");
+        printf("  storage_id is 16 hex characters\n");
+        return;
+    }
+
+    /* Parse storage ID from hex */
+    cyxwiz_storage_id_t storage_id;
+    if (strlen(args) < 16) {
+        printf("  Error: Storage ID must be 16 hex characters\n");
+        return;
+    }
+
+    for (int i = 0; i < CYXWIZ_STORAGE_ID_SIZE; i++) {
+        unsigned int byte;
+        if (sscanf(args + i * 2, "%02x", &byte) != 1) {
+            printf("  Error: Invalid hex in storage ID\n");
+            return;
+        }
+        storage_id.bytes[i] = (uint8_t)byte;
+    }
+
+    /* Get providers (all connected peers) */
+    if (g_peer_table == NULL) {
+        printf("  Error: No peer table available\n");
+        return;
+    }
+
+    cyxwiz_node_id_t providers[8];
+    size_t num_providers = 0;
+
+    for (size_t i = 0; i < cyxwiz_peer_table_count(g_peer_table) && num_providers < 8; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(g_peer_table, i);
+        if (peer != NULL && peer->state == CYXWIZ_PEER_STATE_CONNECTED) {
+            memcpy(&providers[num_providers], &peer->id, sizeof(cyxwiz_node_id_t));
+            num_providers++;
+        }
+    }
+
+    if (num_providers == 0) {
+        printf("  Error: No connected peers to retrieve from\n");
+        return;
+    }
+
+    cyxwiz_error_t err = cyxwiz_storage_retrieve(
+        g_storage,
+        &storage_id,
+        providers,
+        num_providers
+    );
+
+    if (err == CYXWIZ_OK) {
+        char hex_id[17];
+        cyxwiz_storage_id_to_hex(&storage_id, hex_id);
+        printf("  Retrieval initiated for %s\n", hex_id);
+        printf("  (results delivered via callback)\n");
+    } else {
+        printf("  Error retrieving: %s\n", cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/* Show storage status */
+static void cmd_storage_status(void)
+{
+#ifndef CYXWIZ_HAS_STORAGE
+    printf("  Error: Storage not available (no crypto)\n");
+    return;
+#else
+    if (g_storage == NULL) {
+        printf("  Error: Storage not initialized\n");
+        return;
+    }
+
+    printf("\n");
+    printf("  Storage Status:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  Provider mode:     %s\n",
+           cyxwiz_storage_is_provider(g_storage) ? "enabled" : "disabled");
+    printf("  Active operations: %zu\n", cyxwiz_storage_operation_count(g_storage));
+    printf("  Stored items:      %zu\n", cyxwiz_storage_stored_count(g_storage));
+    printf("  Storage used:      %zu bytes\n", cyxwiz_storage_used_bytes(g_storage));
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+#endif
+}
+
+/* Submit compute job */
+static void cmd_compute(const char *args)
+{
+#ifndef CYXWIZ_HAS_COMPUTE
+    printf("  Error: Compute not available\n");
+    return;
+#else
+    if (g_compute == NULL) {
+        printf("  Error: Compute not initialized\n");
+        return;
+    }
+
+    if (args == NULL || *args == '\0') {
+        printf("  Usage: /compute <data>\n");
+        printf("  Submits a hash job to a worker\n");
+        return;
+    }
+
+    /* Find a worker (first connected peer) */
+    if (g_peer_table == NULL) {
+        printf("  Error: No peer table available\n");
+        return;
+    }
+
+    const cyxwiz_peer_t *worker = NULL;
+    for (size_t i = 0; i < cyxwiz_peer_table_count(g_peer_table); i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_get_peer(g_peer_table, i);
+        if (peer != NULL && peer->state == CYXWIZ_PEER_STATE_CONNECTED) {
+            worker = peer;
+            break;
+        }
+    }
+
+    if (worker == NULL) {
+        printf("  Error: No connected peers to submit job to\n");
+        return;
+    }
+
+    /* Submit hash job */
+    cyxwiz_job_id_t job_id;
+    size_t payload_len = strlen(args);
+    if (payload_len > CYXWIZ_JOB_MAX_PAYLOAD) {
+        payload_len = CYXWIZ_JOB_MAX_PAYLOAD;
+    }
+
+    cyxwiz_error_t err = cyxwiz_compute_submit(
+        g_compute,
+        &worker->id,
+        CYXWIZ_JOB_TYPE_HASH,
+        (const uint8_t *)args,
+        payload_len,
+        &job_id
+    );
+
+    if (err == CYXWIZ_OK) {
+        char job_hex[17];
+        char worker_hex[65];
+        cyxwiz_job_id_to_hex(&job_id, job_hex);
+        cyxwiz_node_id_to_hex(&worker->id, worker_hex);
+
+        printf("\n");
+        printf("  Job Submitted:\n");
+        printf("  ───────────────────────────────────────────────\n");
+        printf("  Job ID:  %s\n", job_hex);
+        printf("  Type:    HASH\n");
+        printf("  Worker:  %.16s...\n", worker_hex);
+        printf("  Payload: %zu bytes\n", payload_len);
+        printf("  ───────────────────────────────────────────────\n");
+        printf("\n");
+    } else {
+        printf("  Error submitting job: %s\n", cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/* List active jobs */
+static void cmd_jobs(void)
+{
+#ifndef CYXWIZ_HAS_COMPUTE
+    printf("  Error: Compute not available\n");
+    return;
+#else
+    if (g_compute == NULL) {
+        printf("  Error: Compute not initialized\n");
+        return;
+    }
+
+    size_t job_count = cyxwiz_compute_job_count(g_compute);
+    printf("\n");
+    printf("  Active Jobs (%zu):\n", job_count);
+    printf("  ───────────────────────────────────────────────\n");
+
+    if (job_count == 0) {
+        printf("  (no active jobs)\n");
+    } else {
+        printf("  Worker mode: %s\n",
+               cyxwiz_compute_is_worker(g_compute) ? "enabled" : "disabled");
+        printf("  Use /compute to submit jobs\n");
+    }
+
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+#endif
+}
+
+/* List validators */
+static void cmd_validators(void)
+{
+#ifndef CYXWIZ_HAS_CONSENSUS
+    printf("  Error: Consensus not available\n");
+    return;
+#else
+    if (g_consensus == NULL) {
+        printf("  Error: Consensus not initialized\n");
+        return;
+    }
+
+    size_t validator_count = cyxwiz_consensus_validator_count(g_consensus);
+    printf("\n");
+    printf("  Validators (%zu):\n", validator_count);
+    printf("  ───────────────────────────────────────────────\n");
+
+    printf("  Our state:       %s\n",
+           cyxwiz_validator_state_name(cyxwiz_consensus_get_state(g_consensus)));
+    printf("  Registered:      %s\n",
+           cyxwiz_consensus_is_registered(g_consensus) ? "yes" : "no");
+    printf("  Active rounds:   %zu\n", cyxwiz_consensus_active_rounds(g_consensus));
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+#endif
+}
+
+/* Show work credits */
+static void cmd_credits(void)
+{
+#ifndef CYXWIZ_HAS_CONSENSUS
+    printf("  Error: Consensus not available\n");
+    return;
+#else
+    if (g_consensus == NULL) {
+        printf("  Error: Consensus not initialized\n");
+        return;
+    }
+
+    uint32_t credits = cyxwiz_consensus_get_credits(g_consensus);
+    printf("\n");
+    printf("  Work Credits:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  Current balance: %u credits\n", credits);
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+    printf("  Credits are earned by:\n");
+    printf("    - Completing compute jobs: +%d\n", CYXWIZ_CREDIT_COMPUTE_JOB);
+    printf("    - Passing storage proofs:  +%d\n", CYXWIZ_CREDIT_STORAGE_PROOF);
+    printf("    - Validation participation: +%d\n", CYXWIZ_CREDIT_VALIDATION);
+    printf("    - Correct validation vote:  +%d\n", CYXWIZ_CREDIT_CORRECT_VOTE);
+    printf("\n");
+#endif
+}
+
 /* Process a complete command */
 static void process_command(const char *cmd)
 {
@@ -604,6 +969,20 @@ static void process_command(const char *cmd)
         cmd_send(cmd + 6);
     } else if (strncmp(cmd, "/anon ", 6) == 0) {
         cmd_anon(cmd + 6);
+    } else if (strncmp(cmd, "/store ", 7) == 0) {
+        cmd_store(cmd + 7);
+    } else if (strncmp(cmd, "/retrieve ", 10) == 0) {
+        cmd_retrieve(cmd + 10);
+    } else if (strcmp(cmd, "/storage") == 0) {
+        cmd_storage_status();
+    } else if (strncmp(cmd, "/compute ", 9) == 0) {
+        cmd_compute(cmd + 9);
+    } else if (strcmp(cmd, "/jobs") == 0) {
+        cmd_jobs();
+    } else if (strcmp(cmd, "/validators") == 0) {
+        cmd_validators();
+    } else if (strcmp(cmd, "/credits") == 0) {
+        cmd_credits();
     } else if (strcmp(cmd, "/quit") == 0 || strcmp(cmd, "/exit") == 0) {
         printf("  Shutting down...\n");
         g_running = false;
@@ -613,7 +992,7 @@ static void process_command(const char *cmd)
     }
 }
 
-/* Poll for interactive input */
+/* Poll for interactive input (console mode) */
 static void poll_interactive(void)
 {
     int ch;
@@ -644,6 +1023,29 @@ static void poll_interactive(void)
     }
 }
 
+/* Poll for batch input (stdin line-based, for scripting)
+ * In batch mode, we do blocking reads since scripts expect synchronous I/O */
+static void poll_batch(void)
+{
+    /* Read a line from stdin (blocking) */
+    if (fgets(g_cmd_buffer, sizeof(g_cmd_buffer), stdin) != NULL) {
+        /* Remove trailing newline */
+        size_t len = strlen(g_cmd_buffer);
+        while (len > 0 && (g_cmd_buffer[len-1] == '\n' || g_cmd_buffer[len-1] == '\r')) {
+            g_cmd_buffer[--len] = '\0';
+        }
+
+        if (len > 0) {
+            printf("> %s\n", g_cmd_buffer);
+            process_command(g_cmd_buffer);
+            fflush(stdout);
+        }
+    } else {
+        /* EOF reached */
+        g_running = false;
+    }
+}
+
 static void print_banner(void)
 {
     printf("\n");
@@ -662,10 +1064,29 @@ static void print_banner(void)
     printf("\n");
 }
 
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s [options]\n", prog);
+    printf("Options:\n");
+    printf("  -b, --batch    Batch mode (read commands from stdin)\n");
+    printf("  -h, --help     Show this help\n");
+}
+
 int main(int argc, char *argv[])
 {
-    CYXWIZ_UNUSED(argc);
-    CYXWIZ_UNUSED(argv);
+    /* Parse command line arguments */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--batch") == 0) {
+            g_batch_mode = true;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
 
     print_banner();
 
@@ -876,14 +1297,22 @@ int main(int argc, char *argv[])
     g_peer_table = peer_table;
     memcpy(&g_local_id, &local_id, sizeof(local_id));
 
-    CYXWIZ_INFO("Node running. Type /help for commands, Ctrl+C to stop.");
-    printf("\n> ");
-    fflush(stdout);
+    if (g_batch_mode) {
+        CYXWIZ_INFO("Node running in BATCH mode. Reading commands from stdin.");
+    } else {
+        CYXWIZ_INFO("Node running. Type /help for commands, Ctrl+C to stop.");
+        printf("\n> ");
+        fflush(stdout);
+    }
 
     /* Main event loop */
     while (g_running) {
-        /* Poll for interactive commands */
-        poll_interactive();
+        /* Poll for commands (batch or interactive) */
+        if (g_batch_mode) {
+            poll_batch();
+        } else {
+            poll_interactive();
+        }
         uint64_t now = cyxwiz_time_ms();
 
         /* Poll discovery (sends announcements, cleans stale peers) */
