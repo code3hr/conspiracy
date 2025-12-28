@@ -55,4 +55,24 @@ int cyxwiz_secure_compare(const void *a, const void *b, size_t len);
  */
 void cyxwiz_pad_message(uint8_t *buf, size_t msg_len, size_t target_len);
 
+/*
+ * Bounds checking macro for array access
+ * Returns CYXWIZ_ERR_INVALID if index >= max
+ * Use at beginning of functions to validate array indices
+ */
+#define CYXWIZ_CHECK_BOUNDS(idx, max) \
+    do { if ((size_t)(idx) >= (size_t)(max)) return CYXWIZ_ERR_INVALID; } while(0)
+
+/*
+ * Bounds checking macro for sizes (must be <= max)
+ */
+#define CYXWIZ_CHECK_SIZE(size, max) \
+    do { if ((size_t)(size) > (size_t)(max)) return CYXWIZ_ERR_INVALID; } while(0)
+
+/*
+ * Null pointer check macro
+ */
+#define CYXWIZ_CHECK_NULL(ptr) \
+    do { if ((ptr) == NULL) return CYXWIZ_ERR_INVALID; } while(0)
+
 #endif /* CYXWIZ_MEMORY_H */

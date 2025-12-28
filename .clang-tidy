@@ -1,0 +1,27 @@
+---
+# CyxWiz Protocol - clang-tidy configuration
+# Security-focused static analysis checks
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: 'include/cyxwiz/.*'
+
+CheckOptions:
+  - key: bugprone-assert-side-effect.AssertMacros
+    value: 'assert'
+  - key: bugprone-sizeof-expression.WarnOnSizeOfIntegerExpression
+    value: true
+  - key: cert-err33-c.CheckedFunctions
+    value: '::malloc;::calloc;::realloc'
+...
