@@ -43,6 +43,7 @@ typedef struct {
     cyxwiz_node_id_t hops[CYXWIZ_MAX_HOPS];  /* Path to destination */
     uint64_t discovered_at;
     uint16_t latency_ms;                     /* Estimated latency */
+    uint16_t reputation_sum;                 /* Sum of hop reputations (for route selection) */
     bool valid;
 } cyxwiz_route_t;
 

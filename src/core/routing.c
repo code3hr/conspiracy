@@ -207,6 +207,29 @@ static cyxwiz_error_t create_surb(
     uint8_t *reply_key_out);
 #endif
 
+/* ============ Route Reputation ============ */
+
+/*
+ * Compute total reputation score for a route
+ * Higher score = more reliable path
+ */
+static uint16_t compute_route_reputation(
+    cyxwiz_peer_table_t *peer_table,
+    const cyxwiz_node_id_t *hops,
+    uint8_t hop_count)
+{
+    uint16_t total = 0;
+    for (uint8_t i = 0; i < hop_count; i++) {
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(peer_table, &hops[i]);
+        if (peer != NULL) {
+            total += cyxwiz_peer_reputation(peer);
+        } else {
+            total += 50;  /* Unknown peer gets neutral score */
+        }
+    }
+    return total;
+}
+
 /* ============ Router Lifecycle ============ */
 
 cyxwiz_error_t cyxwiz_router_create(
@@ -707,13 +730,24 @@ static cyxwiz_error_t add_route(
     const cyxwiz_node_id_t *path,
     uint8_t hop_count)
 {
+    /* Compute reputation of new route */
+    uint16_t new_reputation = compute_route_reputation(router->peer_table, path, hop_count);
+
     /* Check if route already exists */
     cyxwiz_route_t *existing = find_route(router, destination);
     if (existing != NULL) {
-        /* Update existing route */
-        existing->hop_count = hop_count;
-        memcpy(existing->hops, path, sizeof(cyxwiz_node_id_t) * hop_count);
-        existing->discovered_at = cyxwiz_time_ms();
+        /* Only replace if new route has better reputation */
+        if (new_reputation > existing->reputation_sum) {
+            existing->hop_count = hop_count;
+            memcpy(existing->hops, path, sizeof(cyxwiz_node_id_t) * hop_count);
+            existing->discovered_at = cyxwiz_time_ms();
+            existing->reputation_sum = new_reputation;
+
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(destination, hex_id);
+            CYXWIZ_DEBUG("Updated route to %.16s... (rep %u -> %u)",
+                         hex_id, existing->reputation_sum, new_reputation);
+        }
         return CYXWIZ_OK;
     }
 
@@ -725,12 +759,14 @@ static cyxwiz_error_t add_route(
             memcpy(router->routes[i].hops, path, sizeof(cyxwiz_node_id_t) * hop_count);
             router->routes[i].discovered_at = cyxwiz_time_ms();
             router->routes[i].latency_ms = 0;
+            router->routes[i].reputation_sum = new_reputation;
             router->routes[i].valid = true;
             router->route_count++;
 
             char hex_id[65];
             cyxwiz_node_id_to_hex(destination, hex_id);
-            CYXWIZ_INFO("Added route to %.16s... (%d hops)", hex_id, hop_count);
+            CYXWIZ_INFO("Added route to %.16s... (%d hops, rep %u)",
+                        hex_id, hop_count, new_reputation);
 
             return CYXWIZ_OK;
         }
