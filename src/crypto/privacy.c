@@ -379,8 +379,9 @@ static cyxwiz_error_t commit_bit(
 }
 
 /*
- * Compute aggregate challenge for range proof
+ * Compute aggregate challenge for range proof (for future use)
  */
+CYXWIZ_MAYBE_UNUSED
 static cyxwiz_error_t compute_range_challenge(
     const uint8_t *value_commitment,
     const uint8_t *bit_commitments,
@@ -1218,13 +1219,11 @@ static cyxwiz_error_t handle_cred_issue_resp(
 #else
     /* Find our pending request matching this nonce */
     cyxwiz_pending_cred_req_t *pending = NULL;
-    int pending_idx = -1;
     for (size_t i = 0; i < CYXWIZ_MAX_PENDING_CRED_REQS; i++) {
         if (ctx->pending_cred_reqs[i].active &&
             memcmp(ctx->pending_cred_reqs[i].nonce, msg->nonce,
                    CYXWIZ_CRED_NONCE_SIZE) == 0) {
             pending = &ctx->pending_cred_reqs[i];
-            pending_idx = (int)i;
             break;
         }
     }
