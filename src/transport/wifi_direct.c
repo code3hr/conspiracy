@@ -10,6 +10,11 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+/* Disable GCC stringop-truncation warning - strncpy truncation is intentional */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
+#endif
+
 #include "cyxwiz/transport.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
