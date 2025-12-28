@@ -166,6 +166,50 @@ cyxwiz_error_t cyxwiz_onion_poll(
     return CYXWIZ_OK;
 }
 
+cyxwiz_error_t cyxwiz_onion_refresh_keypair(cyxwiz_onion_ctx_t *ctx)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Securely zero old secret key before generating new one */
+    cyxwiz_secure_zero(ctx->secret_key, sizeof(ctx->secret_key));
+
+    /* Generate new X25519 keypair */
+    crypto_box_keypair(ctx->public_key, ctx->secret_key);
+
+    /* Clear all peer shared secrets (they were computed with old keypair) */
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+        if (ctx->peer_keys[i].valid) {
+            cyxwiz_secure_zero(ctx->peer_keys[i].shared_secret,
+                              sizeof(ctx->peer_keys[i].shared_secret));
+            ctx->peer_keys[i].valid = false;
+        }
+    }
+    ctx->peer_key_count = 0;
+
+    /* Invalidate all active circuits (keys derived from old shared secrets) */
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        if (ctx->circuits[i].active) {
+            cyxwiz_secure_zero(ctx->circuits[i].keys,
+                              sizeof(ctx->circuits[i].keys));
+            cyxwiz_secure_zero(ctx->circuits[i].ephemeral_pubs,
+                              sizeof(ctx->circuits[i].ephemeral_pubs));
+            ctx->circuits[i].active = false;
+        }
+    }
+    ctx->circuit_count = 0;
+
+    CYXWIZ_INFO("Refreshed X25519 keypair - all peer keys and circuits cleared");
+
+    return CYXWIZ_OK;
+#endif
+}
+
 /* ============ Key Management ============ */
 
 cyxwiz_error_t cyxwiz_onion_get_pubkey(

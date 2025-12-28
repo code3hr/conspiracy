@@ -109,6 +109,18 @@ uint8_t cyxwiz_crypto_get_threshold(const cyxwiz_crypto_ctx_t *ctx);
 uint8_t cyxwiz_crypto_get_num_parties(const cyxwiz_crypto_ctx_t *ctx);
 uint8_t cyxwiz_crypto_get_party_id(const cyxwiz_crypto_ctx_t *ctx);
 
+/*
+ * Refresh the MAC key for forward secrecy
+ *
+ * Generates a new random MAC key. Should be called periodically
+ * (e.g., every hour) to limit exposure if key is compromised.
+ * Existing shares created with the old key will no longer verify.
+ *
+ * @param ctx           Crypto context
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_crypto_refresh_key(cyxwiz_crypto_ctx_t *ctx);
+
 /* ============ Secret Sharing ============ */
 
 /*

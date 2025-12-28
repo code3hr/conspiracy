@@ -58,6 +58,12 @@
 static volatile bool g_running = true;
 static bool g_batch_mode = false;
 
+/* Key refresh interval: 1 hour (in milliseconds) */
+#define CYXWIZ_KEY_REFRESH_INTERVAL_MS (60 * 60 * 1000)
+
+/* Track last key refresh time */
+static uint64_t g_last_key_refresh_ms = 0;
+
 static void signal_handler(int sig)
 {
     CYXWIZ_UNUSED(sig);
@@ -1328,6 +1334,9 @@ int main(int argc, char *argv[])
     g_peer_table = peer_table;
     memcpy(&g_local_id, &local_id, sizeof(local_id));
 
+    /* Initialize key refresh tracking */
+    g_last_key_refresh_ms = cyxwiz_time_ms();
+
     if (g_batch_mode) {
         CYXWIZ_INFO("Node running in BATCH mode. Reading commands from stdin.");
     } else {
@@ -1426,7 +1435,37 @@ int main(int argc, char *argv[])
             wifi_transport->ops->poll(wifi_transport, 50);
         }
 
-        /* TODO: MPC key refresh */
+        /* Periodic key refresh for forward secrecy */
+#ifdef CYXWIZ_HAS_CRYPTO
+        if (now - g_last_key_refresh_ms >= CYXWIZ_KEY_REFRESH_INTERVAL_MS) {
+            g_last_key_refresh_ms = now;
+
+            /* Refresh MPC MAC key */
+            if (crypto_ctx != NULL) {
+                cyxwiz_error_t refresh_err = cyxwiz_crypto_refresh_key(crypto_ctx);
+                if (refresh_err != CYXWIZ_OK) {
+                    CYXWIZ_WARN("Failed to refresh MPC key: %s", cyxwiz_strerror(refresh_err));
+                }
+            }
+
+            /* Refresh onion X25519 keypair */
+            if (g_onion != NULL) {
+                cyxwiz_error_t refresh_err = cyxwiz_onion_refresh_keypair(g_onion);
+                if (refresh_err != CYXWIZ_OK) {
+                    CYXWIZ_WARN("Failed to refresh onion keypair: %s", cyxwiz_strerror(refresh_err));
+                } else {
+                    /* Re-announce our new public key */
+                    if (g_discovery != NULL) {
+                        uint8_t pubkey[CYXWIZ_PUBKEY_SIZE];
+                        if (cyxwiz_onion_get_pubkey(g_onion, pubkey) == CYXWIZ_OK) {
+                            cyxwiz_discovery_set_pubkey(g_discovery, pubkey);
+                            CYXWIZ_INFO("Key refresh complete - new public key will be announced");
+                        }
+                    }
+                }
+            }
+        }
+#endif
 
         sleep_ms(100);
     }

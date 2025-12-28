@@ -139,6 +139,30 @@ uint8_t cyxwiz_crypto_get_party_id(const cyxwiz_crypto_ctx_t *ctx)
 }
 
 /*
+ * Refresh the MAC key for forward secrecy
+ */
+cyxwiz_error_t cyxwiz_crypto_refresh_key(cyxwiz_crypto_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (!ctx->initialized) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Securely zero old key before generating new one */
+    cyxwiz_secure_zero(ctx->mac_key, CYXWIZ_MAC_KEY_SIZE);
+
+    /* Generate new random MAC key */
+    cyxwiz_crypto_random(ctx->mac_key, CYXWIZ_MAC_KEY_SIZE);
+
+    CYXWIZ_INFO("Refreshed MPC MAC key");
+
+    return CYXWIZ_OK;
+}
+
+/*
  * Verify a share's MAC
  */
 cyxwiz_error_t cyxwiz_crypto_verify_share(

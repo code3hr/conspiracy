@@ -147,6 +147,21 @@ cyxwiz_error_t cyxwiz_onion_create(
 void cyxwiz_onion_destroy(cyxwiz_onion_ctx_t *ctx);
 
 /*
+ * Refresh X25519 keypair for forward secrecy
+ *
+ * Generates a new keypair and clears all existing peer shared secrets.
+ * Should be called periodically (e.g., every hour) to limit exposure
+ * if the private key is compromised. Existing circuits will be invalidated.
+ *
+ * After calling this, you must re-announce your public key and peers
+ * must re-compute shared secrets.
+ *
+ * @param ctx           Onion context
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_refresh_keypair(cyxwiz_onion_ctx_t *ctx);
+
+/*
  * Set delivery callback for received onion data
  */
 void cyxwiz_onion_set_callback(
