@@ -170,6 +170,13 @@ typedef enum {
 #define CYXWIZ_UNUSED(x) (void)(x)
 #define CYXWIZ_ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
+/* Compiler-specific unused function attribute */
+#if defined(__GNUC__) || defined(__clang__)
+#define CYXWIZ_MAYBE_UNUSED __attribute__((unused))
+#else
+#define CYXWIZ_MAYBE_UNUSED
+#endif
+
 /* Return error string */
 const char *cyxwiz_strerror(cyxwiz_error_t err);
 

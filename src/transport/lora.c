@@ -9,6 +9,11 @@
  * All packets are broadcast - addressing is done at protocol level.
  */
 
+/* Disable GCC array-bounds warning - bounds are checked dynamically */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
+
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 #endif

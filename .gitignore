@@ -1,6 +1,14 @@
 # Build output
 build/
+build-*/
 out/
+
+# Dependencies
+libsodium/
+vcpkg/
+
+# Logs
+*.log
 
 # IDE
 .vs/
