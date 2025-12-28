@@ -624,8 +624,8 @@ static int test_cred_multi_issuer(void)
         return 0;
     }
 
-    /* Note: Full issuer binding verification is TODO in implementation */
-    /* For now just test that the basic flow works */
+    /* Note: This test verifies basic credential flow.
+     * Full issuer binding verification happens during credential show. */
 
     cyxwiz_identity_destroy(&issuer_key);
     cyxwiz_identity_destroy(&other_key);
