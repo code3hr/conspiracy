@@ -72,6 +72,8 @@ static cyxwiz_error_t handle_job_reject(cyxwiz_compute_ctx_t *ctx, const cyxwiz_
                                          const uint8_t *data, size_t len);
 static cyxwiz_error_t handle_job_result(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
                                          const uint8_t *data, size_t len);
+static cyxwiz_error_t handle_job_result_chunk(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
+                                               const uint8_t *data, size_t len);
 static cyxwiz_error_t handle_job_ack(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
                                       const uint8_t *data, size_t len);
 static cyxwiz_error_t handle_job_cancel(cyxwiz_compute_ctx_t *ctx, const cyxwiz_node_id_t *from,
@@ -598,6 +600,31 @@ static cyxwiz_error_t send_job_chunk(
     return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
 }
 
+static cyxwiz_error_t send_result_chunk(
+    cyxwiz_compute_ctx_t *ctx,
+    const cyxwiz_node_id_t *to,
+    const cyxwiz_job_id_t *job_id,
+    uint8_t chunk_index,
+    const uint8_t *data,
+    size_t len)
+{
+    uint8_t buf[CYXWIZ_MAX_PACKET_SIZE];
+    cyxwiz_job_result_chunk_msg_t *msg = (cyxwiz_job_result_chunk_msg_t *)buf;
+
+    msg->type = CYXWIZ_MSG_JOB_RESULT_CHUNK;
+    memcpy(msg->job_id, job_id->bytes, CYXWIZ_JOB_ID_SIZE);
+    msg->chunk_index = chunk_index;
+    msg->chunk_len = (uint8_t)len;
+    memcpy(buf + sizeof(cyxwiz_job_result_chunk_msg_t), data, len);
+
+    size_t msg_len = sizeof(cyxwiz_job_result_chunk_msg_t) + len;
+
+    /* Pad to MTU for traffic analysis prevention */
+    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+    return cyxwiz_router_send(ctx->router, to, buf, CYXWIZ_PADDED_SIZE);
+}
+
 static cyxwiz_error_t send_job_accept(
     cyxwiz_compute_ctx_t *ctx,
     const cyxwiz_node_id_t *to,
@@ -626,34 +653,83 @@ static cyxwiz_error_t send_job_reject(
 
 static cyxwiz_error_t send_job_result(cyxwiz_compute_ctx_t *ctx, cyxwiz_job_t *job)
 {
-    /* Use SURB for anonymous jobs */
+    /* Use SURB for anonymous jobs (no chunking support for anonymous) */
     if (job->is_anonymous) {
         return send_job_result_via_surb(ctx, job);
     }
 
     uint8_t buf[CYXWIZ_MAX_PACKET_SIZE];
     cyxwiz_job_result_msg_t *msg = (cyxwiz_job_result_msg_t *)buf;
-
-    msg->type = CYXWIZ_MSG_JOB_RESULT;
-    memcpy(msg->job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
-    msg->state = (uint8_t)job->state;
-    msg->total_chunks = 0;  /* TODO: chunked results */
-    msg->result_len = (uint8_t)job->result_len;
+    cyxwiz_error_t err;
 
     /* Compute MAC over job_id || result */
     cyxwiz_compute_result_mac(ctx, &job->id, job->result, job->result_len, msg->mac);
 
-    /* Copy result */
-    if (job->result_len > 0) {
-        memcpy(buf + sizeof(cyxwiz_job_result_msg_t), job->result, job->result_len);
+    /* Check if chunking is needed */
+    if (job->result_len <= CYXWIZ_JOB_MAX_PAYLOAD) {
+        /* Single packet - include result inline */
+        msg->type = CYXWIZ_MSG_JOB_RESULT;
+        memcpy(msg->job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+        msg->state = (uint8_t)job->state;
+        msg->total_chunks = 0;
+        msg->result_len = (uint8_t)job->result_len;
+
+        if (job->result_len > 0) {
+            memcpy(buf + sizeof(cyxwiz_job_result_msg_t), job->result, job->result_len);
+        }
+
+        size_t msg_len = sizeof(cyxwiz_job_result_msg_t) + job->result_len;
+        cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+
+        return cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, CYXWIZ_PADDED_SIZE);
     }
 
-    size_t msg_len = sizeof(cyxwiz_job_result_msg_t) + job->result_len;
+    /* Chunked result - send header first, then chunks */
+    uint8_t total_chunks = (uint8_t)((job->result_len + CYXWIZ_JOB_CHUNK_SIZE - 1) / CYXWIZ_JOB_CHUNK_SIZE);
 
-    /* Pad to MTU for traffic analysis prevention */
-    cyxwiz_pad_message(buf, msg_len, CYXWIZ_PADDED_SIZE);
+    if (total_chunks > CYXWIZ_JOB_MAX_CHUNKS) {
+        CYXWIZ_ERROR("Result too large: %zu bytes exceeds max %d bytes",
+                     job->result_len, CYXWIZ_JOB_MAX_CHUNKS * CYXWIZ_JOB_CHUNK_SIZE);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
 
-    return cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, CYXWIZ_PADDED_SIZE);
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job->id, hex_id);
+    CYXWIZ_DEBUG("Sending chunked result for job %s: %zu bytes in %d chunks",
+                 hex_id, job->result_len, total_chunks);
+
+    /* Send header (no inline result for chunked mode) */
+    msg->type = CYXWIZ_MSG_JOB_RESULT;
+    memcpy(msg->job_id, job->id.bytes, CYXWIZ_JOB_ID_SIZE);
+    msg->state = (uint8_t)job->state;
+    msg->total_chunks = total_chunks;
+    msg->result_len = (uint8_t)(job->result_len & 0xFF);  /* Low byte for reference */
+
+    cyxwiz_pad_message(buf, sizeof(cyxwiz_job_result_msg_t), CYXWIZ_PADDED_SIZE);
+    err = cyxwiz_router_send(ctx->router, &job->submitter.direct_id, buf, CYXWIZ_PADDED_SIZE);
+    if (err != CYXWIZ_OK) {
+        return err;
+    }
+
+    /* Send result chunks */
+    for (uint8_t i = 0; i < total_chunks; i++) {
+        size_t offset = i * CYXWIZ_JOB_CHUNK_SIZE;
+        size_t chunk_len = job->result_len - offset;
+        if (chunk_len > CYXWIZ_JOB_CHUNK_SIZE) {
+            chunk_len = CYXWIZ_JOB_CHUNK_SIZE;
+        }
+
+        err = send_result_chunk(ctx, &job->submitter.direct_id, &job->id, i,
+                                job->result + offset, chunk_len);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("Failed to send result chunk %d/%d for job %s",
+                         i + 1, total_chunks, hex_id);
+            return err;
+        }
+    }
+
+    CYXWIZ_DEBUG("Sent all %d result chunks for job %s", total_chunks, hex_id);
+    return CYXWIZ_OK;
 }
 
 static cyxwiz_error_t send_job_ack(
@@ -746,6 +822,8 @@ cyxwiz_error_t cyxwiz_compute_handle_message(
             return handle_job_reject(ctx, from, data, len);
         case CYXWIZ_MSG_JOB_RESULT:
             return handle_job_result(ctx, from, data, len);
+        case CYXWIZ_MSG_JOB_RESULT_CHUNK:
+            return handle_job_result_chunk(ctx, from, data, len);
         case CYXWIZ_MSG_JOB_ACK:
             return handle_job_ack(ctx, from, data, len);
         case CYXWIZ_MSG_JOB_CANCEL:
@@ -1071,7 +1149,31 @@ static cyxwiz_error_t handle_job_result(
     char hex_id[17];
     cyxwiz_job_id_to_hex(&job_id, hex_id);
 
-    /* Copy result */
+    /* Store the MAC for later verification */
+    memcpy(job->result_mac, msg->mac, CYXWIZ_MAC_SIZE);
+    job->state = (cyxwiz_job_state_t)msg->state;
+
+    /* Check if this is a chunked result */
+    if (msg->total_chunks > 0) {
+        /* Chunked result - set up tracking and wait for chunks */
+        if (msg->total_chunks > CYXWIZ_JOB_MAX_CHUNKS) {
+            CYXWIZ_ERROR("Job %s has too many result chunks: %d", hex_id, msg->total_chunks);
+            return CYXWIZ_ERR_INVALID;
+        }
+
+        job->result_total_chunks = msg->total_chunks;
+        job->result_received_chunks = 0;
+        job->result_chunk_bitmap = 0;
+        job->result_len = 0;  /* Will be computed from chunks */
+
+        CYXWIZ_DEBUG("Received chunked result header for job %s: expecting %d chunks",
+                     hex_id, msg->total_chunks);
+
+        /* Don't send ACK or notify yet - wait for all chunks */
+        return CYXWIZ_OK;
+    }
+
+    /* Single-packet result - process inline */
     size_t result_len = len - sizeof(cyxwiz_job_result_msg_t);
     if (result_len > msg->result_len) {
         result_len = msg->result_len;
@@ -1084,13 +1186,11 @@ static cyxwiz_error_t handle_job_result(
         memcpy(job->result, data + sizeof(cyxwiz_job_result_msg_t), result_len);
     }
     job->result_len = result_len;
-    memcpy(job->result_mac, msg->mac, CYXWIZ_MAC_SIZE);
 
     /* Verify MAC */
     job->mac_valid = (cyxwiz_compute_verify_result(ctx, &job->id,
                       job->result, job->result_len, job->result_mac) == CYXWIZ_OK);
 
-    job->state = (cyxwiz_job_state_t)msg->state;
     job->completed_at = cyxwiz_time_ms();
 
     CYXWIZ_INFO("Received result for job %s (state=%d, len=%zu, mac_valid=%d)",
@@ -1103,6 +1203,100 @@ static cyxwiz_error_t handle_job_result(
     if (ctx->on_complete != NULL) {
         ctx->on_complete(ctx, job, job->result, job->result_len,
                         job->mac_valid, ctx->complete_user_data);
+    }
+
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_job_result_chunk(
+    cyxwiz_compute_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    if (len < sizeof(cyxwiz_job_result_chunk_msg_t)) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    const cyxwiz_job_result_chunk_msg_t *msg = (const cyxwiz_job_result_chunk_msg_t *)data;
+    cyxwiz_job_id_t job_id;
+    memcpy(job_id.bytes, msg->job_id, CYXWIZ_JOB_ID_SIZE);
+
+    cyxwiz_job_t *job = find_job(ctx, &job_id);
+    if (job == NULL) {
+        return CYXWIZ_ERR_JOB_NOT_FOUND;
+    }
+
+    if (!job->is_submitter) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Validate we're expecting chunked results */
+    if (job->result_total_chunks == 0) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Validate chunk index */
+    if (msg->chunk_index >= job->result_total_chunks) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if already received */
+    if (job->result_chunk_bitmap & (1 << msg->chunk_index)) {
+        return CYXWIZ_OK;  /* Duplicate, ignore */
+    }
+
+    /* Copy chunk data */
+    size_t chunk_data_len = len - sizeof(cyxwiz_job_result_chunk_msg_t);
+    if (chunk_data_len > msg->chunk_len) {
+        chunk_data_len = msg->chunk_len;
+    }
+
+    size_t offset = msg->chunk_index * CYXWIZ_JOB_CHUNK_SIZE;
+    if (offset + chunk_data_len > CYXWIZ_JOB_MAX_TOTAL_PAYLOAD) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    memcpy(job->result + offset, data + sizeof(cyxwiz_job_result_chunk_msg_t), chunk_data_len);
+
+    /* Mark received */
+    job->result_chunk_bitmap |= (1 << msg->chunk_index);
+    job->result_received_chunks++;
+
+    /* Track total result length */
+    size_t chunk_end = offset + chunk_data_len;
+    if (chunk_end > job->result_len) {
+        job->result_len = chunk_end;
+    }
+
+    char hex_id[17];
+    cyxwiz_job_id_to_hex(&job_id, hex_id);
+    CYXWIZ_DEBUG("Received result chunk %d/%d for job %s",
+                 msg->chunk_index + 1, job->result_total_chunks, hex_id);
+
+    /* Check if complete */
+    if (job->result_received_chunks == job->result_total_chunks) {
+        CYXWIZ_DEBUG("All result chunks received for job %s", hex_id);
+
+        /* Verify MAC over complete result */
+        job->mac_valid = (cyxwiz_compute_verify_result(ctx, &job->id,
+                          job->result, job->result_len, job->result_mac) == CYXWIZ_OK);
+
+        job->completed_at = cyxwiz_time_ms();
+
+        CYXWIZ_INFO("Received chunked result for job %s (state=%d, len=%zu, mac_valid=%d)",
+                    hex_id, job->state, job->result_len, job->mac_valid);
+
+        /* Send acknowledgment */
+        send_job_ack(ctx, &job->worker, &job->id);
+
+        /* Notify submitter */
+        if (ctx->on_complete != NULL) {
+            ctx->on_complete(ctx, job, job->result, job->result_len,
+                            job->mac_valid, ctx->complete_user_data);
+        }
     }
 
     return CYXWIZ_OK;

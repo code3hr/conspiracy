@@ -96,10 +96,13 @@ typedef struct {
     uint8_t received_chunks;            /* Chunks received so far */
     uint16_t chunk_bitmap;              /* Which chunks received (bitmask) */
 
-    /* Result */
-    uint8_t result[CYXWIZ_JOB_MAX_PAYLOAD];
+    /* Result (assembled from chunks if needed) */
+    uint8_t result[CYXWIZ_JOB_MAX_TOTAL_PAYLOAD];
     size_t result_len;
     uint8_t result_mac[CYXWIZ_MAC_SIZE]; /* MAC for result verification */
+    uint8_t result_total_chunks;         /* Number of result chunks (0 = single packet) */
+    uint8_t result_received_chunks;      /* Result chunks received so far */
+    uint16_t result_chunk_bitmap;        /* Which result chunks received (bitmask) */
 
     /* Timing */
     uint64_t submitted_at;
@@ -281,8 +284,9 @@ typedef void (*cyxwiz_job_complete_cb_t)(
  *
  * @param ctx           Compute context
  * @param job           Job to execute
- * @param result_out    Buffer to write result (CYXWIZ_JOB_MAX_PAYLOAD bytes)
- * @param result_len    Output: length of result written
+ * @param result_out    Buffer to write result (CYXWIZ_JOB_MAX_TOTAL_PAYLOAD bytes)
+ *                      Results > 64 bytes will be sent in chunks automatically.
+ * @param result_len    Output: length of result written (max 768 bytes)
  * @param user_data     User-provided context
  * @return              CYXWIZ_OK on success, error code on failure
  */
