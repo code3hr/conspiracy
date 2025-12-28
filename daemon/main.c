@@ -64,6 +64,9 @@ static bool g_batch_mode = false;
 /* Track last key refresh time */
 static uint64_t g_last_key_refresh_ms = 0;
 
+/* MPC party ID (for status display) */
+static uint8_t g_party_id = 1;
+
 static void signal_handler(int sig)
 {
     CYXWIZ_UNUSED(sig);
@@ -444,6 +447,7 @@ static void cmd_status(void)
 
 #ifdef CYXWIZ_HAS_CRYPTO
     printf("  Onion:       %s\n", g_onion != NULL ? "enabled" : "disabled");
+    printf("  MPC Party:   %u of %u\n", g_party_id, CYXWIZ_DEFAULT_PARTIES);
 #endif
 
     printf("  ───────────────────────────────────────────────\n");
@@ -1135,12 +1139,24 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Create crypto context (3-of-5 MPC, party 1) */
+    /* Get party ID from environment (default: 1) */
+    const char *party_id_env = getenv("CYXWIZ_PARTY_ID");
+    if (party_id_env != NULL && strlen(party_id_env) > 0) {
+        int parsed = atoi(party_id_env);
+        if (parsed >= 1 && parsed <= CYXWIZ_MAX_PARTIES) {
+            g_party_id = (uint8_t)parsed;
+        } else {
+            CYXWIZ_WARN("Invalid CYXWIZ_PARTY_ID '%s' (must be 1-%d), using 1",
+                        party_id_env, CYXWIZ_MAX_PARTIES);
+        }
+    }
+
+    /* Create crypto context (3-of-5 MPC) */
     cyxwiz_crypto_ctx_t *crypto_ctx = NULL;
     err = cyxwiz_crypto_create(&crypto_ctx,
                                CYXWIZ_DEFAULT_THRESHOLD,
                                CYXWIZ_DEFAULT_PARTIES,
-                               1);  /* TODO: Get party ID from config */
+                               g_party_id);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to create crypto context: %s", cyxwiz_strerror(err));
         return 1;
