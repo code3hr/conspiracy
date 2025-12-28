@@ -385,6 +385,23 @@ cyxwiz_disc_pong_t;
 #pragma pack(pop)
 #endif
 
+/*
+ * Goodbye message (graceful disconnect)
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                    /* CYXWIZ_DISC_GOODBYE */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_disc_goodbye_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
 /* ============ Utility ============ */
 
 /*

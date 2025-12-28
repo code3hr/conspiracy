@@ -322,6 +322,51 @@ static cyxwiz_error_t send_announce_ack(
 }
 
 /*
+ * Send goodbye message to a peer
+ */
+static cyxwiz_error_t send_goodbye(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_node_id_t *peer_id)
+{
+    cyxwiz_disc_goodbye_t msg;
+    msg.type = CYXWIZ_DISC_GOODBYE;
+
+    return discovery->transport->ops->send(
+        discovery->transport,
+        peer_id,
+        (uint8_t *)&msg,
+        sizeof(msg)
+    );
+}
+
+/*
+ * Callback context for sending goodbye to all peers
+ */
+typedef struct {
+    cyxwiz_discovery_t *discovery;
+    size_t sent_count;
+} goodbye_ctx_t;
+
+/*
+ * Iterator callback to send goodbye to each connected peer
+ */
+static int send_goodbye_iter(const cyxwiz_peer_t *peer, void *user_data)
+{
+    goodbye_ctx_t *ctx = (goodbye_ctx_t *)user_data;
+
+    /* Only send to connected peers */
+    if (peer->state == CYXWIZ_PEER_STATE_CONNECTED ||
+        peer->state == CYXWIZ_PEER_STATE_DISCOVERED) {
+
+        if (send_goodbye(ctx->discovery, &peer->id) == CYXWIZ_OK) {
+            ctx->sent_count++;
+        }
+    }
+
+    return 0; /* Continue iteration */
+}
+
+/*
  * Handle v1 announcement (no identity proof)
  */
 static cyxwiz_error_t handle_announce_v1(
@@ -604,7 +649,15 @@ cyxwiz_error_t cyxwiz_discovery_stop(cyxwiz_discovery_t *discovery)
     }
 
     /* Send goodbye to all connected peers */
-    /* TODO: Implement goodbye message */
+    goodbye_ctx_t ctx = {
+        .discovery = discovery,
+        .sent_count = 0
+    };
+    cyxwiz_peer_table_iterate(discovery->peer_table, send_goodbye_iter, &ctx);
+
+    if (ctx.sent_count > 0) {
+        CYXWIZ_INFO("Sent goodbye to %zu peers", ctx.sent_count);
+    }
 
     discovery->transport->ops->stop_discover(discovery->transport);
     discovery->running = false;
@@ -687,10 +740,16 @@ cyxwiz_error_t cyxwiz_discovery_handle_message(
             }
             break;
 
-        case CYXWIZ_DISC_GOODBYE:
+        case CYXWIZ_DISC_GOODBYE: {
+            /* Peer is leaving gracefully */
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(from, hex_id);
+            CYXWIZ_INFO("Received goodbye from peer %.16s...", hex_id);
+
             /* Remove peer from table */
             cyxwiz_peer_table_remove(discovery->peer_table, from);
             break;
+        }
 
         default:
             CYXWIZ_WARN("Unknown discovery message type: 0x%02x", msg_type);
