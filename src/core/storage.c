@@ -3053,7 +3053,7 @@ static cyxwiz_error_t handle_pos_proof(
 
         if (ctx->on_pos_result != NULL) {
             ctx->on_pos_result(ctx, &storage_id, from, true,
-                               (cyxwiz_pos_fail_reason_t)0, ctx->pos_result_user_data);
+                               CYXWIZ_POS_FAIL_NONE, ctx->pos_result_user_data);
         }
     } else {
         CYXWIZ_WARN("PoS proof FAILED for %s block %u", id_hex, msg->block_index);
@@ -3505,7 +3505,7 @@ cyxwiz_error_t cyxwiz_pos_verify_proof(
                                     commitment->merkle_root);
 
     if (*valid_out && reason_out != NULL) {
-        *reason_out = (cyxwiz_pos_fail_reason_t)0;
+        *reason_out = CYXWIZ_POS_FAIL_NONE;
     }
 
     return CYXWIZ_OK;

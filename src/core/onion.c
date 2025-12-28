@@ -313,7 +313,7 @@ cyxwiz_error_t cyxwiz_onion_derive_hop_key(
 
     /* Context: "cyxwiz_onion_v1" || sender_id || receiver_id */
     uint8_t context[15 + 32 + 32];
-    memcpy(context, "cyxwiz_onion_v1", 15);
+    memcpy(context, "cyxwiz_onion_v1", 15);  /* NOLINT(bugprone-not-null-terminated-result) */
     memcpy(context + 15, sender->bytes, 32);
     memcpy(context + 47, receiver->bytes, 32);
 
@@ -427,7 +427,7 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
         /* Derive hop key from ephemeral shared secret */
         /* Use a simple context for key derivation */
         uint8_t context[32];
-        memcpy(context, "cyxwiz_eph_layer", 16);
+        memcpy(context, "cyxwiz_eph_layer", 16);  /* NOLINT(bugprone-not-null-terminated-result) */
         memcpy(context + 16, circuit->ephemeral_pubs[i], 16);
 
         cyxwiz_error_t err = cyxwiz_crypto_derive_key(
@@ -844,7 +844,7 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
     /* Derive hop key from ephemeral shared secret */
     uint8_t hop_key[CYXWIZ_KEY_SIZE];
     uint8_t context[32];
-    memcpy(context, "cyxwiz_eph_layer", 16);
+    memcpy(context, "cyxwiz_eph_layer", 16);  /* NOLINT(bugprone-not-null-terminated-result) */
     memcpy(context + 16, ephemeral_pub, 16);
 
     cyxwiz_error_t err = cyxwiz_crypto_derive_key(

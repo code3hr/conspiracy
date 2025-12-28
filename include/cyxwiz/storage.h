@@ -80,6 +80,7 @@ typedef enum {
 
 /* PoS verification failure reasons */
 typedef enum {
+    CYXWIZ_POS_FAIL_NONE = 0x00,           /* No failure (success) */
     CYXWIZ_POS_FAIL_INVALID_ROOT = 0x01,   /* Merkle root mismatch */
     CYXWIZ_POS_FAIL_INVALID_BLOCK = 0x02,  /* Block hash mismatch */
     CYXWIZ_POS_FAIL_INVALID_PATH = 0x03,   /* Merkle path invalid */

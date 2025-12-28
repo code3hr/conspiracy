@@ -350,8 +350,8 @@ static serial_handle_t serial_open(const char *port, int baud)
         case 19200:  speed = B19200;  break;
         case 38400:  speed = B38400;  break;
         case 57600:  speed = B57600;  break;
-        case 115200: speed = B115200; break;
-        default:     speed = B115200; break;
+        case 115200: /* FALLTHROUGH */
+        default:     speed = B115200; break;  /* Default to 115200 for unknown baud rates */
     }
 
     cfsetispeed(&tty, speed);
@@ -694,7 +694,7 @@ static int sx127x_receive(lora_state_t *state, uint8_t *buf, size_t max_len)
 
     /* Get packet RSSI and SNR */
     state->last_rssi = (int8_t)(sx127x_read_reg(fd, SX127X_REG_PKT_RSSI) - 157);
-    state->last_snr = (int8_t)sx127x_read_reg(fd, SX127X_REG_PKT_SNR) / 4;
+    state->last_snr = (int8_t)((int8_t)sx127x_read_reg(fd, SX127X_REG_PKT_SNR) / 4);
 
     /* Set FIFO address to start of packet */
     sx127x_write_reg(fd, SX127X_REG_FIFO_ADDR_PTR,
@@ -843,6 +843,7 @@ static bool rylr_transmit(lora_state_t *state, const uint8_t *data, size_t len)
 
     /* Convert to hex for binary safety */
     for (size_t i = 0; i < len && offset < (int)sizeof(cmd) - 3; i++) {
+        /* NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage) - data is a valid const parameter */
         offset += snprintf(cmd + offset, sizeof(cmd) - (size_t)offset, "%02X", data[i]);
     }
 
@@ -1183,8 +1184,8 @@ static bool transmit_with_csma(lora_state_t *state, const uint8_t *data, size_t 
             }
         }
 
-        /* Random backoff */
-        int slots = (rand() % (1 << attempts)) + 1;
+        /* Random backoff (non-cryptographic, just for timing jitter) */
+        int slots = (rand() % (1 << attempts)) + 1;  /* NOLINT(cert-msc30-c,cert-msc50-cpp) */
         if (slots > LORA_MAX_BACKOFF_SLOTS) {
             slots = LORA_MAX_BACKOFF_SLOTS;
         }
@@ -1226,8 +1227,8 @@ static void send_announce_ack(cyxwiz_transport_t *transport, const cyxwiz_node_i
     memcpy(&ack.node_id, &transport->local_id, sizeof(cyxwiz_node_id_t));
     memcpy(&ack.to_node_id, to, sizeof(cyxwiz_node_id_t));
 
-    /* Small delay to avoid collision with other ACKs */
-    int delay = (rand() % 5 + 1) * LORA_SLOT_TIME_MS;
+    /* Small delay to avoid collision with other ACKs (non-cryptographic) */
+    int delay = (rand() % 5 + 1) * LORA_SLOT_TIME_MS;  /* NOLINT(cert-msc30-c,cert-msc50-cpp) */
 #ifdef _WIN32
     Sleep((DWORD)delay);
 #else

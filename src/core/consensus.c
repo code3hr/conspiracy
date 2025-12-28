@@ -162,7 +162,7 @@ static int popcount32(uint32_t x)
 {
     int count = 0;
     while (x) {
-        count += x & 1;
+        count += (int)(x & 1);
         x >>= 1;
     }
     return count;
