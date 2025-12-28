@@ -114,6 +114,9 @@ if(CYXWIZ_TRANSPORT_BLUETOOTH)
         list(APPEND CYXWIZ_SOURCES src/transport/bluetooth_win.cpp)
         # Link Windows Bluetooth libraries
         list(APPEND CYXWIZ_PLATFORM_LIBS bthprops ws2_32)
+    elseif(UNIX AND NOT APPLE)
+        # Link BlueZ on Linux
+        list(APPEND CYXWIZ_PLATFORM_LIBS bluetooth)
     endif()
 endif()
 
