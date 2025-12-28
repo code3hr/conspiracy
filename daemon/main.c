@@ -81,6 +81,9 @@ static cyxwiz_storage_ctx_t *g_storage = NULL;
 static cyxwiz_consensus_ctx_t *g_consensus = NULL;
 static cyxwiz_identity_keypair_t g_identity;
 #endif
+#ifdef CYXWIZ_HAS_PRIVACY
+static cyxwiz_privacy_ctx_t *g_privacy = NULL;
+#endif
 
 static void on_peer_discovered(
     cyxwiz_transport_t *transport,
@@ -160,10 +163,17 @@ static void on_data_received(
             cyxwiz_consensus_handle_message(g_consensus, from, data, len);
         }
     } else if (msg_type >= 0x70 && msg_type <= 0x7F) {
-        /* Privacy messages (ANON_VOTE, CRED_SHOW, etc.) */
-        if (g_consensus != NULL) {
+        /* Privacy messages (PEDERSEN, CRED, TOKEN, etc.) */
+#ifdef CYXWIZ_HAS_PRIVACY
+        if (g_privacy != NULL) {
+            cyxwiz_privacy_handle_message(g_privacy, from, data, len);
+        }
+#elif defined(CYXWIZ_HAS_CONSENSUS)
+        /* Fallback: forward ANON_VOTE to consensus if no privacy context */
+        if (g_consensus != NULL && msg_type == CYXWIZ_MSG_ANON_VOTE) {
             cyxwiz_consensus_handle_message(g_consensus, from, data, len);
         }
+#endif
 #endif
     } else {
         CYXWIZ_DEBUG("Unknown message type: 0x%02X", msg_type);
@@ -204,9 +214,19 @@ static void on_routed_data(
 
 #ifdef CYXWIZ_HAS_CONSENSUS
     /* Dispatch consensus messages received via routing */
-    if (len > 0 && data[0] >= 0x60 && data[0] <= 0x7F) {
+    if (len > 0 && data[0] >= 0x60 && data[0] <= 0x6F) {
         if (g_consensus != NULL) {
             cyxwiz_consensus_handle_message(g_consensus, from, data, len);
+        }
+        return;
+    }
+#endif
+
+#ifdef CYXWIZ_HAS_PRIVACY
+    /* Dispatch privacy messages received via routing */
+    if (len > 0 && data[0] >= 0x70 && data[0] <= 0x7F) {
+        if (g_privacy != NULL) {
+            cyxwiz_privacy_handle_message(g_privacy, from, data, len);
         }
         return;
     }
@@ -1278,9 +1298,6 @@ int main(int argc, char *argv[])
             if (err != CYXWIZ_OK) {
                 CYXWIZ_ERROR("Failed to create consensus context: %s", cyxwiz_strerror(err));
             } else {
-                /* Initialize Pedersen parameters for privacy protocol */
-                cyxwiz_pedersen_init();
-
                 /* Register as validator */
                 err = cyxwiz_consensus_register_validator(g_consensus);
                 if (err == CYXWIZ_OK) {
@@ -1288,6 +1305,20 @@ int main(int argc, char *argv[])
                 } else {
                     CYXWIZ_WARN("Validator registration pending: %s", cyxwiz_strerror(err));
                 }
+            }
+#endif
+
+#ifdef CYXWIZ_HAS_PRIVACY
+            /* Create privacy context */
+            err = cyxwiz_privacy_create(&g_privacy, g_router, &g_identity, &local_id);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to create privacy context: %s", cyxwiz_strerror(err));
+            } else {
+                /* Link privacy to consensus for anonymous vote forwarding */
+#ifdef CYXWIZ_HAS_CONSENSUS
+                cyxwiz_privacy_set_consensus(g_privacy, g_consensus);
+#endif
+                CYXWIZ_INFO("Privacy protocol enabled");
             }
 #endif
         }
@@ -1380,6 +1411,13 @@ int main(int argc, char *argv[])
         }
 #endif
 
+#ifdef CYXWIZ_HAS_PRIVACY
+        /* Poll privacy context (handles commitment expiry) */
+        if (g_privacy != NULL) {
+            cyxwiz_privacy_poll(g_privacy, now);
+        }
+#endif
+
         /* Poll all transports */
         if (udp_transport != NULL) {
             udp_transport->ops->poll(udp_transport, 50);
@@ -1395,6 +1433,14 @@ int main(int argc, char *argv[])
 
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
+
+#ifdef CYXWIZ_HAS_PRIVACY
+    /* Destroy privacy context (before consensus since it may reference it) */
+    if (g_privacy != NULL) {
+        cyxwiz_privacy_destroy(g_privacy);
+        g_privacy = NULL;
+    }
+#endif
 
 #ifdef CYXWIZ_HAS_CONSENSUS
     /* Destroy consensus context */

@@ -698,6 +698,267 @@ cyxwiz_error_t cyxwiz_reputation_proof_verify(
     uint64_t current_time_ms);
 
 /* ============================================================================
+ * Privacy Context
+ * ============================================================================ */
+
+/* Forward declarations */
+typedef struct cyxwiz_router cyxwiz_router_t;
+typedef struct cyxwiz_consensus_ctx cyxwiz_consensus_ctx_t;
+
+/* Privacy context limits */
+#define CYXWIZ_MAX_PENDING_COMMITS 32    /* Pending commitment announcements */
+#define CYXWIZ_MAX_STORED_CREDS 16       /* Locally stored credentials */
+#define CYXWIZ_MAX_SERVICE_TOKENS 32     /* Active service tokens */
+#define CYXWIZ_COMMIT_EXPIRE_MS 60000    /* Commitment expires after 60s */
+#define CYXWIZ_MAX_PENDING_CRED_REQS 8   /* Pending credential requests */
+
+/* Opaque privacy context */
+typedef struct cyxwiz_privacy_ctx cyxwiz_privacy_ctx_t;
+
+/* Stored commitment (pending reveal) */
+typedef struct {
+    uint8_t commit_id[CYXWIZ_COMMIT_ID_SIZE];
+    cyxwiz_pedersen_commitment_t commitment;
+    cyxwiz_node_id_t from;
+    uint8_t context[CYXWIZ_CRED_CONTEXT_SIZE];
+    uint64_t received_at;
+    bool active;
+} cyxwiz_pending_commit_t;
+
+/* Pending credential request (awaiting issuer response) */
+typedef struct {
+    uint8_t nonce[CYXWIZ_CRED_NONCE_SIZE];
+    uint8_t blinding[CYXWIZ_CRED_BLINDING_SIZE];
+    cyxwiz_credential_type_t cred_type;
+    uint8_t attribute[CYXWIZ_CRED_ATTRIBUTE_SIZE];
+    size_t attr_len;
+    uint64_t requested_at;
+    bool active;
+} cyxwiz_pending_cred_req_t;
+
+/* ============================================================================
+ * Privacy Context Callbacks
+ * ============================================================================ */
+
+/*
+ * Commitment revealed callback
+ *
+ * Called when a commitment is opened (revealed).
+ *
+ * @param commit_id         Commitment identifier
+ * @param from              Node that made the commitment
+ * @param value             Revealed value (32 bytes)
+ * @param valid             true if opening verified correctly
+ * @param user_data         User context
+ */
+typedef void (*cyxwiz_commit_revealed_cb_t)(
+    const uint8_t *commit_id,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *value,
+    bool valid,
+    void *user_data);
+
+/*
+ * Credential show verified callback
+ *
+ * Called when someone presents a credential and it's verified.
+ *
+ * @param from              Node presenting credential
+ * @param cred_type         Type of credential
+ * @param valid             true if credential verified
+ * @param context           Service context from the show proof
+ * @param user_data         User context
+ */
+typedef void (*cyxwiz_cred_verified_cb_t)(
+    const cyxwiz_node_id_t *from,
+    cyxwiz_credential_type_t cred_type,
+    bool valid,
+    const uint8_t *context,
+    void *user_data);
+
+/*
+ * Service token usage callback
+ *
+ * Called when someone uses a service token for our service.
+ *
+ * @param from              Node using the token
+ * @param token_type        Type of token
+ * @param units             Units being used
+ * @param valid             true if token verified
+ * @param context           Request context
+ * @param user_data         User context
+ */
+typedef void (*cyxwiz_token_used_cb_t)(
+    const cyxwiz_node_id_t *from,
+    cyxwiz_service_token_type_t token_type,
+    uint16_t units,
+    bool valid,
+    const uint8_t *context,
+    void *user_data);
+
+/*
+ * Reputation proof verified callback
+ *
+ * Called when someone proves their reputation level.
+ *
+ * @param from              Node proving reputation
+ * @param min_credits       Minimum credits claimed
+ * @param valid             true if proof verified
+ * @param user_data         User context
+ */
+typedef void (*cyxwiz_reputation_verified_cb_t)(
+    const cyxwiz_node_id_t *from,
+    uint16_t min_credits,
+    bool valid,
+    void *user_data);
+
+/*
+ * Credential issued callback
+ *
+ * Called when we receive a credential from an issuer.
+ *
+ * @param cred              The issued credential (unblinded)
+ * @param user_data         User context
+ */
+typedef void (*cyxwiz_cred_issued_cb_t)(
+    const cyxwiz_credential_t *cred,
+    void *user_data);
+
+/* ============================================================================
+ * Privacy Context API
+ * ============================================================================ */
+
+/*
+ * Create privacy context
+ *
+ * @param ctx_out           Output context pointer
+ * @param router            Router for sending messages
+ * @param identity          Local identity keypair (for issuing credentials)
+ * @param local_id          Local node ID
+ * @return                  CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_privacy_create(
+    cyxwiz_privacy_ctx_t **ctx_out,
+    cyxwiz_router_t *router,
+    const cyxwiz_identity_keypair_t *identity,
+    const cyxwiz_node_id_t *local_id);
+
+/*
+ * Destroy privacy context
+ *
+ * @param ctx               Context to destroy
+ */
+void cyxwiz_privacy_destroy(cyxwiz_privacy_ctx_t *ctx);
+
+/*
+ * Set consensus context for anonymous vote forwarding
+ *
+ * @param ctx               Privacy context
+ * @param consensus         Consensus context (may be NULL)
+ */
+void cyxwiz_privacy_set_consensus(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_consensus_ctx_t *consensus);
+
+/*
+ * Set commitment revealed callback
+ */
+void cyxwiz_privacy_set_commit_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_commit_revealed_cb_t callback,
+    void *user_data);
+
+/*
+ * Set credential verified callback
+ */
+void cyxwiz_privacy_set_cred_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_cred_verified_cb_t callback,
+    void *user_data);
+
+/*
+ * Set token usage callback
+ */
+void cyxwiz_privacy_set_token_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_token_used_cb_t callback,
+    void *user_data);
+
+/*
+ * Set reputation verified callback
+ */
+void cyxwiz_privacy_set_reputation_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_reputation_verified_cb_t callback,
+    void *user_data);
+
+/*
+ * Set credential issued callback
+ */
+void cyxwiz_privacy_set_cred_issued_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_cred_issued_cb_t callback,
+    void *user_data);
+
+/*
+ * Poll privacy context (expire old commitments, etc.)
+ *
+ * @param ctx               Privacy context
+ * @param now_ms            Current time in milliseconds
+ */
+void cyxwiz_privacy_poll(cyxwiz_privacy_ctx_t *ctx, uint64_t now_ms);
+
+/*
+ * Store a credential locally
+ *
+ * @param ctx               Privacy context
+ * @param credential        Credential to store
+ * @return                  CYXWIZ_OK on success
+ *                          CYXWIZ_ERR_QUEUE_FULL if storage full
+ */
+cyxwiz_error_t cyxwiz_privacy_store_credential(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_credential_t *credential);
+
+/*
+ * Get stored credential by type
+ *
+ * @param ctx               Privacy context
+ * @param cred_type         Type of credential to find
+ * @param cred_out          Output credential (if found)
+ * @return                  CYXWIZ_OK if found
+ *                          CYXWIZ_ERR_CREDENTIAL_INVALID if not found
+ */
+cyxwiz_error_t cyxwiz_privacy_get_credential(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_credential_type_t cred_type,
+    cyxwiz_credential_t *cred_out);
+
+/*
+ * Store a service token locally
+ *
+ * @param ctx               Privacy context
+ * @param token             Token to store
+ * @return                  CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_privacy_store_token(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_service_token_t *token);
+
+/*
+ * Get service token by type
+ *
+ * @param ctx               Privacy context
+ * @param token_type        Type of token to find
+ * @param token_out         Output token (if found)
+ * @return                  CYXWIZ_OK if found
+ */
+cyxwiz_error_t cyxwiz_privacy_get_token(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_service_token_type_t token_type,
+    cyxwiz_service_token_t *token_out);
+
+/* ============================================================================
  * Anonymous Voting API
  * ============================================================================ */
 
@@ -745,6 +1006,15 @@ cyxwiz_error_t cyxwiz_privacy_verify_anon_vote(
 /*
  * Handle incoming privacy protocol message
  *
+ * Routes messages to appropriate handlers based on message type:
+ * - PEDERSEN_COMMIT/OPEN: Commitment protocol
+ * - RANGE_PROOF: Range proof verification
+ * - CRED_*: Credential issuance/verification
+ * - ANON_VOTE: Forwarded to consensus context
+ * - SERVICE_TOKEN_*: Service token protocol
+ * - REPUTATION_PROOF: Reputation verification
+ *
+ * @param ctx               Privacy context
  * @param from              Sender's node ID
  * @param data              Message data
  * @param len               Message length
@@ -752,6 +1022,7 @@ cyxwiz_error_t cyxwiz_privacy_verify_anon_vote(
  *                          CYXWIZ_ERR_INVALID if unknown message type
  */
 cyxwiz_error_t cyxwiz_privacy_handle_message(
+    cyxwiz_privacy_ctx_t *ctx,
     const cyxwiz_node_id_t *from,
     const uint8_t *data,
     size_t len);

@@ -12,6 +12,8 @@
 
 #include "cyxwiz/privacy.h"
 #include "cyxwiz/crypto.h"
+#include "cyxwiz/consensus.h"
+#include "cyxwiz/routing.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
@@ -20,6 +22,7 @@
 #endif
 
 #include <string.h>
+#include <stdlib.h>
 
 /* ============================================================================
  * Static Variables
@@ -721,15 +724,822 @@ cyxwiz_error_t cyxwiz_range_proof_verify_geq(
 }
 
 /* ============================================================================
- * Message Handling (placeholder for network integration)
+ * Privacy Context Structure
  * ============================================================================ */
 
-cyxwiz_error_t cyxwiz_privacy_handle_message(
+struct cyxwiz_privacy_ctx {
+    /* Dependencies */
+    cyxwiz_router_t *router;
+    cyxwiz_consensus_ctx_t *consensus;
+    cyxwiz_identity_keypair_t identity;
+    cyxwiz_node_id_t local_id;
+
+    /* Pending commitments (waiting for reveals) */
+    cyxwiz_pending_commit_t pending_commits[CYXWIZ_MAX_PENDING_COMMITS];
+    size_t pending_commit_count;
+
+    /* Pending credential requests (waiting for issuer response) */
+    cyxwiz_pending_cred_req_t pending_cred_reqs[CYXWIZ_MAX_PENDING_CRED_REQS];
+    size_t pending_cred_req_count;
+
+    /* Locally stored credentials */
+    cyxwiz_credential_t credentials[CYXWIZ_MAX_STORED_CREDS];
+    bool cred_active[CYXWIZ_MAX_STORED_CREDS];
+    size_t credential_count;
+
+    /* Locally stored service tokens */
+    cyxwiz_service_token_t tokens[CYXWIZ_MAX_SERVICE_TOKENS];
+    bool token_active[CYXWIZ_MAX_SERVICE_TOKENS];
+    size_t token_count;
+
+    /* Callbacks */
+    cyxwiz_commit_revealed_cb_t on_commit_revealed;
+    void *commit_user_data;
+
+    cyxwiz_cred_verified_cb_t on_cred_verified;
+    void *cred_user_data;
+
+    cyxwiz_token_used_cb_t on_token_used;
+    void *token_user_data;
+
+    cyxwiz_reputation_verified_cb_t on_reputation_verified;
+    void *reputation_user_data;
+
+    cyxwiz_cred_issued_cb_t on_cred_issued;
+    void *cred_issued_user_data;
+
+    /* State */
+    uint64_t last_poll;
+};
+
+/* ============================================================================
+ * Privacy Context Lifecycle
+ * ============================================================================ */
+
+cyxwiz_error_t cyxwiz_privacy_create(
+    cyxwiz_privacy_ctx_t **ctx_out,
+    cyxwiz_router_t *router,
+    const cyxwiz_identity_keypair_t *identity,
+    const cyxwiz_node_id_t *local_id)
+{
+    if (ctx_out == NULL || local_id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    cyxwiz_privacy_ctx_t *ctx = calloc(1, sizeof(cyxwiz_privacy_ctx_t));
+    if (ctx == NULL) {
+        return CYXWIZ_ERR_NOMEM;
+    }
+
+    ctx->router = router;
+    ctx->consensus = NULL;
+    memcpy(&ctx->local_id, local_id, sizeof(cyxwiz_node_id_t));
+
+    if (identity != NULL) {
+        memcpy(&ctx->identity, identity, sizeof(cyxwiz_identity_keypair_t));
+    }
+
+    /* Initialize Pedersen system */
+    cyxwiz_pedersen_init();
+
+    CYXWIZ_DEBUG("Privacy context created");
+
+    *ctx_out = ctx;
+    return CYXWIZ_OK;
+}
+
+void cyxwiz_privacy_destroy(cyxwiz_privacy_ctx_t *ctx)
+{
+    if (ctx == NULL) return;
+
+    /* Securely zero sensitive data */
+    cyxwiz_secure_zero(&ctx->identity, sizeof(ctx->identity));
+    cyxwiz_secure_zero(ctx->pending_cred_reqs, sizeof(ctx->pending_cred_reqs));
+    cyxwiz_secure_zero(ctx->credentials, sizeof(ctx->credentials));
+    cyxwiz_secure_zero(ctx->tokens, sizeof(ctx->tokens));
+
+    free(ctx);
+    CYXWIZ_DEBUG("Privacy context destroyed");
+}
+
+void cyxwiz_privacy_set_consensus(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_consensus_ctx_t *consensus)
+{
+    if (ctx == NULL) return;
+    ctx->consensus = consensus;
+}
+
+/* ============================================================================
+ * Callback Setters
+ * ============================================================================ */
+
+void cyxwiz_privacy_set_commit_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_commit_revealed_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) return;
+    ctx->on_commit_revealed = callback;
+    ctx->commit_user_data = user_data;
+}
+
+void cyxwiz_privacy_set_cred_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_cred_verified_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) return;
+    ctx->on_cred_verified = callback;
+    ctx->cred_user_data = user_data;
+}
+
+void cyxwiz_privacy_set_token_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_token_used_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) return;
+    ctx->on_token_used = callback;
+    ctx->token_user_data = user_data;
+}
+
+void cyxwiz_privacy_set_reputation_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_reputation_verified_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) return;
+    ctx->on_reputation_verified = callback;
+    ctx->reputation_user_data = user_data;
+}
+
+void cyxwiz_privacy_set_cred_issued_callback(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_cred_issued_cb_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) return;
+    ctx->on_cred_issued = callback;
+    ctx->cred_issued_user_data = user_data;
+}
+
+/* ============================================================================
+ * Poll and Maintenance
+ * ============================================================================ */
+
+void cyxwiz_privacy_poll(cyxwiz_privacy_ctx_t *ctx, uint64_t now_ms)
+{
+    if (ctx == NULL) return;
+
+    ctx->last_poll = now_ms;
+
+    /* Expire old pending commitments */
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_COMMITS; i++) {
+        if (ctx->pending_commits[i].active) {
+            uint64_t age = now_ms - ctx->pending_commits[i].received_at;
+            if (age > CYXWIZ_COMMIT_EXPIRE_MS) {
+                CYXWIZ_DEBUG("Commitment expired without reveal");
+                ctx->pending_commits[i].active = false;
+                ctx->pending_commit_count--;
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * Credential/Token Storage
+ * ============================================================================ */
+
+cyxwiz_error_t cyxwiz_privacy_store_credential(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_credential_t *credential)
+{
+    if (ctx == NULL || credential == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find empty slot or existing credential of same type */
+    int slot = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_STORED_CREDS; i++) {
+        if (!ctx->cred_active[i]) {
+            if (slot < 0) slot = (int)i;
+        } else if (ctx->credentials[i].cred_type == credential->cred_type) {
+            /* Replace existing credential of same type */
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    memcpy(&ctx->credentials[slot], credential, sizeof(cyxwiz_credential_t));
+    if (!ctx->cred_active[slot]) {
+        ctx->cred_active[slot] = true;
+        ctx->credential_count++;
+    }
+
+    CYXWIZ_DEBUG("Stored credential type %d", credential->cred_type);
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_privacy_get_credential(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_credential_type_t cred_type,
+    cyxwiz_credential_t *cred_out)
+{
+    if (ctx == NULL || cred_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_STORED_CREDS; i++) {
+        if (ctx->cred_active[i] &&
+            ctx->credentials[i].cred_type == (uint8_t)cred_type) {
+            memcpy(cred_out, &ctx->credentials[i], sizeof(cyxwiz_credential_t));
+            return CYXWIZ_OK;
+        }
+    }
+
+    return CYXWIZ_ERR_CREDENTIAL_INVALID;
+}
+
+cyxwiz_error_t cyxwiz_privacy_store_token(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_service_token_t *token)
+{
+    if (ctx == NULL || token == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find empty slot */
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_TOKENS; i++) {
+        if (!ctx->token_active[i]) {
+            memcpy(&ctx->tokens[i], token, sizeof(cyxwiz_service_token_t));
+            ctx->token_active[i] = true;
+            ctx->token_count++;
+            CYXWIZ_DEBUG("Stored service token type %d (%d units)",
+                         token->token_type, token->units);
+            return CYXWIZ_OK;
+        }
+    }
+
+    return CYXWIZ_ERR_QUEUE_FULL;
+}
+
+cyxwiz_error_t cyxwiz_privacy_get_token(
+    cyxwiz_privacy_ctx_t *ctx,
+    cyxwiz_service_token_type_t token_type,
+    cyxwiz_service_token_t *token_out)
+{
+    if (ctx == NULL || token_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_TOKENS; i++) {
+        if (ctx->token_active[i] &&
+            ctx->tokens[i].token_type == (uint8_t)token_type) {
+            memcpy(token_out, &ctx->tokens[i], sizeof(cyxwiz_service_token_t));
+            return CYXWIZ_OK;
+        }
+    }
+
+    return CYXWIZ_ERR_TOKEN_INSUFFICIENT;
+}
+
+/* ============================================================================
+ * Message Handlers
+ * ============================================================================ */
+
+static cyxwiz_error_t handle_pedersen_commit(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_pedersen_commit_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Verify the commitment point is valid */
+    if (crypto_core_ed25519_is_valid_point(msg->commitment.point) != 1) {
+        CYXWIZ_WARN("Invalid commitment point received");
+        return CYXWIZ_ERR_COMMITMENT_INVALID;
+    }
+
+    /* Find empty slot */
+    int slot = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_COMMITS; i++) {
+        if (!ctx->pending_commits[i].active) {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        CYXWIZ_WARN("Pending commitment storage full");
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Store the commitment */
+    cyxwiz_pending_commit_t *pending = &ctx->pending_commits[slot];
+    memcpy(pending->commit_id, msg->commit_id, CYXWIZ_COMMIT_ID_SIZE);
+    memcpy(&pending->commitment, &msg->commitment, sizeof(cyxwiz_pedersen_commitment_t));
+    memcpy(&pending->from, from, sizeof(cyxwiz_node_id_t));
+    memcpy(pending->context, msg->context, CYXWIZ_CRED_CONTEXT_SIZE);
+    pending->received_at = ctx->last_poll;
+    pending->active = true;
+    ctx->pending_commit_count++;
+
+    char hex_id[17];
+    for (int i = 0; i < 8; i++) {
+        snprintf(hex_id + i*2, 3, "%02x", msg->commit_id[i]);
+    }
+    CYXWIZ_DEBUG("Stored commitment %s from peer", hex_id);
+
+    return CYXWIZ_OK;
+#endif
+}
+
+static cyxwiz_error_t handle_pedersen_open(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_pedersen_open_msg_t *msg)
+{
+    /* from is not used directly - we use pending->from from stored commitment */
+    CYXWIZ_UNUSED(from);
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Find the matching pending commitment */
+    cyxwiz_pending_commit_t *pending = NULL;
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_COMMITS; i++) {
+        if (ctx->pending_commits[i].active &&
+            memcmp(ctx->pending_commits[i].commit_id, msg->commit_id,
+                   CYXWIZ_COMMIT_ID_SIZE) == 0) {
+            pending = &ctx->pending_commits[i];
+            break;
+        }
+    }
+
+    if (pending == NULL) {
+        CYXWIZ_DEBUG("Received opening for unknown commitment");
+        return CYXWIZ_OK; /* Not an error - commitment may have expired */
+    }
+
+    /* Verify the opening matches the commitment */
+    cyxwiz_error_t err = cyxwiz_pedersen_verify(&pending->commitment, &msg->opening);
+    bool valid = (err == CYXWIZ_OK);
+
+    char hex_id[17];
+    for (int i = 0; i < 8; i++) {
+        snprintf(hex_id + i*2, 3, "%02x", msg->commit_id[i]);
+    }
+    CYXWIZ_DEBUG("Commitment %s opening: %s", hex_id, valid ? "VALID" : "INVALID");
+
+    /* Invoke callback if registered */
+    if (ctx->on_commit_revealed) {
+        ctx->on_commit_revealed(
+            msg->commit_id,
+            &pending->from,
+            msg->opening.value,
+            valid,
+            ctx->commit_user_data
+        );
+    }
+
+    /* Remove the pending commitment */
+    pending->active = false;
+    ctx->pending_commit_count--;
+
+    return valid ? CYXWIZ_OK : CYXWIZ_ERR_COMMITMENT_INVALID;
+#endif
+}
+
+static cyxwiz_error_t handle_range_proof(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_range_proof_msg_t *msg)
+{
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Verify the range proof */
+    cyxwiz_error_t err;
+
+    if (msg->min_value > 0) {
+        err = cyxwiz_range_proof_verify_geq(&msg->range_proof, msg->min_value);
+    } else {
+        err = cyxwiz_range_proof_verify_16(&msg->range_proof);
+    }
+
+    bool valid = (err == CYXWIZ_OK);
+
+    char hex_id[17];
+    for (int i = 0; i < 8; i++) {
+        snprintf(hex_id + i*2, 3, "%02x", msg->proof_id[i]);
+    }
+    CYXWIZ_DEBUG("Range proof %s: %s (min=%u, bits=%u)",
+                 hex_id, valid ? "VALID" : "INVALID",
+                 msg->min_value, msg->range_bits);
+
+    return valid ? CYXWIZ_OK : CYXWIZ_ERR_RANGE_PROOF_FAILED;
+#endif
+}
+
+static cyxwiz_error_t handle_cred_issue_req(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_cred_issue_req_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* We are the issuer - issue a blinded signature */
+    CYXWIZ_DEBUG("Processing credential issuance request (type=%d)", msg->request.cred_type);
+
+    /* Issue the credential */
+    uint8_t blinded_sig[CYXWIZ_CRED_SIGNATURE_SIZE];
+    uint64_t expires_at = ctx->last_poll + (30 * 24 * 60 * 60 * 1000ULL); /* 30 days */
+
+    cyxwiz_error_t err = cyxwiz_cred_issue(
+        &ctx->identity,
+        &msg->request,
+        expires_at,
+        blinded_sig
+    );
+
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to issue credential: %s", cyxwiz_strerror(err));
+        return err;
+    }
+
+    /* Build and send response */
+    cyxwiz_cred_issue_resp_msg_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.type = CYXWIZ_MSG_CRED_ISSUE_RESP;
+    memcpy(resp.nonce, msg->request.nonce, CYXWIZ_CRED_NONCE_SIZE);
+    memcpy(resp.blinded_sig, blinded_sig, CYXWIZ_CRED_SIGNATURE_SIZE);
+    memcpy(resp.issuer_pubkey, ctx->identity.public_key, CYXWIZ_ED25519_PK_SIZE);
+    resp.expires_at = expires_at;
+
+    if (ctx->router != NULL) {
+        cyxwiz_router_send(ctx->router, from, (uint8_t *)&resp, sizeof(resp));
+    }
+
+    CYXWIZ_DEBUG("Issued credential to peer");
+    return CYXWIZ_OK;
+#endif
+}
+
+static cyxwiz_error_t handle_cred_issue_resp(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_cred_issue_resp_msg_t *msg)
+{
+    CYXWIZ_UNUSED(from);
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Find our pending request matching this nonce */
+    cyxwiz_pending_cred_req_t *pending = NULL;
+    int pending_idx = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_CRED_REQS; i++) {
+        if (ctx->pending_cred_reqs[i].active &&
+            memcmp(ctx->pending_cred_reqs[i].nonce, msg->nonce,
+                   CYXWIZ_CRED_NONCE_SIZE) == 0) {
+            pending = &ctx->pending_cred_reqs[i];
+            pending_idx = (int)i;
+            break;
+        }
+    }
+
+    if (pending == NULL) {
+        CYXWIZ_WARN("Received credential response for unknown request");
+        return CYXWIZ_OK;
+    }
+
+    /* Unblind the credential */
+    cyxwiz_credential_t cred;
+    cyxwiz_error_t err = cyxwiz_cred_unblind(
+        msg->blinded_sig,
+        pending->blinding,
+        msg->issuer_pubkey,
+        pending->attribute,
+        pending->attr_len,
+        msg->expires_at,
+        &cred
+    );
+
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to unblind credential: %s", cyxwiz_strerror(err));
+        /* Clear the pending request */
+        cyxwiz_secure_zero(pending, sizeof(*pending));
+        pending->active = false;
+        ctx->pending_cred_req_count--;
+        return err;
+    }
+
+    /* Store the credential */
+    err = cyxwiz_privacy_store_credential(ctx, &cred);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to store credential: %s", cyxwiz_strerror(err));
+    }
+
+    /* Invoke callback */
+    if (ctx->on_cred_issued) {
+        ctx->on_cred_issued(&cred, ctx->cred_issued_user_data);
+    }
+
+    /* Clear the pending request */
+    cyxwiz_secure_zero(pending, sizeof(*pending));
+    pending->active = false;
+    ctx->pending_cred_req_count--;
+
+    CYXWIZ_DEBUG("Received and stored credential (type=%d)", cred.cred_type);
+    return CYXWIZ_OK;
+#endif
+}
+
+static cyxwiz_error_t handle_cred_show(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_cred_show_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* Verify the credential show proof */
+    cyxwiz_error_t err = cyxwiz_cred_show_verify(
+        &msg->proof,
+        (cyxwiz_credential_type_t)msg->cred_type,
+        ctx->identity.public_key, /* Use our key as expected issuer */
+        ctx->last_poll
+    );
+
+    bool valid = (err == CYXWIZ_OK);
+
+    CYXWIZ_DEBUG("Credential show (type=%d): %s", msg->cred_type,
+                 valid ? "VALID" : "INVALID");
+
+    /* Invoke callback */
+    if (ctx->on_cred_verified) {
+        ctx->on_cred_verified(
+            from,
+            (cyxwiz_credential_type_t)msg->cred_type,
+            valid,
+            msg->service_context,
+            ctx->cred_user_data
+        );
+    }
+
+    /* Send verification result */
+    cyxwiz_cred_verify_msg_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.type = CYXWIZ_MSG_CRED_VERIFY;
+    resp.cred_type = msg->cred_type;
+    memcpy(resp.context, msg->service_context, CYXWIZ_CRED_CONTEXT_SIZE);
+    resp.result = valid ? 1 : 0;
+    memcpy(resp.issuer_pubkey, ctx->identity.public_key, CYXWIZ_ED25519_PK_SIZE);
+
+    if (ctx->router != NULL) {
+        cyxwiz_router_send(ctx->router, from, (uint8_t *)&resp, sizeof(resp));
+    }
+
+    return valid ? CYXWIZ_OK : CYXWIZ_ERR_CREDENTIAL_INVALID;
+#endif
+}
+
+static cyxwiz_error_t handle_cred_verify(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_cred_verify_msg_t *msg)
+{
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+
+    /* This is just an acknowledgement - log it */
+    CYXWIZ_DEBUG("Credential verification result: type=%d, result=%s",
+                 msg->cred_type, msg->result ? "OK" : "FAIL");
+
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_anon_vote(
+    cyxwiz_privacy_ctx_t *ctx,
     const cyxwiz_node_id_t *from,
     const uint8_t *data,
     size_t len)
 {
-    if (from == NULL || data == NULL || len == 0) {
+    /* Forward to consensus context if available */
+    if (ctx->consensus != NULL) {
+        return cyxwiz_consensus_handle_message(ctx->consensus, from, data, len);
+    }
+
+    CYXWIZ_WARN("Received ANON_VOTE but no consensus context set");
+    return CYXWIZ_OK;
+}
+
+static cyxwiz_error_t handle_service_token_req(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_service_token_req_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    /* We are the token issuer */
+    CYXWIZ_DEBUG("Processing service token request (type=%d, units=%d)",
+                 msg->token_type, msg->units_requested);
+
+    /* Generate blinded signature for the token serial */
+    /* For now, sign the blinded serial directly (simplified blind signature) */
+    uint8_t blinded_sig[CYXWIZ_CRED_SIGNATURE_SIZE];
+
+    /* Create signature over blinded serial + token type + units */
+    uint8_t to_sign[CYXWIZ_TOKEN_SERIAL_SIZE + 3];
+    memcpy(to_sign, msg->blinded_serial, CYXWIZ_TOKEN_SERIAL_SIZE);
+    to_sign[CYXWIZ_TOKEN_SERIAL_SIZE] = msg->token_type;
+    to_sign[CYXWIZ_TOKEN_SERIAL_SIZE + 1] = (uint8_t)(msg->units_requested & 0xFF);
+    to_sign[CYXWIZ_TOKEN_SERIAL_SIZE + 2] = (uint8_t)((msg->units_requested >> 8) & 0xFF);
+
+    if (crypto_sign_detached(blinded_sig, NULL, to_sign, sizeof(to_sign),
+                              ctx->identity.secret_key) != 0) {
+        CYXWIZ_ERROR("Failed to sign service token");
+        return CYXWIZ_ERR_CRYPTO;
+    }
+
+    /* Build response */
+    cyxwiz_service_token_msg_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.type = CYXWIZ_MSG_SERVICE_TOKEN;
+    resp.token_type = msg->token_type;
+    memcpy(resp.blinded_sig, blinded_sig, CYXWIZ_CRED_SIGNATURE_SIZE);
+    resp.units_granted = msg->units_requested;
+    memcpy(resp.issuer_pubkey, ctx->identity.public_key, CYXWIZ_ED25519_PK_SIZE);
+    resp.expires_at = ctx->last_poll + (7 * 24 * 60 * 60 * 1000ULL); /* 7 days */
+
+    if (ctx->router != NULL) {
+        cyxwiz_router_send(ctx->router, from, (uint8_t *)&resp, sizeof(resp));
+    }
+
+    CYXWIZ_DEBUG("Issued service token (%d units)", resp.units_granted);
+    return CYXWIZ_OK;
+#endif
+}
+
+static cyxwiz_error_t handle_service_token(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_service_token_msg_t *msg)
+{
+    CYXWIZ_UNUSED(from);
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    CYXWIZ_DEBUG("Received service token (type=%d, units=%d)",
+                 msg->token_type, msg->units_granted);
+
+    /* Unblind and store the token */
+    /* For simplified implementation, create token directly from response */
+    cyxwiz_service_token_t token;
+    memset(&token, 0, sizeof(token));
+
+    /* Generate real serial from blinded response (simplified - copy sig as serial) */
+    memcpy(token.serial, msg->blinded_sig, CYXWIZ_TOKEN_SERIAL_SIZE);
+    memcpy(token.signature, msg->blinded_sig, CYXWIZ_CRED_SIGNATURE_SIZE);
+    memcpy(token.issuer_pubkey, msg->issuer_pubkey, CYXWIZ_ED25519_PK_SIZE);
+    token.token_type = msg->token_type;
+    token.units = msg->units_granted;
+    token.expires_at = msg->expires_at;
+
+    cyxwiz_error_t err = cyxwiz_privacy_store_token(ctx, &token);
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to store token: %s", cyxwiz_strerror(err));
+    }
+
+    return err;
+#endif
+}
+
+static cyxwiz_error_t handle_service_token_use(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_service_token_use_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    CYXWIZ_DEBUG("Processing service token usage (type=%d, units=%d)",
+                 msg->token_type, msg->units_to_use);
+
+    /* Verify the token proof */
+    /* Check commitment is valid point */
+    bool valid = (crypto_core_ed25519_is_valid_point(msg->serial_commitment) == 1);
+
+    if (valid) {
+        /* Verify the range proof (units > 0) */
+        cyxwiz_range_proof_16_t proof;
+        memcpy(proof.commitment, msg->serial_commitment, 32);
+        memcpy(proof.proof, msg->token_proof, CYXWIZ_RANGE_PROOF_16_SIZE);
+
+        cyxwiz_error_t err = cyxwiz_range_proof_verify_16(&proof);
+        valid = (err == CYXWIZ_OK);
+    }
+
+    CYXWIZ_DEBUG("Token usage: %s", valid ? "VALID" : "INVALID");
+
+    /* Invoke callback */
+    if (ctx->on_token_used) {
+        ctx->on_token_used(
+            from,
+            (cyxwiz_service_token_type_t)msg->token_type,
+            msg->units_to_use,
+            valid,
+            msg->request_nonce,
+            ctx->token_user_data
+        );
+    }
+
+    return valid ? CYXWIZ_OK : CYXWIZ_ERR_TOKEN_INSUFFICIENT;
+#endif
+}
+
+static cyxwiz_error_t handle_reputation_proof(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_reputation_proof_msg_t *msg)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(msg);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    CYXWIZ_DEBUG("Processing reputation proof (min_credits=%d)", msg->min_credits_claimed);
+
+    /* Verify the range proof */
+    cyxwiz_error_t err = cyxwiz_range_proof_verify_geq(
+        &msg->range_proof,
+        msg->min_credits_claimed
+    );
+
+    bool valid = (err == CYXWIZ_OK);
+
+    CYXWIZ_DEBUG("Reputation proof: %s", valid ? "VALID" : "INVALID");
+
+    /* Invoke callback */
+    if (ctx->on_reputation_verified) {
+        ctx->on_reputation_verified(
+            from,
+            msg->min_credits_claimed,
+            valid,
+            ctx->reputation_user_data
+        );
+    }
+
+    return valid ? CYXWIZ_OK : CYXWIZ_ERR_RANGE_PROOF_FAILED;
+#endif
+}
+
+/* ============================================================================
+ * Main Message Dispatcher
+ * ============================================================================ */
+
+cyxwiz_error_t cyxwiz_privacy_handle_message(
+    cyxwiz_privacy_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (ctx == NULL || from == NULL || data == NULL || len == 0) {
         return CYXWIZ_ERR_INVALID;
     }
 
@@ -737,48 +1547,94 @@ cyxwiz_error_t cyxwiz_privacy_handle_message(
 
     switch (msg_type) {
         case CYXWIZ_MSG_PEDERSEN_COMMIT:
-            CYXWIZ_DEBUG("Received PEDERSEN_COMMIT message");
-            /* TODO: Handle commitment announcement */
+            if (len >= sizeof(cyxwiz_pedersen_commit_msg_t)) {
+                return handle_pedersen_commit(ctx, from,
+                    (const cyxwiz_pedersen_commit_msg_t *)data);
+            }
             break;
 
         case CYXWIZ_MSG_PEDERSEN_OPEN:
-            CYXWIZ_DEBUG("Received PEDERSEN_OPEN message");
-            /* TODO: Handle commitment opening */
+            if (len >= sizeof(cyxwiz_pedersen_open_msg_t)) {
+                return handle_pedersen_open(ctx, from,
+                    (const cyxwiz_pedersen_open_msg_t *)data);
+            }
             break;
 
         case CYXWIZ_MSG_RANGE_PROOF:
-            CYXWIZ_DEBUG("Received RANGE_PROOF message");
-            /* TODO: Handle range proof */
+            if (len >= sizeof(cyxwiz_range_proof_msg_t)) {
+                return handle_range_proof(ctx, from,
+                    (const cyxwiz_range_proof_msg_t *)data);
+            }
             break;
 
         case CYXWIZ_MSG_CRED_ISSUE_REQ:
+            if (len >= sizeof(cyxwiz_cred_issue_req_msg_t)) {
+                return handle_cred_issue_req(ctx, from,
+                    (const cyxwiz_cred_issue_req_msg_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_CRED_ISSUE_RESP:
+            if (len >= sizeof(cyxwiz_cred_issue_resp_msg_t)) {
+                return handle_cred_issue_resp(ctx, from,
+                    (const cyxwiz_cred_issue_resp_msg_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_CRED_SHOW:
+            if (len >= sizeof(cyxwiz_cred_show_msg_t)) {
+                return handle_cred_show(ctx, from,
+                    (const cyxwiz_cred_show_msg_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_CRED_VERIFY:
-            CYXWIZ_DEBUG("Received credential message");
-            /* TODO: Forward to credential handler */
+            if (len >= sizeof(cyxwiz_cred_verify_msg_t)) {
+                return handle_cred_verify(ctx, from,
+                    (const cyxwiz_cred_verify_msg_t *)data);
+            }
             break;
 
         case CYXWIZ_MSG_ANON_VOTE:
-            CYXWIZ_DEBUG("Received ANON_VOTE message");
-            /* TODO: Forward to consensus for anonymous vote handling */
+            if (len >= sizeof(cyxwiz_anon_vote_msg_t)) {
+                return handle_anon_vote(ctx, from, data, len);
+            }
             break;
 
         case CYXWIZ_MSG_SERVICE_TOKEN_REQ:
+            if (len >= sizeof(cyxwiz_service_token_req_msg_t)) {
+                return handle_service_token_req(ctx, from,
+                    (const cyxwiz_service_token_req_msg_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_SERVICE_TOKEN:
+            if (len >= sizeof(cyxwiz_service_token_msg_t)) {
+                return handle_service_token(ctx, from,
+                    (const cyxwiz_service_token_msg_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_SERVICE_TOKEN_USE:
-            CYXWIZ_DEBUG("Received service token message");
-            /* TODO: Handle service tokens */
+            if (len >= sizeof(cyxwiz_service_token_use_msg_t)) {
+                return handle_service_token_use(ctx, from,
+                    (const cyxwiz_service_token_use_msg_t *)data);
+            }
             break;
 
         case CYXWIZ_MSG_REPUTATION_PROOF:
-            CYXWIZ_DEBUG("Received REPUTATION_PROOF message");
-            /* TODO: Handle reputation proof */
+            if (len >= sizeof(cyxwiz_reputation_proof_msg_t)) {
+                return handle_reputation_proof(ctx, from,
+                    (const cyxwiz_reputation_proof_msg_t *)data);
+            }
             break;
 
         default:
+            CYXWIZ_DEBUG("Unknown privacy message type: 0x%02X", msg_type);
             return CYXWIZ_ERR_INVALID;
     }
 
-    return CYXWIZ_OK;
+    /* Message too short for type */
+    CYXWIZ_WARN("Privacy message 0x%02X too short (%zu bytes)", msg_type, len);
+    return CYXWIZ_ERR_INVALID;
 }
