@@ -168,3 +168,36 @@ const char *cyxwiz_strerror(cyxwiz_error_t err)
         default:                         return "Unknown error";
     }
 }
+
+const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type)
+{
+    switch (type) {
+        case CYXWIZ_NAT_UNKNOWN:   return "Unknown";
+        case CYXWIZ_NAT_OPEN:      return "Open";
+        case CYXWIZ_NAT_CONE:      return "Cone";
+        case CYXWIZ_NAT_SYMMETRIC: return "Symmetric";
+        case CYXWIZ_NAT_BLOCKED:   return "Blocked";
+        default:                   return "Unknown";
+    }
+}
+
+/* Internal: Get NAT type from UDP driver state */
+#ifdef CYXWIZ_HAS_UDP
+extern cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data);
+#endif
+
+cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
+{
+    if (transport == NULL) {
+        return CYXWIZ_NAT_UNKNOWN;
+    }
+
+#ifdef CYXWIZ_HAS_UDP
+    if (transport->type == CYXWIZ_TRANSPORT_UDP && transport->driver_data != NULL) {
+        return cyxwiz_udp_get_nat_type(transport->driver_data);
+    }
+#endif
+
+    /* NAT type only applies to UDP transport */
+    return CYXWIZ_NAT_UNKNOWN;
+}

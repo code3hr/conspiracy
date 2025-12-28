@@ -120,6 +120,12 @@ typedef struct {
     bool has_public_addr;
     uint64_t last_stun_attempt;
 
+    /* NAT type detection */
+    cyxwiz_nat_type_t nat_type;
+    cyxwiz_endpoint_t stun_results[3];  /* Results from each STUN server */
+    uint8_t stun_result_count;
+    bool nat_detection_complete;
+
     /* Bootstrap servers */
     cyxwiz_endpoint_t bootstrap_servers[CYXWIZ_MAX_BOOTSTRAP];
     size_t bootstrap_count;
@@ -406,6 +412,48 @@ static cyxwiz_error_t stun_send_request(cyxwiz_udp_state_t *state)
     return CYXWIZ_OK;
 }
 
+/* Determine NAT type from collected STUN results */
+static void determine_nat_type(cyxwiz_udp_state_t *state)
+{
+    if (state->stun_result_count == 0) {
+        state->nat_type = CYXWIZ_NAT_BLOCKED;
+        state->nat_detection_complete = true;
+        CYXWIZ_INFO("NAT type: Blocked (no STUN responses)");
+        return;
+    }
+
+    if (state->stun_result_count == 1) {
+        /* Only got one response - assume Cone (best case) */
+        state->nat_type = CYXWIZ_NAT_CONE;
+        state->nat_detection_complete = true;
+        CYXWIZ_INFO("NAT type: Cone (single response, assumed)");
+        return;
+    }
+
+    /* Compare mapped ports from different servers */
+    bool ports_match = true;
+    uint16_t first_port = state->stun_results[0].port;
+
+    for (uint8_t i = 1; i < state->stun_result_count; i++) {
+        if (state->stun_results[i].port != first_port) {
+            ports_match = false;
+            break;
+        }
+    }
+
+    if (ports_match) {
+        /* Check if public IP matches local IP (no NAT) */
+        /* For simplicity, just report Cone - proper open detection needs more */
+        state->nat_type = CYXWIZ_NAT_CONE;
+        CYXWIZ_INFO("NAT type: Cone (same port from %d servers)", state->stun_result_count);
+    } else {
+        state->nat_type = CYXWIZ_NAT_SYMMETRIC;
+        CYXWIZ_INFO("NAT type: Symmetric (different ports from servers)");
+    }
+
+    state->nat_detection_complete = true;
+}
+
 /* Handle STUN binding response */
 static void handle_stun_response(cyxwiz_udp_state_t *state,
                                   const uint8_t *data, size_t len)
@@ -448,15 +496,41 @@ static void handle_stun_response(cyxwiz_udp_state_t *state,
             memcpy(&xor_addr, &attrs[offset + 4], 4);
 
             /* XOR with magic cookie */
-            state->public_addr.port = htons(xor_port ^ (STUN_MAGIC_COOKIE >> 16));
-            state->public_addr.ip = xor_addr ^ htonl(STUN_MAGIC_COOKIE);
-            state->has_public_addr = true;
+            uint16_t mapped_port = htons(xor_port ^ (STUN_MAGIC_COOKIE >> 16));
+            uint32_t mapped_ip = xor_addr ^ htonl(STUN_MAGIC_COOKIE);
+
+            /* Store first result as public address */
+            if (!state->has_public_addr) {
+                state->public_addr.port = mapped_port;
+                state->public_addr.ip = mapped_ip;
+                state->has_public_addr = true;
+            }
+
+            /* Store result for NAT type detection (up to 3 servers) */
+            if (state->stun_result_count < 3) {
+                state->stun_results[state->stun_result_count].ip = mapped_ip;
+                state->stun_results[state->stun_result_count].port = mapped_port;
+                state->stun_result_count++;
+
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &mapped_ip, ip_str, sizeof(ip_str));
+                CYXWIZ_DEBUG("STUN result %d: %s:%d",
+                            state->stun_result_count, ip_str, ntohs(mapped_port));
+            }
+
+            /* After 2+ responses, determine NAT type */
+            if (state->stun_result_count >= 2 && !state->nat_detection_complete) {
+                determine_nat_type(state);
+            }
+
             state->stun_pending = false;
 
-            char ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &state->public_addr.ip, ip_str, sizeof(ip_str));
-            CYXWIZ_INFO("STUN discovered public address: %s:%d",
-                       ip_str, ntohs(state->public_addr.port));
+            if (state->stun_result_count == 1) {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &state->public_addr.ip, ip_str, sizeof(ip_str));
+                CYXWIZ_INFO("STUN discovered public address: %s:%d",
+                           ip_str, ntohs(state->public_addr.port));
+            }
             return;
         }
 
@@ -1140,3 +1214,13 @@ const cyxwiz_transport_ops_t cyxwiz_udp_ops = {
     .max_packet_size = udp_max_packet_size,
     .poll = udp_poll
 };
+
+/* Get NAT type from driver state (called from transport.c) */
+cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data)
+{
+    cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
+    if (state == NULL) {
+        return CYXWIZ_NAT_UNKNOWN;
+    }
+    return state->nat_type;
+}

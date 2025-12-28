@@ -19,6 +19,15 @@ typedef enum {
     CYXWIZ_TRANSPORT_UDP           /* Internet P2P via UDP */
 } cyxwiz_transport_type_t;
 
+/* NAT types (detected via STUN) */
+typedef enum {
+    CYXWIZ_NAT_UNKNOWN = 0,        /* Not yet determined */
+    CYXWIZ_NAT_OPEN,               /* No NAT / public IP */
+    CYXWIZ_NAT_CONE,               /* Full/Restricted/Port-Restricted Cone */
+    CYXWIZ_NAT_SYMMETRIC,          /* Symmetric NAT (hole punch difficult) */
+    CYXWIZ_NAT_BLOCKED             /* UDP blocked */
+} cyxwiz_nat_type_t;
+
 /* Forward declaration */
 typedef struct cyxwiz_transport cyxwiz_transport_t;
 
@@ -130,5 +139,11 @@ void cyxwiz_transport_set_local_id(
 
 /* Get transport type name */
 const char *cyxwiz_transport_type_name(cyxwiz_transport_type_t type);
+
+/* Get detected NAT type (UDP transport only, returns UNKNOWN for others) */
+cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport);
+
+/* Get NAT type name string */
+const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type);
 
 #endif /* CYXWIZ_TRANSPORT_H */

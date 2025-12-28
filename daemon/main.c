@@ -94,6 +94,9 @@ static cyxwiz_identity_keypair_t g_identity;
 static cyxwiz_privacy_ctx_t *g_privacy = NULL;
 #endif
 
+/* UDP transport for NAT type display */
+static cyxwiz_transport_t *g_udp_transport = NULL;
+
 static void on_peer_discovered(
     cyxwiz_transport_t *transport,
     const cyxwiz_peer_info_t *peer,
@@ -437,6 +440,19 @@ static void cmd_status(void)
     printf("  Node ID:     %.16s...\n", hex_id);
     printf("  Peers:       %zu connected\n",
            g_peer_table ? cyxwiz_peer_table_count(g_peer_table) : 0);
+
+    /* Show NAT type for UDP transport */
+    if (g_udp_transport != NULL) {
+        cyxwiz_nat_type_t nat_type = cyxwiz_transport_get_nat_type(g_udp_transport);
+        const char *nat_desc = "";
+        switch (nat_type) {
+            case CYXWIZ_NAT_CONE:      nat_desc = " (hole punch OK)"; break;
+            case CYXWIZ_NAT_SYMMETRIC: nat_desc = " (hole punch difficult)"; break;
+            case CYXWIZ_NAT_BLOCKED:   nat_desc = " (UDP blocked)"; break;
+            default: break;
+        }
+        printf("  NAT Type:    %s%s\n", cyxwiz_nat_type_name(nat_type), nat_desc);
+    }
 
 #ifdef CYXWIZ_HAS_CONSENSUS
     if (g_consensus != NULL) {
@@ -1213,6 +1229,7 @@ int main(int argc, char *argv[])
             cyxwiz_transport_set_peer_callback(udp_transport, on_peer_discovered, NULL);
             cyxwiz_transport_set_recv_callback(udp_transport, on_data_received, NULL);
             primary_transport = udp_transport;
+            g_udp_transport = udp_transport;  /* For NAT type status display */
             CYXWIZ_INFO("Using UDP/Internet transport");
 
             /* Start discovery (register with bootstrap) */
