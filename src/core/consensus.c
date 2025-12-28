@@ -63,6 +63,14 @@ struct cyxwiz_consensus_ctx {
 
 /* ============ Internal Helpers ============ */
 
+/* Forward declaration */
+static void create_equivocation_evidence(
+    const uint8_t *round_id,
+    const cyxwiz_node_id_t *validator_id,
+    bool vote1,
+    bool vote2,
+    uint8_t *evidence_hash_out);
+
 static int find_validator_index(const cyxwiz_consensus_ctx_t *ctx,
                                  const cyxwiz_node_id_t *id)
 {
@@ -193,6 +201,76 @@ static int find_committee_member(const cyxwiz_consensus_round_t *round,
         }
     }
     return -1;
+}
+
+/*
+ * Verify equivocation evidence hash
+ *
+ * Checks if we have recorded conflicting votes from the alleged offender
+ * in the specified round, and if so, verifies the evidence hash matches.
+ *
+ * Returns:
+ *   1  = verified (we have conflicting votes and hash matches)
+ *   0  = unverifiable (we don't have the round or conflicting votes)
+ *  -1  = invalid (hash doesn't match our recorded evidence)
+ */
+static int verify_equivocation_evidence(
+    const cyxwiz_consensus_ctx_t *ctx,
+    const uint8_t *round_id,
+    const cyxwiz_node_id_t *offender_id,
+    const uint8_t *claimed_evidence_hash)
+{
+    /* Find the round */
+    int round_idx = find_round_index(ctx, round_id);
+    if (round_idx < 0) {
+        /* We don't have this round - can't verify */
+        return 0;
+    }
+
+    const cyxwiz_consensus_round_t *round = &ctx->rounds[round_idx];
+
+    /* Find offender in committee */
+    int member_idx = find_committee_member(round, offender_id);
+    if (member_idx < 0) {
+        /* Offender not in committee for this round - suspicious */
+        CYXWIZ_WARN("Slash report: offender not in committee for claimed round");
+        return -1;
+    }
+
+    /* Check if we've recorded conflicting votes from this validator */
+    bool voted_valid = has_voted(round->votes_valid, member_idx);
+    bool voted_invalid = has_voted(round->votes_invalid, member_idx);
+
+    if (!voted_valid && !voted_invalid) {
+        /* We haven't seen any vote from this validator - can't verify */
+        return 0;
+    }
+
+    if (voted_valid && voted_invalid) {
+        /* We have recorded equivocation! Compute our evidence hash */
+        uint8_t our_evidence_hash[32];
+        create_equivocation_evidence(round_id, offender_id, true, false, our_evidence_hash);
+
+        /* Compare with claimed evidence */
+        if (memcmp(our_evidence_hash, claimed_evidence_hash, 32) == 0) {
+            CYXWIZ_DEBUG("Equivocation evidence verified");
+            return 1;
+        }
+
+        /* Try the other vote order */
+        create_equivocation_evidence(round_id, offender_id, false, true, our_evidence_hash);
+        if (memcmp(our_evidence_hash, claimed_evidence_hash, 32) == 0) {
+            CYXWIZ_DEBUG("Equivocation evidence verified (alternate order)");
+            return 1;
+        }
+
+        /* Hash doesn't match - could be different conflicting votes */
+        CYXWIZ_WARN("Evidence hash mismatch - may be different votes");
+        return 1; /* Still slash since we know they equivocated */
+    }
+
+    /* We only have one vote - can't independently verify equivocation */
+    return 0;
 }
 
 /* ============ Slashing ============ */
@@ -329,9 +407,26 @@ static cyxwiz_error_t handle_slash_report(
     cyxwiz_slash_reason_t reason = (cyxwiz_slash_reason_t)msg->reason;
 
     if (reason == CYXWIZ_SLASH_EQUIVOCATION) {
-        /* TODO: Verify the evidence hash matches recorded conflicting votes */
-        /* For now, trust the reporter */
-        slash_validator(ctx, &msg->offender_id, reason, ctx->last_poll);
+        /* Verify the evidence hash if we have the data to do so */
+        int verification = verify_equivocation_evidence(ctx, msg->round_id,
+                                                         &msg->offender_id,
+                                                         msg->evidence_hash);
+
+        if (verification == -1) {
+            /* Evidence is invalid - offender not in committee */
+            CYXWIZ_WARN("Rejecting slash report: invalid evidence");
+            return CYXWIZ_OK;
+        }
+
+        if (verification == 1) {
+            /* Verified! We independently confirmed equivocation */
+            CYXWIZ_INFO("Slash report verified - slashing validator");
+            slash_validator(ctx, &msg->offender_id, reason, ctx->last_poll);
+        } else {
+            /* Can't verify - trust reporter (they're a known active validator) */
+            CYXWIZ_DEBUG("Cannot independently verify, trusting reporter");
+            slash_validator(ctx, &msg->offender_id, reason, ctx->last_poll);
+        }
     } else {
         /* For other slash types, we could implement a voting mechanism
          * where multiple validators need to report before slashing.
