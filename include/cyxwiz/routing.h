@@ -493,4 +493,9 @@ bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router);
 size_t cyxwiz_router_route_count(const cyxwiz_router_t *router);
 size_t cyxwiz_router_pending_count(const cyxwiz_router_t *router);
 
+/*
+ * Get peer table from router (for reputation-based relay selection)
+ */
+cyxwiz_peer_table_t *cyxwiz_router_get_peer_table(cyxwiz_router_t *router);
+
 #endif /* CYXWIZ_ROUTING_H */

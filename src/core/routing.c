@@ -701,6 +701,14 @@ size_t cyxwiz_router_pending_count(const cyxwiz_router_t *router)
     return count;
 }
 
+cyxwiz_peer_table_t *cyxwiz_router_get_peer_table(cyxwiz_router_t *router)
+{
+    if (router == NULL) {
+        return NULL;
+    }
+    return router->peer_table;
+}
+
 /* ============ Internal Functions ============ */
 
 static bool is_direct_peer(

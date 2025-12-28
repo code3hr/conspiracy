@@ -956,7 +956,16 @@ bool cyxwiz_onion_has_circuit_to(
 }
 
 /*
- * Select random relay nodes for circuit building
+ * Relay candidate with reputation weight
+ */
+typedef struct {
+    cyxwiz_node_id_t id;
+    uint16_t weight;
+} relay_candidate_t;
+
+/*
+ * Select relay nodes weighted by reputation
+ * Higher reputation peers are more likely to be selected
  * Excludes destination from relay selection
  */
 static size_t select_random_relays(
@@ -972,9 +981,13 @@ static size_t select_random_relays(
     CYXWIZ_UNUSED(max_relays);
     return 0;
 #else
-    /* Collect all valid peer keys (potential relays) */
-    cyxwiz_node_id_t candidates[CYXWIZ_MAX_PEERS];
+    /* Get peer table for reputation lookup */
+    cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
+
+    /* Collect candidates with reputation weights */
+    relay_candidate_t candidates[CYXWIZ_MAX_PEERS];
     size_t candidate_count = 0;
+    uint32_t total_weight = 0;
 
     for (size_t i = 0; i < CYXWIZ_MAX_PEERS && candidate_count < CYXWIZ_MAX_PEERS; i++) {
         if (!ctx->peer_keys[i].valid) {
@@ -993,8 +1006,21 @@ static size_t select_random_relays(
             continue;
         }
 
-        memcpy(&candidates[candidate_count], &ctx->peer_keys[i].peer_id,
+        /* Get reputation score (0-100), default 50 if not in peer table */
+        uint16_t rep = 50;
+        if (peer_table != NULL) {
+            const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(
+                peer_table, &ctx->peer_keys[i].peer_id);
+            if (peer != NULL) {
+                rep = cyxwiz_peer_reputation(peer);
+            }
+        }
+
+        /* Weight = reputation + 10 (ensures low-rep peers still have a chance) */
+        memcpy(&candidates[candidate_count].id, &ctx->peer_keys[i].peer_id,
                sizeof(cyxwiz_node_id_t));
+        candidates[candidate_count].weight = rep + 10;
+        total_weight += rep + 10;
         candidate_count++;
     }
 
@@ -1002,25 +1028,34 @@ static size_t select_random_relays(
         return 0;
     }
 
-    /* Shuffle candidates using Fisher-Yates */
-    for (size_t i = candidate_count - 1; i > 0; i--) {
-        uint32_t j;
-        randombytes_buf(&j, sizeof(j));
-        j = j % (i + 1);
+    /* Weighted random selection without replacement */
+    size_t selected = 0;
+    while (selected < max_relays && candidate_count > 0) {
+        /* Pick random point in total weight */
+        uint32_t r;
+        randombytes_buf(&r, sizeof(r));
+        r = r % total_weight;
 
-        cyxwiz_node_id_t tmp;
-        memcpy(&tmp, &candidates[i], sizeof(cyxwiz_node_id_t));
-        memcpy(&candidates[i], &candidates[j], sizeof(cyxwiz_node_id_t));
-        memcpy(&candidates[j], &tmp, sizeof(cyxwiz_node_id_t));
+        /* Find candidate at cumulative weight r */
+        uint32_t cumulative = 0;
+        for (size_t j = 0; j < candidate_count; j++) {
+            cumulative += candidates[j].weight;
+            if (r < cumulative) {
+                /* Select this candidate */
+                memcpy(&relays_out[selected], &candidates[j].id,
+                       sizeof(cyxwiz_node_id_t));
+                selected++;
+
+                /* Remove from candidates */
+                total_weight -= candidates[j].weight;
+                candidates[j] = candidates[candidate_count - 1];
+                candidate_count--;
+                break;
+            }
+        }
     }
 
-    /* Take up to max_relays */
-    size_t count = (candidate_count < max_relays) ? candidate_count : max_relays;
-    for (size_t i = 0; i < count; i++) {
-        memcpy(&relays_out[i], &candidates[i], sizeof(cyxwiz_node_id_t));
-    }
-
-    return count;
+    return selected;
 #endif
 }
 
