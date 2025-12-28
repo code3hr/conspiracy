@@ -1,0 +1,78 @@
+# Doxyfile for CyxWiz Protocol
+# Generate with: doxygen Doxyfile
+
+#---------------------------------------------------------------------------
+# Project
+#---------------------------------------------------------------------------
+
+PROJECT_NAME           = "CyxWiz Protocol"
+PROJECT_NUMBER         = 0.2.0
+PROJECT_BRIEF          = "Decentralized mesh network protocol for anonymous, privacy-first computing"
+OUTPUT_DIRECTORY       = docs/api
+
+#---------------------------------------------------------------------------
+# Input
+#---------------------------------------------------------------------------
+
+INPUT                  = include/cyxwiz README.md
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE = README.md
+
+#---------------------------------------------------------------------------
+# Output
+#---------------------------------------------------------------------------
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_OUTPUT            = html
+
+#---------------------------------------------------------------------------
+# Build
+#---------------------------------------------------------------------------
+
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+EXTRACT_PRIVATE        = NO
+
+#---------------------------------------------------------------------------
+# Preprocessing
+#---------------------------------------------------------------------------
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+PREDEFINED             = CYXWIZ_HAS_CRYPTO=1 \
+                         CYXWIZ_HAS_WIFI=1 \
+                         CYXWIZ_HAS_BLUETOOTH=1 \
+                         CYXWIZ_HAS_LORA=1 \
+                         CYXWIZ_HAS_UDP=1 \
+                         CYXWIZ_HAS_COMPUTE=1 \
+                         CYXWIZ_HAS_STORAGE=1 \
+                         CYXWIZ_HAS_CONSENSUS=1 \
+                         CYXWIZ_HAS_PRIVACY=1
+
+#---------------------------------------------------------------------------
+# Diagrams
+#---------------------------------------------------------------------------
+
+HAVE_DOT               = NO
+CLASS_DIAGRAMS         = NO
+
+#---------------------------------------------------------------------------
+# Warnings
+#---------------------------------------------------------------------------
+
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+
+#---------------------------------------------------------------------------
+# Source browsing
+#---------------------------------------------------------------------------
+
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = YES
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
