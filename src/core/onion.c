@@ -1016,6 +1016,11 @@ static size_t select_random_relays(
             }
         }
 
+        /* Skip blacklisted peers */
+        if (rep < CYXWIZ_MIN_RELAY_REPUTATION) {
+            continue;
+        }
+
         /* Weight = reputation + 10 (ensures low-rep peers still have a chance) */
         memcpy(&candidates[candidate_count].id, &ctx->peer_keys[i].peer_id,
                sizeof(cyxwiz_node_id_t));

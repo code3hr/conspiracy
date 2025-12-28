@@ -212,6 +212,7 @@ static cyxwiz_error_t create_surb(
 /*
  * Compute total reputation score for a route
  * Higher score = more reliable path
+ * Returns 0 if any hop is blacklisted (below CYXWIZ_MIN_RELAY_REPUTATION)
  */
 static uint16_t compute_route_reputation(
     cyxwiz_peer_table_t *peer_table,
@@ -221,8 +222,14 @@ static uint16_t compute_route_reputation(
     uint16_t total = 0;
     for (uint8_t i = 0; i < hop_count; i++) {
         const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(peer_table, &hops[i]);
+        uint8_t rep;
         if (peer != NULL) {
-            total += cyxwiz_peer_reputation(peer);
+            rep = cyxwiz_peer_reputation(peer);
+            /* Reject route if any hop is blacklisted */
+            if (rep < CYXWIZ_MIN_RELAY_REPUTATION) {
+                return 0;
+            }
+            total += rep;
         } else {
             total += 50;  /* Unknown peer gets neutral score */
         }

@@ -16,9 +16,10 @@
 
 /* Peer table limits */
 #define CYXWIZ_MAX_PEERS 64
-#define CYXWIZ_PEER_TIMEOUT_MS 30000      /* 30 seconds */
+#define CYXWIZ_PEER_TIMEOUT_MS 30000       /* 30 seconds */
 #define CYXWIZ_DISCOVERY_INTERVAL_MS 5000  /* 5 seconds */
 #define CYXWIZ_HEARTBEAT_INTERVAL_MS 10000 /* 10 seconds */
+#define CYXWIZ_MIN_RELAY_REPUTATION 20     /* Blacklist threshold for relays */
 
 /* Peer states */
 typedef enum {
