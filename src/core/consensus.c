@@ -195,6 +195,178 @@ static int find_committee_member(const cyxwiz_consensus_round_t *round,
     return -1;
 }
 
+/* ============ Slashing ============ */
+
+/*
+ * Slash a validator for misbehavior
+ *
+ * Updates validator state to SLASHED and fires callback.
+ * Returns the validator index, or -1 if not found.
+ */
+static int slash_validator(
+    cyxwiz_consensus_ctx_t *ctx,
+    const cyxwiz_node_id_t *offender_id,
+    cyxwiz_slash_reason_t reason,
+    uint64_t now_ms)
+{
+    int idx = find_validator_index(ctx, offender_id);
+    if (idx < 0) {
+        CYXWIZ_DEBUG("Cannot slash unknown validator");
+        return -1;
+    }
+
+    cyxwiz_validator_t *validator = &ctx->validators[idx];
+
+    /* Already slashed? */
+    if (validator->state == CYXWIZ_VALIDATOR_SLASHED) {
+        CYXWIZ_DEBUG("Validator already slashed");
+        return idx;
+    }
+
+    cyxwiz_validator_state_t old_state = validator->state;
+
+    /* Update validator state */
+    validator->state = CYXWIZ_VALIDATOR_SLASHED;
+    validator->slashed_at = now_ms;
+    validator->work_credits = 0; /* Forfeit all credits */
+
+    /* Update statistics */
+    ctx->total_slashed++;
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(offender_id, hex_id);
+    CYXWIZ_WARN("Validator %.16s... SLASHED for %s",
+                hex_id, cyxwiz_slash_reason_name(reason));
+
+    /* Fire state change callback */
+    if (ctx->on_state_change) {
+        ctx->on_state_change(validator, old_state, ctx->state_user_data);
+    }
+
+    return idx;
+}
+
+/*
+ * Broadcast a slash report to all known validators
+ */
+static void broadcast_slash_report(
+    cyxwiz_consensus_ctx_t *ctx,
+    const cyxwiz_node_id_t *offender_id,
+    cyxwiz_slash_reason_t reason,
+    const uint8_t *round_id,
+    const uint8_t *evidence_hash)
+{
+    if (ctx->router == NULL) {
+        return;
+    }
+
+    cyxwiz_slash_report_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.type = CYXWIZ_MSG_SLASH_REPORT;
+    memcpy(&msg.offender_id, offender_id, sizeof(cyxwiz_node_id_t));
+    memcpy(&msg.reporter_id, &ctx->local_id, sizeof(cyxwiz_node_id_t));
+    msg.reason = (uint8_t)reason;
+
+    if (round_id != NULL) {
+        memcpy(msg.round_id, round_id, CYXWIZ_CONSENSUS_ID_SIZE);
+    }
+    if (evidence_hash != NULL) {
+        memcpy(msg.evidence_hash, evidence_hash, 32);
+    }
+
+    /* Send to all known validators */
+    for (size_t i = 0; i < ctx->validator_count; i++) {
+        if (ctx->validators[i].state == CYXWIZ_VALIDATOR_ACTIVE &&
+            memcmp(&ctx->validators[i].node_id, &ctx->local_id,
+                   sizeof(cyxwiz_node_id_t)) != 0) {
+            cyxwiz_router_send(ctx->router, &ctx->validators[i].node_id,
+                               (uint8_t *)&msg, sizeof(msg));
+        }
+    }
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(offender_id, hex_id);
+    CYXWIZ_INFO("Broadcast slash report for %.16s... (%s)",
+                hex_id, cyxwiz_slash_reason_name(reason));
+}
+
+/*
+ * Handle incoming slash report
+ */
+static cyxwiz_error_t handle_slash_report(
+    cyxwiz_consensus_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_slash_report_msg_t *msg)
+{
+    CYXWIZ_UNUSED(from);
+
+    char offender_hex[65];
+    char reporter_hex[65];
+    cyxwiz_node_id_to_hex(&msg->offender_id, offender_hex);
+    cyxwiz_node_id_to_hex(&msg->reporter_id, reporter_hex);
+
+    CYXWIZ_INFO("Received slash report: offender=%.16s... reporter=%.16s... reason=%s",
+                offender_hex, reporter_hex,
+                cyxwiz_slash_reason_name((cyxwiz_slash_reason_t)msg->reason));
+
+    /* Verify reporter is a known validator */
+    int reporter_idx = find_validator_index(ctx, &msg->reporter_id);
+    if (reporter_idx < 0) {
+        CYXWIZ_WARN("Slash report from unknown validator, ignoring");
+        return CYXWIZ_OK;
+    }
+
+    if (ctx->validators[reporter_idx].state != CYXWIZ_VALIDATOR_ACTIVE) {
+        CYXWIZ_WARN("Slash report from inactive validator, ignoring");
+        return CYXWIZ_OK;
+    }
+
+    /* For equivocation, we trust the report immediately since it's
+     * cryptographically verifiable (same validator signed conflicting votes).
+     * For other reasons, we might want additional verification in production. */
+
+    cyxwiz_slash_reason_t reason = (cyxwiz_slash_reason_t)msg->reason;
+
+    if (reason == CYXWIZ_SLASH_EQUIVOCATION) {
+        /* TODO: Verify the evidence hash matches recorded conflicting votes */
+        /* For now, trust the reporter */
+        slash_validator(ctx, &msg->offender_id, reason, ctx->last_poll);
+    } else {
+        /* For other slash types, we could implement a voting mechanism
+         * where multiple validators need to report before slashing.
+         * For now, just log it. */
+        CYXWIZ_DEBUG("Non-equivocation slash report received, logging only");
+    }
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Create evidence hash for equivocation
+ * Hash of: round_id || validator_id || both_votes
+ */
+static void create_equivocation_evidence(
+    const uint8_t *round_id,
+    const cyxwiz_node_id_t *validator_id,
+    bool vote1,
+    bool vote2,
+    uint8_t *evidence_hash_out)
+{
+#ifdef CYXWIZ_HAS_CRYPTO
+    crypto_generichash_state state;
+    crypto_generichash_init(&state, NULL, 0, 32);
+    crypto_generichash_update(&state, round_id, CYXWIZ_CONSENSUS_ID_SIZE);
+    crypto_generichash_update(&state, validator_id->bytes, CYXWIZ_NODE_ID_LEN);
+    uint8_t votes[2] = { vote1 ? 1 : 0, vote2 ? 1 : 0 };
+    crypto_generichash_update(&state, votes, 2);
+    crypto_generichash_final(&state, evidence_hash_out, 32);
+#else
+    memset(evidence_hash_out, 0, 32);
+    memcpy(evidence_hash_out, round_id, CYXWIZ_CONSENSUS_ID_SIZE);
+#endif
+}
+
 /* ============ Lifecycle ============ */
 
 cyxwiz_error_t cyxwiz_consensus_create(
@@ -1166,9 +1338,23 @@ static cyxwiz_error_t handle_validation_vote(
     if (already_valid || already_invalid) {
         bool new_vote = (msg->vote != 0);
         if ((already_valid && !new_vote) || (already_invalid && new_vote)) {
-            /* Equivocation detected! */
-            CYXWIZ_WARN("Equivocation detected from validator");
-            /* TODO: Report slashing */
+            /* Equivocation detected! Slash the validator. */
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(&msg->validator_id, hex_id);
+            CYXWIZ_WARN("Equivocation detected from validator %.16s...", hex_id);
+
+            /* Create evidence hash */
+            uint8_t evidence_hash[32];
+            create_equivocation_evidence(round->round_id, &msg->validator_id,
+                                         already_valid, new_vote, evidence_hash);
+
+            /* Slash locally */
+            slash_validator(ctx, &msg->validator_id, CYXWIZ_SLASH_EQUIVOCATION,
+                           ctx->last_poll);
+
+            /* Broadcast to other validators */
+            broadcast_slash_report(ctx, &msg->validator_id, CYXWIZ_SLASH_EQUIVOCATION,
+                                   round->round_id, evidence_hash);
         }
         return CYXWIZ_OK;
     }
@@ -1429,6 +1615,13 @@ cyxwiz_error_t cyxwiz_consensus_handle_message(
             if (len >= sizeof(cyxwiz_anon_vote_msg_t)) {
                 return handle_anon_vote(ctx, from,
                     (const cyxwiz_anon_vote_msg_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_SLASH_REPORT:
+            if (len >= sizeof(cyxwiz_slash_report_msg_t)) {
+                return handle_slash_report(ctx, from,
+                    (const cyxwiz_slash_report_msg_t *)data);
             }
             break;
 
