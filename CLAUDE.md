@@ -208,7 +208,7 @@ cyxwiz_discovery_stop(discovery);
 - `CYXWIZ_DISC_ANNOUNCE` - Broadcast "I'm here"
 - `CYXWIZ_DISC_ANNOUNCE_ACK` - Response to announce
 - `CYXWIZ_DISC_PING` / `CYXWIZ_DISC_PONG` - Keepalive
-- `CYXWIZ_DISC_GOODBYE` - Graceful disconnect
+- `CYXWIZ_DISC_GOODBYE` - Graceful disconnect (sent to all peers on stop)
 
 All messages fit in 37 bytes or less (LoRa-compatible).
 
@@ -331,6 +331,142 @@ cyxwiz_onion_unwrap(onion, len, key, &next_hop, inner, &inner_len);
 | Path visibility | Hidden | Full path visible |
 | Source anonymity | Yes (with circuit) | No |
 | Content privacy | End-to-end encrypted | Plaintext |
+
+## Compute Module
+
+Distributed job marketplace for offloading computation to worker nodes.
+
+### Key Types
+- `cyxwiz_compute_ctx_t` - Compute context
+- `cyxwiz_job_t` - Job entry (ID, type, state, payload, result)
+- `cyxwiz_job_id_t` - 8-byte job identifier
+
+### Job Types
+```c
+CYXWIZ_JOB_TYPE_HASH      // Compute BLAKE2b hash
+CYXWIZ_JOB_TYPE_ENCRYPT   // Encrypt data
+CYXWIZ_JOB_TYPE_DECRYPT   // Decrypt data
+CYXWIZ_JOB_TYPE_VERIFY    // Verify signature/MAC
+CYXWIZ_JOB_TYPE_CUSTOM    // Custom job (handler decides)
+```
+
+### Core Operations
+```c
+// Create compute context
+cyxwiz_compute_create(&ctx, router, peer_table, crypto_ctx, &local_id);
+
+// Enable worker mode (accept jobs)
+cyxwiz_compute_enable_worker(ctx, max_concurrent);
+
+// Set callbacks
+cyxwiz_compute_set_complete_callback(ctx, on_complete, user_data);
+cyxwiz_compute_set_execute_callback(ctx, on_execute, user_data);
+
+// Submit job to worker
+cyxwiz_compute_submit(ctx, &worker_id, job_type, payload, len, &job_id);
+
+// Anonymous job submission (worker can't identify submitter)
+cyxwiz_compute_submit_anonymous(ctx, &worker_id, job_type, payload, len, &job_id);
+```
+
+### Chunked Results
+Results larger than 64 bytes are automatically chunked:
+- Single packet: results ≤64 bytes sent inline
+- Chunked: results >64 bytes split into 48-byte chunks (max 16 chunks = 768 bytes)
+- MAC covers complete assembled result for integrity verification
+
+### Constants
+- `CYXWIZ_JOB_MAX_PAYLOAD` = 64 (single-packet payload)
+- `CYXWIZ_JOB_CHUNK_SIZE` = 48 (bytes per chunk)
+- `CYXWIZ_JOB_MAX_CHUNKS` = 16
+- `CYXWIZ_JOB_MAX_TOTAL_PAYLOAD` = 768 (max chunked payload)
+- `CYXWIZ_MAX_ACTIVE_JOBS` = 16
+
+## Consensus Module
+
+Proof of Useful Work (PoUW) consensus with stake-weighted validation.
+
+### Key Types
+- `cyxwiz_consensus_ctx_t` - Consensus context
+- `cyxwiz_validator_t` - Validator info (stake, state, work credits)
+- `cyxwiz_vote_t` - Block vote with signature
+
+### Validator States
+```c
+CYXWIZ_VALIDATOR_ACTIVE    // Participating in consensus
+CYXWIZ_VALIDATOR_INACTIVE  // Not participating
+CYXWIZ_VALIDATOR_SLASHED   // Slashed for misbehavior
+```
+
+### Slashing
+Validators are slashed for equivocation (voting for conflicting blocks):
+```c
+// Slash reasons
+CYXWIZ_SLASH_EQUIVOCATION  // Conflicting votes in same round
+CYXWIZ_SLASH_INACTIVITY    // Extended inactivity
+CYXWIZ_SLASH_INVALID_BLOCK // Proposed invalid block
+
+// When equivocation detected, validator is:
+// 1. Marked as SLASHED
+// 2. Loses stake
+// 3. Slash report broadcast to network with evidence hash
+```
+
+### Core Operations
+```c
+// Create consensus context
+cyxwiz_consensus_create(&ctx, router, crypto_ctx, &local_id);
+
+// Register as validator
+cyxwiz_consensus_register_validator(ctx, stake_amount);
+
+// Submit work proof
+cyxwiz_consensus_submit_work(ctx, work_proof, proof_len);
+
+// Vote on block
+cyxwiz_consensus_vote(ctx, &block_hash, approve);
+```
+
+## Privacy Module
+
+Anonymous credentials, commitments, and privacy-preserving proofs.
+
+### Key Types
+- `cyxwiz_privacy_ctx_t` - Privacy context
+- `cyxwiz_credential_t` - Anonymous credential
+- `cyxwiz_commitment_t` - Pedersen commitment
+
+### Message Types (0x70-0x7F)
+```c
+CYXWIZ_MSG_PEDERSEN_COMMIT     // Pedersen commitment
+CYXWIZ_MSG_PEDERSEN_OPEN       // Commitment opening
+CYXWIZ_MSG_RANGE_PROOF         // Range proof
+CYXWIZ_MSG_CRED_ISSUE_REQ      // Credential issuance request
+CYXWIZ_MSG_CRED_ISSUE_RESP     // Credential issuance response
+CYXWIZ_MSG_CRED_SHOW           // Show credential
+CYXWIZ_MSG_CRED_VERIFY         // Verify credential
+CYXWIZ_MSG_ANON_VOTE           // Anonymous vote
+CYXWIZ_MSG_SERVICE_TOKEN_REQ   // Service token request
+CYXWIZ_MSG_SERVICE_TOKEN       // Service token
+CYXWIZ_MSG_SERVICE_TOKEN_USE   // Use service token
+CYXWIZ_MSG_REPUTATION_PROOF    // Reputation proof
+```
+
+### Core Operations
+```c
+// Create privacy context
+cyxwiz_privacy_create(&ctx, router, &identity, &local_id);
+
+// Set callbacks
+cyxwiz_privacy_set_credential_callback(ctx, on_credential, user_data);
+cyxwiz_privacy_set_vote_callback(ctx, on_vote, user_data);
+
+// Handle incoming privacy messages
+cyxwiz_privacy_handle_message(ctx, &from, data, len);
+
+// Poll for timeouts
+cyxwiz_privacy_poll(ctx, current_time_ms);
+```
 
 ## Architecture Layers
 
