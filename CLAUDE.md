@@ -155,6 +155,14 @@ cyxwiz_crypto_encrypt(plaintext, len, key, ciphertext, &ct_len);
 cyxwiz_crypto_decrypt(ciphertext, len, key, plaintext, &pt_len);
 ```
 
+### Key Refresh
+For forward secrecy, keys can be periodically rotated:
+```c
+// Refresh MPC MAC key (hourly recommended)
+cyxwiz_crypto_refresh_key(ctx);
+```
+The daemon automatically refreshes keys every hour (`CYXWIZ_KEY_REFRESH_INTERVAL_MS`).
+
 ### Constants
 - `CYXWIZ_KEY_SIZE` = 32 (256-bit keys)
 - `CYXWIZ_MAC_SIZE` = 16 (128-bit MACs)
@@ -317,6 +325,15 @@ cyxwiz_onion_poll(ctx, current_time_ms);
 cyxwiz_onion_wrap(payload, len, hops, keys, hop_count, out, &out_len);
 cyxwiz_onion_unwrap(onion, len, key, &next_hop, inner, &inner_len);
 ```
+
+### Key Refresh
+For forward secrecy, the X25519 keypair can be rotated:
+```c
+// Refresh keypair (clears all peer keys and circuits)
+cyxwiz_onion_refresh_keypair(ctx);
+// Must re-announce new public key to peers
+```
+The daemon automatically refreshes every hour and re-announces the new public key.
 
 ### Constants
 - `CYXWIZ_MAX_ONION_HOPS` = 3
@@ -513,6 +530,16 @@ For scripting/testing, use `--batch` flag:
 echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 ```
 
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CYXWIZ_BOOTSTRAP` | Bootstrap server address (enables UDP transport) | - |
+| `CYXWIZ_PARTY_ID` | MPC party ID (1-255) | 1 |
+| `CYXWIZ_LORA_SERIAL` | LoRa serial port (e.g., `/dev/ttyUSB0`) | - |
+| `CYXWIZ_LORA_SPI` | LoRa SPI device (e.g., `/dev/spidev0.0`) | - |
+| `CYXWIZ_LORA_FREQ` | LoRa frequency in Hz | 915000000 |
+
 ## Transport Drivers
 
 ### WiFi Direct (`wifi_direct.c`)
@@ -542,3 +569,4 @@ echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 - Use `cyxwiz_secure_compare()` for constant-time comparisons (prevents timing attacks)
 - Use `cyxwiz_free(ptr, size)` which zeros before freeing
 - All packet sizes constrained to 250 bytes (LoRa limit)
+- Keys automatically refresh hourly for forward secrecy (MPC MAC key + X25519 keypair)
