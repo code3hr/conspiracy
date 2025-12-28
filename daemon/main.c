@@ -496,19 +496,21 @@ static void cmd_peers(void)
 
         uint8_t quality = cyxwiz_peer_quality_score(peer);
         uint8_t loss = cyxwiz_peer_packet_loss(peer);
+        uint8_t rep = cyxwiz_peer_reputation(peer);
 
-        /* Show basic info + quality metrics */
+        /* Show basic info + quality/reputation metrics */
         if (peer->latency_ms > 0) {
-            printf("  [%zu] %.16s...  %-10s  RTT:%3ums  Loss:%2u%%  Q:%3u\n",
+            printf("  [%zu] %.16s...  %-10s  RTT:%3ums  Loss:%2u%%  Rep:%3u\n",
                    i + 1, hex_id,
                    cyxwiz_peer_state_name(peer->state),
-                   peer->latency_ms, loss, quality);
+                   peer->latency_ms, loss, rep);
         } else {
-            printf("  [%zu] %.16s...  %-10s  RTT:--    Loss:--   Q:%3u\n",
+            printf("  [%zu] %.16s...  %-10s  RTT:--    Loss:--   Rep:%3u\n",
                    i + 1, hex_id,
                    cyxwiz_peer_state_name(peer->state),
-                   quality);
+                   rep);
         }
+        CYXWIZ_UNUSED(quality); /* Reputation includes quality */
     }
 
     printf("  ───────────────────────────────────────────────\n");

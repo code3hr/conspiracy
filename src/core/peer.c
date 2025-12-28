@@ -335,6 +335,40 @@ cyxwiz_error_t cyxwiz_peer_table_increment_pings(
     return CYXWIZ_OK;
 }
 
+cyxwiz_error_t cyxwiz_peer_table_relay_success(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    table->peers[idx].relay_successes++;
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_relay_failure(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    table->peers[idx].relay_failures++;
+    return CYXWIZ_OK;
+}
+
 cyxwiz_error_t cyxwiz_peer_table_set_identity_verified(
     cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id,
@@ -524,5 +558,41 @@ void cyxwiz_peer_update_latency(cyxwiz_peer_t *peer, uint16_t latency_ms)
             deviation_sum += (uint32_t)(diff < 0 ? -diff : diff);
         }
         peer->jitter_ms = (uint16_t)(deviation_sum / peer->latency_count);
+    }
+}
+
+uint8_t cyxwiz_peer_reputation(const cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return 0;
+    }
+
+    /* Start with connection quality score */
+    int score = cyxwiz_peer_quality_score(peer);
+
+    /* Blend with relay reliability if we have data */
+    uint32_t total_relays = peer->relay_successes + peer->relay_failures;
+    if (total_relays > 0) {
+        int relay_rate = (int)((peer->relay_successes * 100) / total_relays);
+        /* 50/50 blend of quality and reliability */
+        score = (score + relay_rate) / 2;
+    }
+
+    if (score < 0) score = 0;
+    if (score > 100) score = 100;
+    return (uint8_t)score;
+}
+
+void cyxwiz_peer_relay_success(cyxwiz_peer_t *peer)
+{
+    if (peer != NULL) {
+        peer->relay_successes++;
+    }
+}
+
+void cyxwiz_peer_relay_failure(cyxwiz_peer_t *peer)
+{
+    if (peer != NULL) {
+        peer->relay_failures++;
     }
 }

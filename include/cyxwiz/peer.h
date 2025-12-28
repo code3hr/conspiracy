@@ -65,6 +65,12 @@ typedef struct {
     uint16_t jitter_ms;               /* Calculated jitter */
     uint32_t pings_sent;              /* Total pings sent */
     uint32_t pongs_received;          /* Successful responses */
+
+    /* Reputation metrics */
+    uint32_t relay_successes;         /* Messages relayed successfully */
+    uint32_t relay_failures;          /* Relay timeouts/errors */
+    uint32_t messages_sent;           /* Total messages sent to peer */
+    uint32_t messages_delivered;      /* Confirmed deliveries */
 } cyxwiz_peer_t;
 
 /*
@@ -175,6 +181,22 @@ cyxwiz_error_t cyxwiz_peer_table_set_identity_verified(
     cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id,
     const uint8_t *ed25519_pubkey
+);
+
+/*
+ * Record successful relay through peer
+ */
+cyxwiz_error_t cyxwiz_peer_table_relay_success(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
+);
+
+/*
+ * Record failed relay through peer
+ */
+cyxwiz_error_t cyxwiz_peer_table_relay_failure(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
 );
 
 /*
@@ -478,5 +500,21 @@ uint8_t cyxwiz_peer_quality_score(const cyxwiz_peer_t *peer);
  * Calculates rolling average and jitter
  */
 void cyxwiz_peer_update_latency(cyxwiz_peer_t *peer, uint16_t latency_ms);
+
+/*
+ * Get peer reputation score (0-100, higher is better)
+ * Blends connection quality with relay reliability
+ */
+uint8_t cyxwiz_peer_reputation(const cyxwiz_peer_t *peer);
+
+/*
+ * Record successful relay through peer
+ */
+void cyxwiz_peer_relay_success(cyxwiz_peer_t *peer);
+
+/*
+ * Record failed relay through peer
+ */
+void cyxwiz_peer_relay_failure(cyxwiz_peer_t *peer);
 
 #endif /* CYXWIZ_PEER_H */

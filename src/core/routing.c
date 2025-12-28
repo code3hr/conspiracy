@@ -1002,6 +1002,11 @@ static cyxwiz_error_t handle_route_data(
                 router->user_data);
         }
 
+        /* Update reputation: mark all hops as relay successes */
+        for (uint8_t i = 0; i < msg->hop_count; i++) {
+            cyxwiz_peer_table_relay_success(router->peer_table, &msg->path[i]);
+        }
+
         char hex_id[65];
         cyxwiz_node_id_to_hex(&msg->origin, hex_id);
         CYXWIZ_DEBUG("Delivered %d bytes from %.16s...", msg->payload_len, hex_id);
@@ -1034,6 +1039,9 @@ static cyxwiz_error_t handle_route_error(
     const cyxwiz_route_error_t *err)
 {
     CYXWIZ_UNUSED(from);
+
+    /* Update reputation: mark broken link as relay failure */
+    cyxwiz_peer_table_relay_failure(router->peer_table, &err->broken_link);
 
     /* Invalidate any route going through the broken link */
     for (size_t i = 0; i < CYXWIZ_MAX_ROUTES; i++) {
