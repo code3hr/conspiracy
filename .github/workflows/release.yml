@@ -60,7 +60,8 @@ jobs:
           -DCMAKE_PREFIX_PATH=$HOMEBREW_PREFIX \
           -DCMAKE_INCLUDE_PATH=$HOMEBREW_PREFIX/include \
           -DCMAKE_LIBRARY_PATH=$HOMEBREW_PREFIX/lib \
-          -DCYXWIZ_TRANSPORT_BLUETOOTH=OFF
+          -DCYXWIZ_TRANSPORT_BLUETOOTH=OFF \
+          -DCYXWIZ_TRANSPORT_LORA=OFF
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}}

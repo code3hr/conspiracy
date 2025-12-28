@@ -222,7 +222,8 @@ static void format_bt_addr(const bt_addr_t *addr, char *str)
              addr->b[2], addr->b[1], addr->b[0]);
 }
 
-/* Parse Bluetooth address from string */
+/* Parse Bluetooth address from string (for future use) */
+__attribute__((unused))
 static bool parse_bt_addr(const char *str, bt_addr_t *addr)
 {
     unsigned int b[6];
@@ -278,7 +279,8 @@ static bluetooth_peer_t *find_peer_by_addr(bluetooth_state_t *state,
     return NULL;
 }
 
-/* Find peer by socket */
+/* Find peer by socket (for future use) */
+__attribute__((unused))
 static bluetooth_peer_t *find_peer_by_socket(bluetooth_state_t *state,
                                               socket_t sock)
 {
