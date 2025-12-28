@@ -494,9 +494,21 @@ static void cmd_peers(void)
         char hex_id[65];
         cyxwiz_node_id_to_hex(&peer->id, hex_id);
 
-        printf("  [%zu] %.16s...  %s\n",
-               i + 1, hex_id,
-               cyxwiz_peer_state_name(peer->state));
+        uint8_t quality = cyxwiz_peer_quality_score(peer);
+        uint8_t loss = cyxwiz_peer_packet_loss(peer);
+
+        /* Show basic info + quality metrics */
+        if (peer->latency_ms > 0) {
+            printf("  [%zu] %.16s...  %-10s  RTT:%3ums  Loss:%2u%%  Q:%3u\n",
+                   i + 1, hex_id,
+                   cyxwiz_peer_state_name(peer->state),
+                   peer->latency_ms, loss, quality);
+        } else {
+            printf("  [%zu] %.16s...  %-10s  RTT:--    Loss:--   Q:%3u\n",
+                   i + 1, hex_id,
+                   cyxwiz_peer_state_name(peer->state),
+                   quality);
+        }
     }
 
     printf("  ───────────────────────────────────────────────\n");

@@ -597,9 +597,15 @@ static cyxwiz_error_t handle_pong(
     uint64_t now = cyxwiz_time_ms();
     uint64_t latency = now - msg->echo_timestamp;
 
+    /* Clamp to uint16_t max */
+    uint16_t latency_ms = (latency > 65535) ? 65535 : (uint16_t)latency;
+
     char hex_id[65];
     cyxwiz_node_id_to_hex(from, hex_id);
-    CYXWIZ_DEBUG("Pong from %.16s..., latency: %llu ms", hex_id, (unsigned long long)latency);
+    CYXWIZ_DEBUG("Pong from %.16s..., latency: %u ms", hex_id, latency_ms);
+
+    /* Update peer latency and quality metrics */
+    cyxwiz_peer_table_update_latency(discovery->peer_table, from, latency_ms);
 
     /* Update peer state */
     cyxwiz_peer_table_set_state(discovery->peer_table, from, CYXWIZ_PEER_STATE_CONNECTED);

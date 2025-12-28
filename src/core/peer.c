@@ -299,6 +299,42 @@ cyxwiz_error_t cyxwiz_peer_table_set_capabilities(
     return CYXWIZ_OK;
 }
 
+cyxwiz_error_t cyxwiz_peer_table_update_latency(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    uint16_t latency_ms)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    cyxwiz_peer_update_latency(&table->peers[idx], latency_ms);
+    table->peers[idx].pongs_received++;
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_increment_pings(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    table->peers[idx].pings_sent++;
+    return CYXWIZ_OK;
+}
+
 cyxwiz_error_t cyxwiz_peer_table_set_identity_verified(
     cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id,
@@ -401,4 +437,92 @@ size_t cyxwiz_peer_table_cleanup(
     }
 
     return removed;
+}
+
+/* ============ Connection Quality Metrics ============ */
+
+uint8_t cyxwiz_peer_packet_loss(const cyxwiz_peer_t *peer)
+{
+    if (peer == NULL || peer->pings_sent == 0) {
+        return 0;
+    }
+
+    uint32_t lost = peer->pings_sent - peer->pongs_received;
+    return (uint8_t)((lost * 100) / peer->pings_sent);
+}
+
+uint8_t cyxwiz_peer_quality_score(const cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return 0;
+    }
+
+    int score = 100;
+
+    /* Latency penalty: -30 max for high latency (300ms+) */
+    if (peer->latency_ms > 0) {
+        int latency_penalty = peer->latency_ms / 10;
+        if (latency_penalty > 30) latency_penalty = 30;
+        score -= latency_penalty;
+    }
+
+    /* Jitter penalty: -20 max for high jitter (100ms+) */
+    if (peer->jitter_ms > 0) {
+        int jitter_penalty = peer->jitter_ms / 5;
+        if (jitter_penalty > 20) jitter_penalty = 20;
+        score -= jitter_penalty;
+    }
+
+    /* Packet loss penalty: -40 max for 20%+ loss */
+    uint8_t loss = cyxwiz_peer_packet_loss(peer);
+    if (loss > 0) {
+        int loss_penalty = loss * 2;
+        if (loss_penalty > 40) loss_penalty = 40;
+        score -= loss_penalty;
+    }
+
+    /* RSSI penalty: -10 max for weak signal (-80 dBm or worse) */
+    if (peer->rssi < -50) {
+        int rssi_penalty = (-peer->rssi - 50) / 3;
+        if (rssi_penalty > 10) rssi_penalty = 10;
+        score -= rssi_penalty;
+    }
+
+    if (score < 0) score = 0;
+    return (uint8_t)score;
+}
+
+void cyxwiz_peer_update_latency(cyxwiz_peer_t *peer, uint16_t latency_ms)
+{
+    if (peer == NULL) {
+        return;
+    }
+
+    /* Update current latency */
+    peer->latency_ms = latency_ms;
+
+    /* Add to ring buffer */
+    peer->latency_samples[peer->latency_idx] = latency_ms;
+    peer->latency_idx = (peer->latency_idx + 1) % CYXWIZ_LATENCY_SAMPLES;
+    if (peer->latency_count < CYXWIZ_LATENCY_SAMPLES) {
+        peer->latency_count++;
+    }
+
+    /* Calculate jitter (RFC 3550 style simplified) */
+    if (peer->latency_count >= 2) {
+        /* Calculate average */
+        uint32_t sum = 0;
+        for (uint8_t i = 0; i < peer->latency_count; i++) {
+            sum += peer->latency_samples[i];
+        }
+        uint16_t avg = (uint16_t)(sum / peer->latency_count);
+
+        /* Calculate mean deviation (simplified jitter) */
+        uint32_t deviation_sum = 0;
+        for (uint8_t i = 0; i < peer->latency_count; i++) {
+            int diff = (int)peer->latency_samples[i] - (int)avg;
+            deviation_sum += (uint32_t)(diff < 0 ? -diff : diff);
+        }
+        peer->jitter_ms = (uint16_t)(deviation_sum / peer->latency_count);
+    }
 }

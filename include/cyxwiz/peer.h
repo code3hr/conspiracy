@@ -38,6 +38,9 @@ typedef enum {
     CYXWIZ_PEER_CAP_VALIDATE = 0x08  /* Can validate */
 } cyxwiz_peer_cap_t;
 
+/* Number of latency samples for jitter calculation */
+#define CYXWIZ_LATENCY_SAMPLES 8
+
 /*
  * Peer information
  */
@@ -49,11 +52,19 @@ typedef struct {
     int8_t rssi;                       /* Signal strength (dBm) */
     uint64_t last_seen;                /* Timestamp of last activity */
     uint64_t discovered_at;            /* When we first found them */
-    uint16_t latency_ms;               /* Round-trip latency */
+    uint16_t latency_ms;               /* Round-trip latency (current) */
     uint32_t bytes_sent;               /* Traffic stats */
     uint32_t bytes_recv;
     bool identity_verified;           /* True if Schnorr proof was valid */
     uint8_t ed25519_pubkey[CYXWIZ_ED25519_PK_SIZE]; /* Ed25519 key (if verified) */
+
+    /* Connection quality metrics */
+    uint16_t latency_samples[CYXWIZ_LATENCY_SAMPLES]; /* Rolling RTT samples */
+    uint8_t latency_idx;              /* Ring buffer index */
+    uint8_t latency_count;            /* Number of samples collected */
+    uint16_t jitter_ms;               /* Calculated jitter */
+    uint32_t pings_sent;              /* Total pings sent */
+    uint32_t pongs_received;          /* Successful responses */
 } cyxwiz_peer_t;
 
 /*
@@ -136,6 +147,24 @@ cyxwiz_error_t cyxwiz_peer_table_set_capabilities(
     cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id,
     uint8_t capabilities
+);
+
+/*
+ * Update peer latency with new RTT sample
+ * Also increments pongs_received counter
+ */
+cyxwiz_error_t cyxwiz_peer_table_update_latency(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    uint16_t latency_ms
+);
+
+/*
+ * Increment peer pings_sent counter
+ */
+cyxwiz_error_t cyxwiz_peer_table_increment_pings(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
 );
 
 /*
@@ -430,5 +459,24 @@ int cyxwiz_node_id_cmp(const cyxwiz_node_id_t *a, const cyxwiz_node_id_t *b);
  * Generate random node ID
  */
 void cyxwiz_node_id_random(cyxwiz_node_id_t *id);
+
+/* ============ Connection Quality Metrics ============ */
+
+/*
+ * Get packet loss percentage (0-100)
+ */
+uint8_t cyxwiz_peer_packet_loss(const cyxwiz_peer_t *peer);
+
+/*
+ * Get connection quality score (0-100, higher is better)
+ * Combines latency, jitter, packet loss, and signal strength
+ */
+uint8_t cyxwiz_peer_quality_score(const cyxwiz_peer_t *peer);
+
+/*
+ * Update peer latency with new sample
+ * Calculates rolling average and jitter
+ */
+void cyxwiz_peer_update_latency(cyxwiz_peer_t *peer, uint16_t latency_ms);
 
 #endif /* CYXWIZ_PEER_H */
