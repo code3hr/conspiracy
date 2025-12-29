@@ -5,6 +5,62 @@ All notable changes to CyxWiz Protocol will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-12-30
+
+### Added
+
+#### Network & Routing
+- Stream multiplexing for multiple concurrent data streams per circuit
+- Rendezvous points for hidden service connections
+- Pluggable transport framework for protocol obfuscation
+- Traffic analysis resistance with padding and timing jitter
+- Path diversity to avoid repeated relay selection
+- Replay protection with nonce tracking
+- Dead peer detection with configurable failure thresholds
+- Adaptive hop count based on network trust levels
+- Route failover with automatic re-discovery
+- NAT type detection via STUN (full cone, restricted, symmetric)
+
+#### Privacy & Security
+- Hidden services with introduction points
+- Circuit health monitoring with proactive rotation
+- Circuit rotation for long-lived connections
+- Key pinning to prevent MITM attacks
+- Circuit prebuilding for reduced latency
+- Module-specific rate limiting (compute, storage, consensus, onion)
+- Message hash for RELAY_ACK correlation (BLAKE2b)
+
+#### Reputation System
+- Peer reputation tracking (relay success/failure ratios)
+- Reputation-based route selection
+- Weighted onion relay selection by reputation
+- Reputation decay for inactive peers
+- Peer blacklisting for low-reputation nodes
+- Connection quality metrics (latency, jitter, bandwidth)
+- Reputation persistence across daemon restarts
+
+#### Reliability
+- Relay ACKs with message correlation
+- Bandwidth tracking per peer
+- Connection pooling for transport efficiency
+
+### Fixed
+
+#### Security (Critical)
+- Buffer overflow in `hex_to_bytes()` - input length validation
+- Uninitialized peer table fields - zeroed on creation
+- Discovery packet bounds check - version-based size validation
+- Route reply bounds validation - hop_count range check
+- File I/O error handling - fprintf/fclose return checks
+
+### Changed
+- Rate limiting now enforced per-module with configurable thresholds
+- Improved defensive programming across all message handlers
+
+### Tests
+- Added `test_peer_init_zeroed` - verifies field initialization
+- Added `test_route_reply_bounds` - verifies hop_count validation
+
 ## [0.2.0] - 2024-12-28
 
 ### Added
@@ -119,5 +175,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CMake build system with feature toggles
 - libsodium integration
 
-[0.2.0]: https://github.com/username/cyxwiz/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/username/cyxwiz/releases/tag/v0.1.0
+[0.3.0]: https://github.com/code3hr/conspiracy/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/code3hr/conspiracy/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/code3hr/conspiracy/releases/tag/v0.1.0
