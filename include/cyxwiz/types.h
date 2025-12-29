@@ -173,7 +173,14 @@ typedef enum {
     CYXWIZ_MSG_SERVICE_INTRO_ACK = 0x81,    /* Introduction accepted */
     CYXWIZ_MSG_SERVICE_CONNECT = 0x82,      /* Client connection request */
     CYXWIZ_MSG_SERVICE_CONNECTED = 0x83,    /* Connection established */
-    CYXWIZ_MSG_SERVICE_DATA = 0x84          /* Service data exchange */
+    CYXWIZ_MSG_SERVICE_DATA = 0x84,         /* Service data exchange */
+
+    /* Rendezvous Protocol (0x85-0x89) */
+    CYXWIZ_MSG_INTRODUCE1 = 0x85,           /* Client → Intro Point → Service */
+    CYXWIZ_MSG_INTRODUCE_ACK = 0x86,        /* Service → Intro Point → Client */
+    CYXWIZ_MSG_RENDEZVOUS1 = 0x87,          /* Client establishes at RP */
+    CYXWIZ_MSG_RENDEZVOUS2 = 0x88,          /* Service joins at RP */
+    CYXWIZ_MSG_RENDEZVOUS_DATA = 0x89       /* Data through RP bridge */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

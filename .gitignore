@@ -32,3 +32,6 @@ CMakeUserPresets.json
 # Debug files
 *.pdb
 *.ilk
+
+# CyxChat app (separate development)
+cyxchat/

@@ -51,29 +51,33 @@
 #define CYXWIZ_CIRCUIT_MIN_SUCCESS_RATE 70       /* Min % for healthy circuit */
 #define CYXWIZ_CIRCUIT_PROBE_MAGIC 0xCAFEBABE    /* Health probe marker */
 
+/* Stream multiplexing constants */
+#define CYXWIZ_MAX_STREAMS_PER_CIRCUIT 16       /* Max concurrent streams per circuit */
+#define CYXWIZ_STREAM_ID_SIZE 2                 /* Stream ID field size in bytes */
+#define CYXWIZ_STREAM_ID_DEFAULT 0              /* Default stream (backward compat) */
+
 /* Replay protection constants */
 #define CYXWIZ_MAX_SEEN_ONIONS 128            /* Max tracked onion packets */
 #define CYXWIZ_ONION_SEEN_TIMEOUT_MS 90000    /* 90 second expiry (circuit lifetime + buffer) */
 #define CYXWIZ_ONION_HASH_SIZE 16             /* Blake2b truncated hash */
 
 /*
- * Maximum payload per hop count (with ephemeral keys)
+ * Maximum payload per hop count (with ephemeral keys and stream_id)
+ * Header: type(1) + circuit_id(4) + stream_id(2) + ephemeral(32) = 39 bytes
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
  * Plus next_hop (32) for non-final layers
  * Final layer: zero_hop (32) + payload
  *
- * 1-hop: 250 - 5(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 141 bytes
- * 2-hop: 141 - 32(eph) - 40(enc) - 32(next_hop) = 37 bytes
+ * 1-hop: 250 - 7(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 139 bytes
+ * 2-hop: 139 - 32(eph) - 40(enc) - 32(next_hop) = 35 bytes
  * 3-hop: would be negative, so we limit to 2 hops with ephemeral keys
- *
- * Revised payload sizes:
  */
-#define CYXWIZ_ONION_PAYLOAD_1HOP 141   /* 1-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_2HOP 37    /* 2-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_1HOP 139   /* 1-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_2HOP 35    /* 2-hop onion payload */
 #define CYXWIZ_ONION_PAYLOAD_3HOP 0     /* 3-hop not supported with ephemeral */
 
-/* Onion message header size: type (1) + circuit_id (4) + ephemeral (32) = 37 bytes */
-#define CYXWIZ_ONION_HEADER_SIZE 37
+/* Onion message header size: type (1) + circuit_id (4) + stream_id (2) + ephemeral (32) = 39 bytes */
+#define CYXWIZ_ONION_HEADER_SIZE 39
 
 /* Maximum encrypted payload in onion packet */
 #define CYXWIZ_ONION_MAX_ENCRYPTED (CYXWIZ_MAX_PACKET_SIZE - CYXWIZ_ONION_HEADER_SIZE)
@@ -84,7 +88,7 @@
  * Onion-routed data message (0x24)
  * Total packet fits in 250 bytes
  *
- * Format: type (1) + circuit_id (4) + ephemeral_pub (32) + encrypted_data
+ * Format: type (1) + circuit_id (4) + stream_id (2) + ephemeral_pub (32) + encrypted_data
  * The ephemeral_pub is used by the receiver to derive the layer key via ECDH.
  */
 #ifdef _MSC_VER
@@ -93,8 +97,9 @@
 typedef struct {
     uint8_t type;                        /* CYXWIZ_MSG_ONION_DATA */
     uint32_t circuit_id;                 /* Circuit ID for replies */
+    uint16_t stream_id;                  /* Stream ID for multiplexing */
     uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE]; /* Ephemeral public key for this hop */
-    /* encrypted data follows (up to 213 bytes) */
+    /* encrypted data follows (up to 211 bytes) */
 }
 #ifdef __GNUC__
 __attribute__((packed))
@@ -125,6 +130,37 @@ cyxwiz_onion_layer_t;
 #pragma pack(pop)
 #endif
 
+/* ============ Stream Multiplexing ============ */
+
+/*
+ * Stream state
+ */
+typedef enum {
+    CYXWIZ_STREAM_STATE_CLOSED = 0,
+    CYXWIZ_STREAM_STATE_OPEN = 1,
+    CYXWIZ_STREAM_STATE_HALF_CLOSED = 2
+} cyxwiz_stream_state_t;
+
+/*
+ * Stream event types for callback
+ */
+typedef enum {
+    CYXWIZ_STREAM_EVENT_OPEN = 1,
+    CYXWIZ_STREAM_EVENT_DATA = 2,
+    CYXWIZ_STREAM_EVENT_CLOSE = 3,
+    CYXWIZ_STREAM_EVENT_ERROR = 4
+} cyxwiz_stream_event_t;
+
+/*
+ * Stream state (per circuit)
+ */
+typedef struct {
+    uint16_t stream_id;
+    cyxwiz_stream_state_t state;
+    uint64_t opened_at;
+    uint64_t last_activity_ms;
+} cyxwiz_stream_t;
+
 /*
  * Onion circuit (for building/tracking onion paths)
  */
@@ -144,6 +180,11 @@ typedef struct {
     uint16_t avg_latency_ms;          /* Running average RTT */
     bool health_probe_pending;        /* Awaiting probe response */
     uint64_t health_probe_sent_ms;    /* When probe was sent */
+
+    /* Stream multiplexing */
+    cyxwiz_stream_t streams[CYXWIZ_MAX_STREAMS_PER_CIRCUIT];
+    uint16_t next_stream_id;          /* Next stream ID to allocate */
+    size_t stream_count;              /* Active stream count */
 } cyxwiz_circuit_t;
 
 /*
@@ -210,6 +251,27 @@ cyxwiz_error_t cyxwiz_onion_refresh_keypair(cyxwiz_onion_ctx_t *ctx);
 void cyxwiz_onion_set_callback(
     cyxwiz_onion_ctx_t *ctx,
     cyxwiz_delivery_callback_t callback,
+    void *user_data
+);
+
+/*
+ * Stream callback type (receives stream events with stream ID)
+ */
+typedef void (*cyxwiz_stream_callback_t)(
+    const cyxwiz_node_id_t *from,
+    uint16_t stream_id,
+    cyxwiz_stream_event_t event,
+    const uint8_t *data,
+    size_t len,
+    void *user_data
+);
+
+/*
+ * Set stream callback for multiplexed stream events
+ */
+void cyxwiz_onion_set_stream_callback(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_stream_callback_t callback,
     void *user_data
 );
 
@@ -371,6 +433,57 @@ bool cyxwiz_onion_has_circuit_to(
 cyxwiz_circuit_t *cyxwiz_onion_find_circuit_to(
     cyxwiz_onion_ctx_t *ctx,
     const cyxwiz_node_id_t *destination
+);
+
+/* ============ Stream Multiplexing API ============ */
+
+/*
+ * Open a new stream on a circuit
+ *
+ * @param circuit       The circuit to open stream on
+ * @param stream_id_out Output: allocated stream ID
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_circuit_open_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t *stream_id_out
+);
+
+/*
+ * Send data on a specific stream
+ *
+ * @param ctx           Onion context
+ * @param circuit       The circuit
+ * @param stream_id     Stream ID (0 = default stream)
+ * @param data          Data to send
+ * @param len           Data length
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_send_stream(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_circuit_t *circuit,
+    uint16_t stream_id,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Close a stream
+ *
+ * @param circuit       The circuit
+ * @param stream_id     Stream ID to close
+ */
+void cyxwiz_circuit_close_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t stream_id
+);
+
+/*
+ * Get stream by ID on a circuit
+ */
+cyxwiz_stream_t *cyxwiz_circuit_get_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t stream_id
 );
 
 /* ============ Message Handling ============ */
@@ -541,6 +654,45 @@ bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx);
 #define CYXWIZ_SERVICE_DESCRIPTOR_TTL_MS 300000  /* Descriptor valid for 5 minutes */
 #define CYXWIZ_MAX_SERVICE_CONNECTIONS 8    /* Max client-side connections */
 
+/* Rendezvous point constants */
+#define CYXWIZ_MAX_RENDEZVOUS 8             /* Max concurrent rendezvous points */
+#define CYXWIZ_RENDEZVOUS_COOKIE_SIZE 20    /* Rendezvous cookie size */
+#define CYXWIZ_RENDEZVOUS_TIMEOUT_MS 60000  /* Rendezvous expires after 60s */
+
+/*
+ * Rendezvous point context
+ * Manages a rendezvous point that bridges client and service circuits.
+ */
+typedef struct {
+    uint8_t cookie[CYXWIZ_RENDEZVOUS_COOKIE_SIZE]; /* Rendezvous cookie (random) */
+    uint32_t client_circuit_id;           /* Circuit from client */
+    uint32_t service_circuit_id;          /* Circuit from service */
+    cyxwiz_node_id_t client_id;           /* Client node ID */
+    cyxwiz_node_id_t service_id;          /* Service node ID */
+    uint64_t established_at;              /* When first party arrived */
+    bool client_ready;                    /* Client has connected */
+    bool service_ready;                   /* Service has connected */
+    bool bridged;                         /* Both sides connected, bridge active */
+} cyxwiz_rendezvous_t;
+
+/*
+ * Client-side rendezvous state
+ * Tracks a pending or active connection to a hidden service.
+ */
+typedef struct {
+    cyxwiz_node_id_t service_id;          /* Target service ID */
+    uint8_t service_pubkey[CYXWIZ_PUBKEY_SIZE]; /* Service's X25519 public key */
+    cyxwiz_node_id_t rendezvous_point;    /* Selected RP node */
+    uint8_t rendezvous_cookie[CYXWIZ_RENDEZVOUS_COOKIE_SIZE]; /* Cookie for this connection */
+    uint32_t rp_circuit_id;               /* Circuit to RP */
+    uint8_t client_ephemeral_pub[CYXWIZ_PUBKEY_SIZE]; /* Client's ephemeral key for this connection */
+    uint8_t client_ephemeral_sk[CYXWIZ_KEY_SIZE]; /* Client's ephemeral secret key */
+    uint8_t shared_secret[CYXWIZ_KEY_SIZE]; /* Derived shared secret with service */
+    bool rp_ready;                        /* RENDEZVOUS1 acknowledged */
+    bool connected;                       /* INTRODUCE_ACK received, service connected */
+    uint64_t started_at;                  /* Connection start time */
+} cyxwiz_service_conn_t;
+
 /*
  * Service descriptor (published to introduction points)
  * Contains everything needed for a client to connect to the service.
@@ -660,5 +812,84 @@ void cyxwiz_hidden_service_destroy(
  * Get number of active hidden services
  */
 size_t cyxwiz_hidden_service_count(const cyxwiz_onion_ctx_t *ctx);
+
+/* ============ Rendezvous Point API ============ */
+
+/*
+ * Connect to a hidden service via rendezvous point
+ *
+ * Full Tor-style connection:
+ * 1. Client selects random node as RP
+ * 2. Client builds circuit to RP and sends RENDEZVOUS1
+ * 3. Client sends INTRODUCE1 via intro point to service
+ * 4. Service builds circuit to RP and sends RENDEZVOUS2
+ * 5. RP bridges the two circuits
+ *
+ * @param ctx           Onion context
+ * @param service_id    Target service ID
+ * @param service_pubkey Service's X25519 public key (32 bytes)
+ * @param intro_point   Introduction point to use (NULL to auto-select)
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_rendezvous_connect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *service_pubkey,
+    const cyxwiz_node_id_t *intro_point
+);
+
+/*
+ * Send data to a hidden service via rendezvous
+ *
+ * @param ctx           Onion context
+ * @param service_id    Target service ID
+ * @param data          Data to send
+ * @param len           Data length
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_rendezvous_send(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Check if connected to a hidden service via rendezvous
+ */
+bool cyxwiz_rendezvous_is_connected(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id
+);
+
+/*
+ * Disconnect from a hidden service
+ */
+void cyxwiz_rendezvous_disconnect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id
+);
+
+/*
+ * Get number of active rendezvous points (this node as RP)
+ */
+size_t cyxwiz_rendezvous_count(const cyxwiz_onion_ctx_t *ctx);
+
+/*
+ * Handle direct rendezvous messages (not onion-wrapped)
+ * Called by router when receiving message types 0x85-0x89
+ *
+ * @param ctx   Onion context
+ * @param from  Sender node ID
+ * @param data  Raw message data (includes type byte)
+ * @param len   Message length
+ * @return      CYXWIZ_OK if handled
+ */
+cyxwiz_error_t cyxwiz_onion_handle_direct_message(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len
+);
 
 #endif /* CYXWIZ_ONION_H */

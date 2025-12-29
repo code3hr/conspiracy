@@ -66,6 +66,10 @@ struct cyxwiz_onion_ctx {
     cyxwiz_delivery_callback_t callback;
     void *user_data;
 
+    /* Stream callback (for multiplexed stream events) */
+    cyxwiz_stream_callback_t stream_callback;
+    void *stream_user_data;
+
     /* Next circuit ID */
     uint32_t next_circuit_id;
 
@@ -73,14 +77,13 @@ struct cyxwiz_onion_ctx {
     cyxwiz_hidden_service_t services[CYXWIZ_MAX_HIDDEN_SERVICES];
     size_t service_count;
 
-    /* Client-side hidden service connections */
-    struct {
-        cyxwiz_node_id_t service_id;
-        uint8_t service_pubkey[CYXWIZ_PUBKEY_SIZE];
-        cyxwiz_circuit_t *circuit;
-        bool connected;
-    } service_connections[CYXWIZ_MAX_SERVICE_CONNECTIONS];
+    /* Client-side hidden service connections (rendezvous-based) */
+    cyxwiz_service_conn_t service_connections[CYXWIZ_MAX_SERVICE_CONNECTIONS];
     size_t connection_count;
+
+    /* Rendezvous points (this node acting as RP) */
+    cyxwiz_rendezvous_t rendezvous_points[CYXWIZ_MAX_RENDEZVOUS];
+    size_t rendezvous_count;
 };
 
 /* Forward declarations */
@@ -90,6 +93,15 @@ static void expire_seen_onions(cyxwiz_onion_ctx_t *ctx, uint64_t now);
 
 /* Circuit health monitoring */
 static void check_circuit_health(cyxwiz_onion_ctx_t *ctx, uint64_t now);
+
+/* Rendezvous point management */
+static cyxwiz_rendezvous_t *find_rendezvous_by_cookie(cyxwiz_onion_ctx_t *ctx, const uint8_t *cookie);
+static void handle_rendezvous1(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *from, uint32_t circuit_id, const uint8_t *data, size_t len);
+static void handle_rendezvous2(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *from, uint32_t circuit_id, const uint8_t *data, size_t len);
+static void handle_rendezvous_data(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *from, uint32_t circuit_id, const uint8_t *data, size_t len);
+static void handle_introduce1(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *from, const uint8_t *data, size_t len);
+static void handle_introduce_ack(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *from, const uint8_t *data, size_t len);
+static void expire_rendezvous_points(cyxwiz_onion_ctx_t *ctx, uint64_t now);
 static void send_circuit_health_probe(cyxwiz_onion_ctx_t *ctx, cyxwiz_circuit_t *circuit, uint64_t now);
 static uint8_t circuit_success_rate(const cyxwiz_circuit_t *circuit);
 
@@ -336,6 +348,18 @@ void cyxwiz_onion_set_callback(
     ctx->user_data = user_data;
 }
 
+void cyxwiz_onion_set_stream_callback(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_stream_callback_t callback,
+    void *user_data)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->stream_callback = callback;
+    ctx->stream_user_data = user_data;
+}
+
 cyxwiz_error_t cyxwiz_onion_poll(
     cyxwiz_onion_ctx_t *ctx,
     uint64_t current_time_ms)
@@ -395,6 +419,9 @@ cyxwiz_error_t cyxwiz_onion_poll(
 
     /* Check circuit health periodically */
     check_circuit_health(ctx, current_time_ms);
+
+    /* Expire old rendezvous points */
+    expire_rendezvous_points(ctx, current_time_ms);
 
     return CYXWIZ_OK;
 }
@@ -751,6 +778,90 @@ cyxwiz_circuit_t *cyxwiz_onion_get_circuit(
     return NULL;
 }
 
+/* ============ Stream Multiplexing ============ */
+
+cyxwiz_error_t cyxwiz_circuit_open_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t *stream_id_out)
+{
+    if (circuit == NULL || stream_id_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (!circuit->active) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (circuit->stream_count >= CYXWIZ_MAX_STREAMS_PER_CIRCUIT) {
+        CYXWIZ_ERROR("Max streams per circuit reached");
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Find free slot */
+    for (size_t i = 0; i < CYXWIZ_MAX_STREAMS_PER_CIRCUIT; i++) {
+        if (circuit->streams[i].state == CYXWIZ_STREAM_STATE_CLOSED) {
+            /* Allocate new stream ID (avoid 0 which is default/legacy) */
+            circuit->next_stream_id++;
+            if (circuit->next_stream_id == 0) {
+                circuit->next_stream_id = 1;  /* Wrap around, skip 0 */
+            }
+
+            circuit->streams[i].stream_id = circuit->next_stream_id;
+            circuit->streams[i].state = CYXWIZ_STREAM_STATE_OPEN;
+            circuit->streams[i].opened_at = cyxwiz_time_ms();
+            circuit->streams[i].last_activity_ms = circuit->streams[i].opened_at;
+            circuit->stream_count++;
+
+            *stream_id_out = circuit->streams[i].stream_id;
+            CYXWIZ_DEBUG("Opened stream %u on circuit %u", circuit->streams[i].stream_id, circuit->circuit_id);
+            return CYXWIZ_OK;
+        }
+    }
+
+    return CYXWIZ_ERR_QUEUE_FULL;
+}
+
+void cyxwiz_circuit_close_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t stream_id)
+{
+    if (circuit == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_STREAMS_PER_CIRCUIT; i++) {
+        if (circuit->streams[i].stream_id == stream_id &&
+            circuit->streams[i].state != CYXWIZ_STREAM_STATE_CLOSED) {
+            circuit->streams[i].state = CYXWIZ_STREAM_STATE_CLOSED;
+            circuit->stream_count--;
+            CYXWIZ_DEBUG("Closed stream %u on circuit %u", stream_id, circuit->circuit_id);
+            return;
+        }
+    }
+}
+
+cyxwiz_stream_t *cyxwiz_circuit_get_stream(
+    cyxwiz_circuit_t *circuit,
+    uint16_t stream_id)
+{
+    if (circuit == NULL) {
+        return NULL;
+    }
+
+    /* Stream ID 0 is the default/legacy stream - return NULL (use legacy callback) */
+    if (stream_id == CYXWIZ_STREAM_ID_DEFAULT) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_STREAMS_PER_CIRCUIT; i++) {
+        if (circuit->streams[i].stream_id == stream_id &&
+            circuit->streams[i].state != CYXWIZ_STREAM_STATE_CLOSED) {
+            return &circuit->streams[i];
+        }
+    }
+    return NULL;
+}
+
 /* ============ Payload Size ============ */
 
 size_t cyxwiz_onion_max_payload(uint8_t hop_count)
@@ -979,15 +1090,17 @@ cyxwiz_error_t cyxwiz_onion_unwrap(
 
 /* ============ Sending Messages ============ */
 
-cyxwiz_error_t cyxwiz_onion_send(
+cyxwiz_error_t cyxwiz_onion_send_stream(
     cyxwiz_onion_ctx_t *ctx,
     cyxwiz_circuit_t *circuit,
+    uint16_t stream_id,
     const uint8_t *data,
     size_t len)
 {
 #ifndef CYXWIZ_HAS_CRYPTO
     CYXWIZ_UNUSED(ctx);
     CYXWIZ_UNUSED(circuit);
+    CYXWIZ_UNUSED(stream_id);
     CYXWIZ_UNUSED(data);
     CYXWIZ_UNUSED(len);
     return CYXWIZ_ERR_NOT_INITIALIZED;
@@ -1007,6 +1120,14 @@ cyxwiz_error_t cyxwiz_onion_send(
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
+    /* Update stream activity if using a specific stream */
+    if (stream_id != CYXWIZ_STREAM_ID_DEFAULT) {
+        cyxwiz_stream_t *stream = cyxwiz_circuit_get_stream(circuit, stream_id);
+        if (stream != NULL) {
+            stream->last_activity_ms = cyxwiz_time_ms();
+        }
+    }
+
     /* Build onion with ephemeral keys */
     uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
@@ -1024,7 +1145,7 @@ cyxwiz_error_t cyxwiz_onion_send(
     }
 
     /*
-     * Build packet: type (1) + circuit_id (4) + ephemeral_pub (32) + onion
+     * Build packet: type (1) + circuit_id (4) + stream_id (2) + ephemeral_pub (32) + onion
      * The ephemeral_pub for the first hop is included in the header so the
      * first relay can derive the decryption key via ECDH.
      */
@@ -1039,6 +1160,10 @@ cyxwiz_error_t cyxwiz_onion_send(
     packet[packet_len++] = (circuit->circuit_id >> 16) & 0xFF;
     packet[packet_len++] = (circuit->circuit_id >> 8) & 0xFF;
     packet[packet_len++] = circuit->circuit_id & 0xFF;
+
+    /* Stream ID (big-endian) */
+    packet[packet_len++] = (stream_id >> 8) & 0xFF;
+    packet[packet_len++] = stream_id & 0xFF;
 
     /* Ephemeral public key for first hop */
     memcpy(packet + packet_len, circuit->ephemeral_pubs[0], CYXWIZ_EPHEMERAL_SIZE);
@@ -1059,6 +1184,16 @@ cyxwiz_error_t cyxwiz_onion_send(
 
     return send_err;
 #endif
+}
+
+cyxwiz_error_t cyxwiz_onion_send(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_circuit_t *circuit,
+    const uint8_t *data,
+    size_t len)
+{
+    /* Use default stream ID (backward compatible) */
+    return cyxwiz_onion_send_stream(ctx, circuit, CYXWIZ_STREAM_ID_DEFAULT, data, len);
 }
 
 /* ============ Replay Protection ============ */
@@ -1161,7 +1296,7 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         return CYXWIZ_ERR_INVALID;
     }
 
-    /* Header: type (1) + circuit_id (4) + ephemeral_pub (32) = 37 bytes */
+    /* Header: type (1) + circuit_id (4) + stream_id (2) + ephemeral_pub (32) = 39 bytes */
     if (len < CYXWIZ_ONION_HEADER_SIZE) {
         CYXWIZ_ERROR("Onion packet too short: %zu < %d", len, CYXWIZ_ONION_HEADER_SIZE);
         return CYXWIZ_ERR_INVALID;
@@ -1185,8 +1320,11 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
                           ((uint32_t)data[3] << 8) |
                           (uint32_t)data[4];
 
+    /* Extract stream ID from header */
+    uint16_t stream_id = ((uint16_t)data[5] << 8) | (uint16_t)data[6];
+
     /* Extract ephemeral public key from header */
-    const uint8_t *ephemeral_pub = data + 5;
+    const uint8_t *ephemeral_pub = data + 7;
 
     const uint8_t *onion = data + CYXWIZ_ONION_HEADER_SIZE;
     size_t onion_len = len - CYXWIZ_ONION_HEADER_SIZE;
@@ -1322,11 +1460,16 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         }
 
         /* Deliver to application */
-        CYXWIZ_DEBUG("Onion reached destination, delivering %zu bytes", inner_len);
+        CYXWIZ_DEBUG("Onion reached destination, delivering %zu bytes (stream %u)", inner_len, stream_id);
 
-        if (ctx->callback != NULL) {
+        /* Use stream callback for non-default streams, legacy callback otherwise */
+        if (stream_id != CYXWIZ_STREAM_ID_DEFAULT && ctx->stream_callback != NULL) {
             /* Note: 'from' is the immediate sender, not the original sender
              * (which is hidden by the onion routing) */
+            ctx->stream_callback(from, stream_id, CYXWIZ_STREAM_EVENT_DATA,
+                                 inner, inner_len, ctx->stream_user_data);
+        } else if (ctx->callback != NULL) {
+            /* Legacy callback for default stream or when no stream callback set */
             ctx->callback(from, inner, inner_len, ctx->user_data);
         }
     } else {
@@ -1348,6 +1491,10 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         forward_packet[forward_len++] = (circuit_id >> 16) & 0xFF;
         forward_packet[forward_len++] = (circuit_id >> 8) & 0xFF;
         forward_packet[forward_len++] = circuit_id & 0xFF;
+
+        /* Keep same stream ID */
+        forward_packet[forward_len++] = (stream_id >> 8) & 0xFF;
+        forward_packet[forward_len++] = stream_id & 0xFF;
 
         /* Include the next_ephemeral in the forwarded packet header */
         memcpy(forward_packet + forward_len, next_ephemeral, CYXWIZ_EPHEMERAL_SIZE);
@@ -2583,4 +2730,574 @@ size_t cyxwiz_hidden_service_count(const cyxwiz_onion_ctx_t *ctx)
         return 0;
     }
     return ctx->service_count;
+}
+
+/* ============ Rendezvous Point Implementation ============ */
+
+/*
+ * Find rendezvous point by cookie
+ */
+static cyxwiz_rendezvous_t *find_rendezvous_by_cookie(
+    cyxwiz_onion_ctx_t *ctx,
+    const uint8_t *cookie)
+{
+    if (ctx == NULL || cookie == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_RENDEZVOUS; i++) {
+        if (ctx->rendezvous_points[i].client_ready || ctx->rendezvous_points[i].service_ready) {
+            if (memcmp(ctx->rendezvous_points[i].cookie, cookie,
+                      CYXWIZ_RENDEZVOUS_COOKIE_SIZE) == 0) {
+                return &ctx->rendezvous_points[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Handle RENDEZVOUS1: Client establishes at RP
+ * Format: cookie(20)
+ */
+static void handle_rendezvous1(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    uint32_t circuit_id,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(circuit_id);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+#else
+    if (len < CYXWIZ_RENDEZVOUS_COOKIE_SIZE) {
+        CYXWIZ_WARN("RENDEZVOUS1 too short");
+        return;
+    }
+
+    const uint8_t *cookie = data;
+
+    /* Check if this cookie already exists */
+    cyxwiz_rendezvous_t *existing = find_rendezvous_by_cookie(ctx, cookie);
+    if (existing != NULL) {
+        CYXWIZ_WARN("RENDEZVOUS1: Cookie already in use");
+        return;
+    }
+
+    /* Find free slot */
+    cyxwiz_rendezvous_t *rp = NULL;
+    for (size_t i = 0; i < CYXWIZ_MAX_RENDEZVOUS; i++) {
+        if (!ctx->rendezvous_points[i].client_ready && !ctx->rendezvous_points[i].service_ready) {
+            rp = &ctx->rendezvous_points[i];
+            break;
+        }
+    }
+
+    if (rp == NULL) {
+        CYXWIZ_WARN("RENDEZVOUS1: No free slots");
+        return;
+    }
+
+    /* Set up client side of rendezvous */
+    memcpy(rp->cookie, cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+    rp->client_circuit_id = circuit_id;
+    memcpy(&rp->client_id, from, sizeof(cyxwiz_node_id_t));
+    rp->established_at = cyxwiz_time_ms();
+    rp->client_ready = true;
+    rp->service_ready = false;
+    rp->bridged = false;
+    ctx->rendezvous_count++;
+
+    CYXWIZ_DEBUG("RENDEZVOUS1: Client waiting at RP");
+#endif
+}
+
+/*
+ * Handle RENDEZVOUS2: Service joins at RP
+ * Format: cookie(20)
+ */
+static void handle_rendezvous2(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    uint32_t circuit_id,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(circuit_id);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+#else
+    if (len < CYXWIZ_RENDEZVOUS_COOKIE_SIZE) {
+        CYXWIZ_WARN("RENDEZVOUS2 too short");
+        return;
+    }
+
+    const uint8_t *cookie = data;
+
+    /* Find matching rendezvous point */
+    cyxwiz_rendezvous_t *rp = find_rendezvous_by_cookie(ctx, cookie);
+    if (rp == NULL) {
+        CYXWIZ_WARN("RENDEZVOUS2: No matching cookie");
+        return;
+    }
+
+    if (!rp->client_ready) {
+        CYXWIZ_WARN("RENDEZVOUS2: Client not ready");
+        return;
+    }
+
+    if (rp->service_ready) {
+        CYXWIZ_WARN("RENDEZVOUS2: Service already connected");
+        return;
+    }
+
+    /* Set up service side of rendezvous */
+    rp->service_circuit_id = circuit_id;
+    memcpy(&rp->service_id, from, sizeof(cyxwiz_node_id_t));
+    rp->service_ready = true;
+    rp->bridged = true;
+
+    CYXWIZ_INFO("RENDEZVOUS: Bridge established!");
+
+    /* Send acknowledgment to both sides (SERVICE_CONNECTED) */
+    uint8_t ack[1];
+    ack[0] = CYXWIZ_MSG_SERVICE_CONNECTED;
+
+    /* Notify client */
+    cyxwiz_router_send(ctx->router, &rp->client_id, ack, sizeof(ack));
+
+    /* Notify service */
+    cyxwiz_router_send(ctx->router, &rp->service_id, ack, sizeof(ack));
+#endif
+}
+
+/*
+ * Handle RENDEZVOUS_DATA: Forward data through the bridge
+ * Format: cookie(20) + payload
+ */
+static void handle_rendezvous_data(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    uint32_t circuit_id,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(circuit_id);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+#else
+    CYXWIZ_UNUSED(circuit_id);  /* Currently unused - reserved for future */
+
+    if (len < CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 1) {
+        return;
+    }
+
+    const uint8_t *cookie = data;
+    const uint8_t *payload = data + CYXWIZ_RENDEZVOUS_COOKIE_SIZE;
+    size_t payload_len = len - CYXWIZ_RENDEZVOUS_COOKIE_SIZE;
+
+    /* Find matching rendezvous point */
+    cyxwiz_rendezvous_t *rp = find_rendezvous_by_cookie(ctx, cookie);
+    if (rp == NULL || !rp->bridged) {
+        return;
+    }
+
+    /* Forward to the other side */
+    uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+    packet[0] = CYXWIZ_MSG_SERVICE_DATA;
+    memcpy(packet + 1, payload, payload_len);
+
+    if (memcmp(from, &rp->client_id, sizeof(cyxwiz_node_id_t)) == 0) {
+        /* From client, forward to service */
+        cyxwiz_router_send(ctx->router, &rp->service_id, packet, payload_len + 1);
+    } else if (memcmp(from, &rp->service_id, sizeof(cyxwiz_node_id_t)) == 0) {
+        /* From service, forward to client */
+        cyxwiz_router_send(ctx->router, &rp->client_id, packet, payload_len + 1);
+    }
+#endif
+}
+
+/*
+ * Handle INTRODUCE1: Introduction request from client to service
+ * Format: service_id(32) + rp_id(32) + cookie(20) + client_ephemeral_pub(32)
+ * This is forwarded by the introduction point to the service.
+ */
+static void handle_introduce1(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+#else
+    /* Expected: service_id(32) + rp_id(32) + cookie(20) + client_eph_pub(32) = 116 */
+    if (len < 32 + 32 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 32) {
+        CYXWIZ_WARN("INTRODUCE1 too short");
+        return;
+    }
+
+    cyxwiz_node_id_t service_id;
+    memcpy(service_id.bytes, data, CYXWIZ_NODE_ID_LEN);
+
+    /* Check if we are hosting this service */
+    for (size_t i = 0; i < CYXWIZ_MAX_HIDDEN_SERVICES; i++) {
+        if (ctx->services[i].active &&
+            memcmp(&ctx->services[i].service_id, &service_id, sizeof(cyxwiz_node_id_t)) == 0) {
+            /* We are the service - extract connection info */
+            cyxwiz_node_id_t rp_id;
+            memcpy(rp_id.bytes, data + 32, CYXWIZ_NODE_ID_LEN);
+
+            uint8_t cookie[CYXWIZ_RENDEZVOUS_COOKIE_SIZE];
+            memcpy(cookie, data + 64, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+
+            uint8_t client_eph_pub[CYXWIZ_PUBKEY_SIZE];
+            memcpy(client_eph_pub, data + 64 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE, CYXWIZ_PUBKEY_SIZE);
+
+            CYXWIZ_INFO("INTRODUCE1: Received introduction request");
+
+            /* Build circuit to RP and send RENDEZVOUS2 */
+            /* For now, send directly (simplified) - real impl would build circuit first */
+            uint8_t response[1 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE];
+            response[0] = CYXWIZ_MSG_RENDEZVOUS2;
+            memcpy(response + 1, cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+
+            cyxwiz_router_send(ctx->router, &rp_id, response, sizeof(response));
+
+            /* Send acknowledgment back through intro point */
+            uint8_t ack[1];
+            ack[0] = CYXWIZ_MSG_INTRODUCE_ACK;
+            cyxwiz_router_send(ctx->router, from, ack, sizeof(ack));
+
+            return;
+        }
+    }
+
+    /* Not our service - we might be the introduction point, forward to service */
+    /* Look up service_id in our peer keys to find the service */
+    cyxwiz_peer_key_t *peer_key = find_peer_key(ctx, &service_id);
+    if (peer_key != NULL) {
+        /* Forward the INTRODUCE1 to the service */
+        uint8_t forward[1 + 116];
+        forward[0] = CYXWIZ_MSG_INTRODUCE1;
+        memcpy(forward + 1, data, len > 116 ? 116 : len);
+        cyxwiz_router_send(ctx->router, &service_id, forward, 1 + (len > 116 ? 116 : len));
+        CYXWIZ_DEBUG("INTRODUCE1: Forwarded to service");
+    }
+#endif
+}
+
+/*
+ * Handle INTRODUCE_ACK: Service acknowledged introduction
+ */
+static void handle_introduce_ack(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+    CYXWIZ_UNUSED(from);
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    CYXWIZ_DEBUG("INTRODUCE_ACK: Introduction acknowledged");
+    /* Client can now expect RENDEZVOUS2 at the RP */
+}
+
+/*
+ * Expire old rendezvous points
+ */
+static void expire_rendezvous_points(cyxwiz_onion_ctx_t *ctx, uint64_t now)
+{
+    for (size_t i = 0; i < CYXWIZ_MAX_RENDEZVOUS; i++) {
+        cyxwiz_rendezvous_t *rp = &ctx->rendezvous_points[i];
+        if (rp->client_ready || rp->service_ready) {
+            if (now - rp->established_at > CYXWIZ_RENDEZVOUS_TIMEOUT_MS) {
+                CYXWIZ_DEBUG("Rendezvous point expired");
+                memset(rp, 0, sizeof(*rp));
+                ctx->rendezvous_count--;
+            }
+        }
+    }
+}
+
+/* ============ Rendezvous API ============ */
+
+cyxwiz_error_t cyxwiz_rendezvous_connect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *service_pubkey,
+    const cyxwiz_node_id_t *intro_point)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service_id);
+    CYXWIZ_UNUSED(service_pubkey);
+    CYXWIZ_UNUSED(intro_point);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service_id == NULL || service_pubkey == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if already connected */
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (ctx->service_connections[i].connected &&
+            memcmp(&ctx->service_connections[i].service_id, service_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            return CYXWIZ_OK;  /* Already connected */
+        }
+    }
+
+    /* Find free connection slot */
+    cyxwiz_service_conn_t *conn = NULL;
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (!ctx->service_connections[i].connected &&
+            ctx->service_connections[i].started_at == 0) {
+            conn = &ctx->service_connections[i];
+            break;
+        }
+    }
+
+    if (conn == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize connection state */
+    memset(conn, 0, sizeof(*conn));
+    memcpy(&conn->service_id, service_id, sizeof(cyxwiz_node_id_t));
+    memcpy(conn->service_pubkey, service_pubkey, CYXWIZ_PUBKEY_SIZE);
+    conn->started_at = cyxwiz_time_ms();
+
+    /* Generate random rendezvous cookie */
+    randombytes_buf(conn->rendezvous_cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+
+    /* Generate ephemeral keypair for this connection */
+    crypto_box_keypair(conn->client_ephemeral_pub, conn->client_ephemeral_sk);
+
+    /* Select a rendezvous point (any peer that's not the service or intro point) */
+    cyxwiz_node_id_t rp_id;
+    bool found_rp = false;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS && !found_rp; i++) {
+        if (ctx->peer_keys[i].valid) {
+            /* Skip service and intro point */
+            if (memcmp(&ctx->peer_keys[i].peer_id, service_id, sizeof(cyxwiz_node_id_t)) == 0) {
+                continue;
+            }
+            if (intro_point != NULL &&
+                memcmp(&ctx->peer_keys[i].peer_id, intro_point, sizeof(cyxwiz_node_id_t)) == 0) {
+                continue;
+            }
+            memcpy(&rp_id, &ctx->peer_keys[i].peer_id, sizeof(cyxwiz_node_id_t));
+            memcpy(&conn->rendezvous_point, &rp_id, sizeof(cyxwiz_node_id_t));
+            found_rp = true;
+        }
+    }
+
+    if (!found_rp) {
+        CYXWIZ_ERROR("No suitable rendezvous point found");
+        memset(conn, 0, sizeof(*conn));
+        return CYXWIZ_ERR_INSUFFICIENT_RELAYS;
+    }
+
+    /* Step 1: Send RENDEZVOUS1 to RP */
+    uint8_t rend1[1 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE];
+    rend1[0] = CYXWIZ_MSG_RENDEZVOUS1;
+    memcpy(rend1 + 1, conn->rendezvous_cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+
+    cyxwiz_error_t err = cyxwiz_router_send(ctx->router, &rp_id, rend1, sizeof(rend1));
+    if (err != CYXWIZ_OK) {
+        memset(conn, 0, sizeof(*conn));
+        return err;
+    }
+    conn->rp_ready = true;
+
+    /* Step 2: Send INTRODUCE1 to service via intro point */
+    /* Format: service_id(32) + rp_id(32) + cookie(20) + client_eph_pub(32) */
+    uint8_t intro1[1 + 32 + 32 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 32];
+    intro1[0] = CYXWIZ_MSG_INTRODUCE1;
+    memcpy(intro1 + 1, service_id->bytes, 32);
+    memcpy(intro1 + 33, rp_id.bytes, 32);
+    memcpy(intro1 + 65, conn->rendezvous_cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+    memcpy(intro1 + 85, conn->client_ephemeral_pub, 32);
+
+    /* Send to intro point (or service directly if no intro point specified) */
+    const cyxwiz_node_id_t *target = intro_point != NULL ? intro_point : service_id;
+    err = cyxwiz_router_send(ctx->router, target, intro1, sizeof(intro1));
+    if (err != CYXWIZ_OK) {
+        CYXWIZ_WARN("Failed to send INTRODUCE1");
+        /* Don't clean up - we might still receive RENDEZVOUS2 */
+    }
+
+    ctx->connection_count++;
+    CYXWIZ_INFO("Rendezvous connection initiated");
+
+    return CYXWIZ_OK;
+#endif
+}
+
+cyxwiz_error_t cyxwiz_rendezvous_send(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service_id);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service_id == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find connection */
+    cyxwiz_service_conn_t *conn = NULL;
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (ctx->service_connections[i].rp_ready &&
+            memcmp(&ctx->service_connections[i].service_id, service_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            conn = &ctx->service_connections[i];
+            break;
+        }
+    }
+
+    if (conn == NULL) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    /* Build RENDEZVOUS_DATA packet */
+    if (len + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 1 > CYXWIZ_MAX_PACKET_SIZE) {
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+    packet[0] = CYXWIZ_MSG_RENDEZVOUS_DATA;
+    memcpy(packet + 1, conn->rendezvous_cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
+    memcpy(packet + 1 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE, data, len);
+
+    return cyxwiz_router_send(ctx->router, &conn->rendezvous_point,
+                              packet, 1 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + len);
+#endif
+}
+
+bool cyxwiz_rendezvous_is_connected(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id)
+{
+    if (ctx == NULL || service_id == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (ctx->service_connections[i].connected &&
+            memcmp(&ctx->service_connections[i].service_id, service_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void cyxwiz_rendezvous_disconnect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id)
+{
+    if (ctx == NULL || service_id == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (memcmp(&ctx->service_connections[i].service_id, service_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            /* Clear sensitive data */
+            cyxwiz_secure_zero(ctx->service_connections[i].client_ephemeral_sk,
+                              sizeof(ctx->service_connections[i].client_ephemeral_sk));
+            cyxwiz_secure_zero(ctx->service_connections[i].shared_secret,
+                              sizeof(ctx->service_connections[i].shared_secret));
+            memset(&ctx->service_connections[i], 0, sizeof(ctx->service_connections[i]));
+            ctx->connection_count--;
+            return;
+        }
+    }
+}
+
+size_t cyxwiz_rendezvous_count(const cyxwiz_onion_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return 0;
+    }
+    return ctx->rendezvous_count;
+}
+
+cyxwiz_error_t cyxwiz_onion_handle_direct_message(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    if (ctx == NULL || from == NULL || data == NULL || len < 1) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    uint8_t msg_type = data[0];
+    const uint8_t *payload = data + 1;
+    size_t payload_len = len - 1;
+
+    switch (msg_type) {
+        case CYXWIZ_MSG_INTRODUCE1:
+            handle_introduce1(ctx, from, payload, payload_len);
+            return CYXWIZ_OK;
+
+        case CYXWIZ_MSG_INTRODUCE_ACK:
+            handle_introduce_ack(ctx, from, payload, payload_len);
+            return CYXWIZ_OK;
+
+        case CYXWIZ_MSG_RENDEZVOUS1:
+            handle_rendezvous1(ctx, from, 0, payload, payload_len);
+            return CYXWIZ_OK;
+
+        case CYXWIZ_MSG_RENDEZVOUS2:
+            handle_rendezvous2(ctx, from, 0, payload, payload_len);
+            return CYXWIZ_OK;
+
+        case CYXWIZ_MSG_RENDEZVOUS_DATA:
+            handle_rendezvous_data(ctx, from, 0, payload, payload_len);
+            return CYXWIZ_OK;
+
+        case CYXWIZ_MSG_SERVICE_CONNECTED:
+            /* Update client connection state */
+            for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+                if (ctx->service_connections[i].rp_ready &&
+                    !ctx->service_connections[i].connected) {
+                    ctx->service_connections[i].connected = true;
+                    CYXWIZ_INFO("Rendezvous connection established!");
+                    break;
+                }
+            }
+            return CYXWIZ_OK;
+
+        default:
+            return CYXWIZ_ERR_INVALID;
+    }
 }

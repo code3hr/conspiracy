@@ -147,6 +147,13 @@ if(CYXWIZ_TRANSPORT_UDP)
     endif()
 endif()
 
+# Pluggable transports (traffic obfuscation)
+option(CYXWIZ_OBFUSCATION "Enable pluggable transports (TLS obfuscation)" ON)
+if(CYXWIZ_OBFUSCATION)
+    list(APPEND CYXWIZ_SOURCES src/transport/obfuscation.c)
+    add_compile_definitions(CYXWIZ_HAS_OBFUSCATION=1)
+endif()
+
 # Core modules (peer discovery, routing, compute, consensus)
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
