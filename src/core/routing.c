@@ -36,6 +36,7 @@ typedef struct {
     uint8_t data[CYXWIZ_MAX_ROUTED_PAYLOAD];
     size_t len;
     uint64_t queued_at;
+    uint64_t dispatch_after_ms;  /* Traffic analysis: random delay before send */
     bool valid;
 } cyxwiz_pending_msg_t;
 
@@ -473,6 +474,16 @@ cyxwiz_error_t cyxwiz_router_poll(
             }
         }
 
+        /* Traffic analysis: dispatch delayed messages that are now ready */
+        for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+            if (router->pending[i].valid &&
+                current_time_ms >= router->pending[i].dispatch_after_ms &&
+                cyxwiz_router_has_route(router, &router->pending[i].destination)) {
+                /* Send this message now */
+                send_pending_messages(router, &router->pending[i].destination);
+            }
+        }
+
         /* Check for ACK timeouts - mark relay failure if no ACK received */
         for (size_t i = 0; i < CYXWIZ_MAX_PENDING_ACKS; i++) {
             if (router->pending_acks[i].valid) {
@@ -607,6 +618,17 @@ cyxwiz_error_t cyxwiz_router_send(
     memcpy(router->pending[slot].data, data, len);
     router->pending[slot].len = len;
     router->pending[slot].queued_at = cyxwiz_time_ms();
+
+    /* Traffic analysis resistance: add random delay before dispatch */
+#ifdef CYXWIZ_HAS_CRYPTO
+    uint32_t delay_rand;
+    randombytes_buf(&delay_rand, sizeof(delay_rand));
+    router->pending[slot].dispatch_after_ms =
+        router->pending[slot].queued_at + (delay_rand % (CYXWIZ_SEND_DELAY_MAX_MS + 1));
+#else
+    router->pending[slot].dispatch_after_ms = router->pending[slot].queued_at;
+#endif
+
     router->pending[slot].valid = true;
 
     /* Start route discovery if not already in progress */
@@ -999,9 +1021,18 @@ static cyxwiz_error_t send_pending_messages(
     cyxwiz_router_t *router,
     const cyxwiz_node_id_t *destination)
 {
+    uint64_t now = cyxwiz_time_ms();
+    bool has_delayed = false;
+
     for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
         if (router->pending[i].valid &&
             cyxwiz_node_id_cmp(&router->pending[i].destination, destination) == 0) {
+
+            /* Traffic analysis: check if delay has passed */
+            if (now < router->pending[i].dispatch_after_ms) {
+                has_delayed = true;
+                continue;  /* Not ready yet, skip */
+            }
 
             /* Send the queued message */
             cyxwiz_error_t err = cyxwiz_router_send(
@@ -1019,11 +1050,13 @@ static cyxwiz_error_t send_pending_messages(
         }
     }
 
-    /* Clear active discovery */
-    for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
-        if (router->discoveries[i].active &&
-            cyxwiz_node_id_cmp(&router->discoveries[i].destination, destination) == 0) {
-            router->discoveries[i].active = false;
+    /* Only clear discovery if no delayed messages remain */
+    if (!has_delayed) {
+        for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+            if (router->discoveries[i].active &&
+                cyxwiz_node_id_cmp(&router->discoveries[i].destination, destination) == 0) {
+                router->discoveries[i].active = false;
+            }
         }
     }
 

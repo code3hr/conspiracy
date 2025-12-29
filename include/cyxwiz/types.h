@@ -166,7 +166,14 @@ typedef enum {
     CYXWIZ_MSG_SERVICE_TOKEN_REQ = 0x78,    /* Request service access token */
     CYXWIZ_MSG_SERVICE_TOKEN = 0x79,        /* Service token issuance */
     CYXWIZ_MSG_SERVICE_TOKEN_USE = 0x7A,    /* Use service token */
-    CYXWIZ_MSG_REPUTATION_PROOF = 0x7B      /* Prove minimum reputation */
+    CYXWIZ_MSG_REPUTATION_PROOF = 0x7B,     /* Prove minimum reputation */
+
+    /* Hidden Services (0x80-0x8F) */
+    CYXWIZ_MSG_SERVICE_INTRO = 0x80,        /* Introduction point registration */
+    CYXWIZ_MSG_SERVICE_INTRO_ACK = 0x81,    /* Introduction accepted */
+    CYXWIZ_MSG_SERVICE_CONNECT = 0x82,      /* Client connection request */
+    CYXWIZ_MSG_SERVICE_CONNECTED = 0x83,    /* Connection established */
+    CYXWIZ_MSG_SERVICE_DATA = 0x84          /* Service data exchange */
 } cyxwiz_msg_type_t;
 
 /* Utility macros */

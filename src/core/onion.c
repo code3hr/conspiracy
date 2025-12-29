@@ -45,9 +45,11 @@ struct cyxwiz_onion_ctx {
     /* Cover traffic state */
     bool cover_traffic_enabled;
     uint64_t last_cover_traffic_ms;
+    uint64_t next_cover_traffic_ms;   /* Jittered next cover time */
 
     /* Circuit prebuilding state */
     uint64_t last_prebuild_ms;
+    uint64_t next_prebuild_ms;        /* Jittered next prebuild time */
 
     /* Path diversity: track relays in active circuits */
     cyxwiz_node_id_t active_relays[CYXWIZ_MAX_CIRCUITS * CYXWIZ_MAX_ONION_HOPS];
@@ -66,12 +68,174 @@ struct cyxwiz_onion_ctx {
 
     /* Next circuit ID */
     uint32_t next_circuit_id;
+
+    /* Hidden services (hosted by this node) */
+    cyxwiz_hidden_service_t services[CYXWIZ_MAX_HIDDEN_SERVICES];
+    size_t service_count;
+
+    /* Client-side hidden service connections */
+    struct {
+        cyxwiz_node_id_t service_id;
+        uint8_t service_pubkey[CYXWIZ_PUBKEY_SIZE];
+        cyxwiz_circuit_t *circuit;
+        bool connected;
+    } service_connections[CYXWIZ_MAX_SERVICE_CONNECTIONS];
+    size_t connection_count;
 };
 
 /* Forward declarations */
 static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx);
 static void prebuild_circuits(cyxwiz_onion_ctx_t *ctx, uint64_t now);
 static void expire_seen_onions(cyxwiz_onion_ctx_t *ctx, uint64_t now);
+
+/* Circuit health monitoring */
+static void check_circuit_health(cyxwiz_onion_ctx_t *ctx, uint64_t now);
+static void send_circuit_health_probe(cyxwiz_onion_ctx_t *ctx, cyxwiz_circuit_t *circuit, uint64_t now);
+static uint8_t circuit_success_rate(const cyxwiz_circuit_t *circuit);
+
+/* ============ Traffic Analysis Resistance ============ */
+
+/*
+ * Apply timing jitter to an interval
+ * Returns base_ms ± (percent% of base_ms)
+ */
+static uint64_t apply_jitter(uint64_t base_ms, uint8_t percent)
+{
+#ifdef CYXWIZ_HAS_CRYPTO
+    if (percent == 0 || base_ms == 0) {
+        return base_ms;
+    }
+
+    /* Calculate jitter range: ±percent% of base */
+    uint64_t jitter_range = (base_ms * percent) / 100;
+    if (jitter_range == 0) {
+        return base_ms;
+    }
+
+    /* Get random value in range [0, 2*jitter_range] */
+    uint32_t rand_val;
+    randombytes_buf(&rand_val, sizeof(rand_val));
+    uint64_t jitter = rand_val % (2 * jitter_range + 1);
+
+    /* Apply jitter: base - range + random(0, 2*range) = base ± range */
+    return base_ms - jitter_range + jitter;
+#else
+    return base_ms;
+#endif
+}
+
+/* ============ Circuit Health Monitoring ============ */
+
+/*
+ * Calculate circuit success rate (0-100%)
+ */
+static uint8_t circuit_success_rate(const cyxwiz_circuit_t *circuit)
+{
+    if (circuit == NULL || circuit->messages_sent == 0) {
+        return 100;  /* No data yet, assume healthy */
+    }
+
+    uint32_t successful = circuit->messages_sent - circuit->messages_failed;
+    return (uint8_t)((successful * 100) / circuit->messages_sent);
+}
+
+/*
+ * Send a health probe through a circuit
+ */
+static void send_circuit_health_probe(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_circuit_t *circuit,
+    uint64_t now)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(circuit);
+    CYXWIZ_UNUSED(now);
+#else
+    if (ctx == NULL || circuit == NULL || !circuit->active) {
+        return;
+    }
+
+    /* Already have a probe pending */
+    if (circuit->health_probe_pending) {
+        return;
+    }
+
+    /* Build probe payload: magic marker (4 bytes) + circuit_id (4 bytes) */
+    uint8_t probe[8];
+    probe[0] = (CYXWIZ_CIRCUIT_PROBE_MAGIC >> 24) & 0xFF;
+    probe[1] = (CYXWIZ_CIRCUIT_PROBE_MAGIC >> 16) & 0xFF;
+    probe[2] = (CYXWIZ_CIRCUIT_PROBE_MAGIC >> 8) & 0xFF;
+    probe[3] = CYXWIZ_CIRCUIT_PROBE_MAGIC & 0xFF;
+    probe[4] = (circuit->circuit_id >> 24) & 0xFF;
+    probe[5] = (circuit->circuit_id >> 16) & 0xFF;
+    probe[6] = (circuit->circuit_id >> 8) & 0xFF;
+    probe[7] = circuit->circuit_id & 0xFF;
+
+    /* Send probe through circuit */
+    cyxwiz_error_t err = cyxwiz_onion_send(ctx, circuit, probe, sizeof(probe));
+    if (err == CYXWIZ_OK) {
+        circuit->health_probe_pending = true;
+        circuit->health_probe_sent_ms = now;
+        CYXWIZ_DEBUG("Sent health probe for circuit %u", circuit->circuit_id);
+    } else {
+        CYXWIZ_WARN("Failed to send health probe for circuit %u: %s",
+                   circuit->circuit_id, cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/*
+ * Check health of all active circuits
+ * - Sends probes to circuits without recent activity
+ * - Checks for probe timeouts
+ * - Rotates unhealthy circuits early
+ */
+static void check_circuit_health(cyxwiz_onion_ctx_t *ctx, uint64_t now)
+{
+    if (ctx == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        cyxwiz_circuit_t *circuit = &ctx->circuits[i];
+        if (!circuit->active) {
+            continue;
+        }
+
+        uint64_t age = now - circuit->created_at;
+
+        /* Check for probe timeout */
+        if (circuit->health_probe_pending) {
+            uint64_t probe_age = now - circuit->health_probe_sent_ms;
+            if (probe_age > CYXWIZ_CIRCUIT_HEALTH_TIMEOUT_MS) {
+                /* Probe timed out - count as failure */
+                circuit->messages_failed++;
+                circuit->health_probe_pending = false;
+                CYXWIZ_WARN("Health probe timeout for circuit %u", circuit->circuit_id);
+            }
+        }
+
+        /* Check success rate - rotate early if unhealthy */
+        uint8_t success_rate = circuit_success_rate(circuit);
+        if (circuit->messages_sent >= 3 && success_rate < CYXWIZ_CIRCUIT_MIN_SUCCESS_RATE) {
+            CYXWIZ_WARN("Circuit %u unhealthy (success rate %u%%), forcing rotation",
+                       circuit->circuit_id, success_rate);
+            cyxwiz_secure_zero(circuit->keys, sizeof(circuit->keys));
+            circuit->active = false;
+            ctx->circuit_count--;
+            continue;
+        }
+
+        /* Send health probe if circuit is old enough and no recent activity */
+        if (age >= CYXWIZ_CIRCUIT_HEALTH_INTERVAL_MS &&
+            !circuit->health_probe_pending &&
+            (circuit->last_success_ms == 0 ||
+             (now - circuit->last_success_ms) >= CYXWIZ_CIRCUIT_HEALTH_INTERVAL_MS)) {
+            send_circuit_health_probe(ctx, circuit, now);
+        }
+    }
+}
 
 /* ============ Helper Functions ============ */
 
@@ -197,19 +361,40 @@ cyxwiz_error_t cyxwiz_onion_poll(
     /* Expire old seen onion entries */
     expire_seen_onions(ctx, current_time_ms);
 
-    /* Send cover traffic periodically */
+    /* Send cover traffic periodically (with jitter for traffic analysis resistance) */
     if (ctx->cover_traffic_enabled) {
-        if (current_time_ms - ctx->last_cover_traffic_ms >= CYXWIZ_COVER_TRAFFIC_INTERVAL_MS) {
+        /* Initialize next_cover_traffic_ms on first poll */
+        if (ctx->next_cover_traffic_ms == 0) {
+            ctx->next_cover_traffic_ms = current_time_ms +
+                apply_jitter(CYXWIZ_COVER_TRAFFIC_INTERVAL_MS, CYXWIZ_TIMING_JITTER_PERCENT);
+        }
+
+        if (current_time_ms >= ctx->next_cover_traffic_ms) {
             ctx->last_cover_traffic_ms = current_time_ms;
+            /* Schedule next with jitter */
+            ctx->next_cover_traffic_ms = current_time_ms +
+                apply_jitter(CYXWIZ_COVER_TRAFFIC_INTERVAL_MS, CYXWIZ_TIMING_JITTER_PERCENT);
             send_cover_traffic(ctx);
         }
     }
 
-    /* Prebuild circuits periodically */
-    if (current_time_ms - ctx->last_prebuild_ms >= CYXWIZ_PREBUILD_INTERVAL_MS) {
+    /* Prebuild circuits periodically (with jitter for traffic analysis resistance) */
+    /* Initialize next_prebuild_ms on first poll */
+    if (ctx->next_prebuild_ms == 0) {
+        ctx->next_prebuild_ms = current_time_ms +
+            apply_jitter(CYXWIZ_PREBUILD_INTERVAL_MS, CYXWIZ_TIMING_JITTER_PERCENT);
+    }
+
+    if (current_time_ms >= ctx->next_prebuild_ms) {
         ctx->last_prebuild_ms = current_time_ms;
+        /* Schedule next with jitter */
+        ctx->next_prebuild_ms = current_time_ms +
+            apply_jitter(CYXWIZ_PREBUILD_INTERVAL_MS, CYXWIZ_TIMING_JITTER_PERCENT);
         prebuild_circuits(ctx, current_time_ms);
     }
+
+    /* Check circuit health periodically */
+    check_circuit_health(ctx, current_time_ms);
 
     return CYXWIZ_OK;
 }
@@ -465,6 +650,14 @@ cyxwiz_error_t cyxwiz_onion_build_circuit(
     circuit->hop_count = hop_count;
     circuit->created_at = cyxwiz_time_ms();
     circuit->active = true;
+
+    /* Initialize health monitoring fields */
+    circuit->messages_sent = 0;
+    circuit->messages_failed = 0;
+    circuit->last_success_ms = 0;
+    circuit->avg_latency_ms = 0;
+    circuit->health_probe_pending = false;
+    circuit->health_probe_sent_ms = 0;
 
     /*
      * Generate ephemeral keypairs for each hop and derive per-hop keys.
@@ -856,7 +1049,15 @@ cyxwiz_error_t cyxwiz_onion_send(
     packet_len += onion_len;
 
     /* Send to first hop */
-    return cyxwiz_router_send(ctx->router, &circuit->hops[0], packet, packet_len);
+    cyxwiz_error_t send_err = cyxwiz_router_send(ctx->router, &circuit->hops[0], packet, packet_len);
+
+    /* Track circuit health metrics */
+    circuit->messages_sent++;
+    if (send_err != CYXWIZ_OK) {
+        circuit->messages_failed++;
+    }
+
+    return send_err;
 #endif
 }
 
@@ -1038,12 +1239,85 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
     if (cyxwiz_node_id_is_zero(&next_hop)) {
         /* Check for cover traffic magic marker */
         if (inner_len >= sizeof(uint32_t)) {
-            uint32_t magic;
-            memcpy(&magic, inner, sizeof(magic));
+            uint32_t magic = ((uint32_t)inner[0] << 24) |
+                             ((uint32_t)inner[1] << 16) |
+                             ((uint32_t)inner[2] << 8) |
+                             (uint32_t)inner[3];
             if (magic == CYXWIZ_COVER_MAGIC) {
                 /* Silently discard cover traffic */
                 CYXWIZ_DEBUG("Discarded cover traffic");
                 return CYXWIZ_OK;
+            }
+
+            /* Check for health probe response */
+            if (magic == CYXWIZ_CIRCUIT_PROBE_MAGIC && inner_len >= 8) {
+                uint32_t probe_circuit_id = ((uint32_t)inner[4] << 24) |
+                                            ((uint32_t)inner[5] << 16) |
+                                            ((uint32_t)inner[6] << 8) |
+                                            (uint32_t)inner[7];
+
+                /* Find the circuit and update health metrics */
+                for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+                    cyxwiz_circuit_t *circuit = &ctx->circuits[i];
+                    if (circuit->active && circuit->circuit_id == probe_circuit_id &&
+                        circuit->health_probe_pending) {
+                        /* Calculate round-trip latency */
+                        uint64_t rtt = now - circuit->health_probe_sent_ms;
+
+                        /* Update running average (exponential moving average) */
+                        if (circuit->avg_latency_ms == 0) {
+                            circuit->avg_latency_ms = (uint16_t)rtt;
+                        } else {
+                            /* avg = 0.7 * old + 0.3 * new */
+                            circuit->avg_latency_ms = (uint16_t)(
+                                (circuit->avg_latency_ms * 7 + rtt * 3) / 10);
+                        }
+
+                        circuit->last_success_ms = now;
+                        circuit->health_probe_pending = false;
+                        CYXWIZ_DEBUG("Health probe response for circuit %u: RTT=%llu ms, avg=%u ms",
+                                    probe_circuit_id, (unsigned long long)rtt, circuit->avg_latency_ms);
+                        break;
+                    }
+                }
+                return CYXWIZ_OK;
+            }
+        }
+
+        /* Check for hidden service messages */
+        if (inner_len >= 1) {
+            uint8_t msg_type = inner[0];
+
+            /* SERVICE_INTRO: Introduction point registration */
+            if (msg_type == CYXWIZ_MSG_SERVICE_INTRO && inner_len >= 65) {
+                /* Parse: type(1) + service_id(32) + service_pubkey(32) */
+                cyxwiz_node_id_t service_id;
+                memcpy(service_id.bytes, inner + 1, CYXWIZ_NODE_ID_LEN);
+
+                uint8_t service_pubkey[CYXWIZ_PUBKEY_SIZE];
+                memcpy(service_pubkey, inner + 1 + CYXWIZ_NODE_ID_LEN, CYXWIZ_PUBKEY_SIZE);
+
+                /* Store as peer key for future communication */
+                cyxwiz_onion_add_peer_key(ctx, &service_id, service_pubkey);
+
+                char hex_id[65];
+                cyxwiz_node_id_to_hex(&service_id, hex_id);
+                CYXWIZ_INFO("Registered as introduction point for service %.16s...", hex_id);
+
+                return CYXWIZ_OK;
+            }
+
+            /* SERVICE_DATA: Data for a hosted hidden service */
+            if (msg_type == CYXWIZ_MSG_SERVICE_DATA && inner_len > 1) {
+                /* Find matching hosted service and deliver */
+                for (size_t i = 0; i < CYXWIZ_MAX_HIDDEN_SERVICES; i++) {
+                    if (ctx->services[i].active && ctx->services[i].callback != NULL) {
+                        /* Deliver data (skip message type byte) */
+                        ctx->services[i].callback(from, inner + 1, inner_len - 1,
+                                                  ctx->services[i].user_data);
+                        return CYXWIZ_OK;
+                    }
+                }
             }
         }
 
@@ -2011,4 +2285,302 @@ static void prebuild_circuits(cyxwiz_onion_ctx_t *ctx, uint64_t now)
                      hex_id, cyxwiz_strerror(err));
     }
 #endif
+}
+
+/* ============ Hidden Services ============ */
+
+cyxwiz_error_t cyxwiz_hidden_service_create(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t **service_out)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service_out);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find free service slot */
+    cyxwiz_hidden_service_t *service = NULL;
+    for (size_t i = 0; i < CYXWIZ_MAX_HIDDEN_SERVICES; i++) {
+        if (!ctx->services[i].active) {
+            service = &ctx->services[i];
+            break;
+        }
+    }
+
+    if (service == NULL) {
+        CYXWIZ_ERROR("Hidden service table full");
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Generate X25519 keypair for the service */
+    crypto_box_keypair(service->public_key, service->secret_key);
+
+    /* Derive service ID from public key (first 32 bytes of hash) */
+    crypto_generichash(service->service_id.bytes, CYXWIZ_NODE_ID_LEN,
+                       service->public_key, CYXWIZ_PUBKEY_SIZE,
+                       NULL, 0);
+
+    /* Initialize other fields */
+    memset(service->intro_points, 0, sizeof(service->intro_points));
+    service->last_publish_ms = 0;
+    service->active = true;
+    service->callback = NULL;
+    service->user_data = NULL;
+
+    ctx->service_count++;
+    *service_out = service;
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&service->service_id, hex_id);
+    CYXWIZ_INFO("Created hidden service: %.16s...", hex_id);
+
+    return CYXWIZ_OK;
+#endif
+}
+
+cyxwiz_error_t cyxwiz_hidden_service_publish(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t *service)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service == NULL || !service->active) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Select introduction points from available peers */
+    size_t intro_count = 0;
+    for (size_t i = 0; i < ctx->peer_key_count && intro_count < CYXWIZ_SERVICE_INTRO_POINTS; i++) {
+        if (ctx->peer_keys[i].valid) {
+            /* Check this peer isn't the local node */
+            if (cyxwiz_node_id_cmp(&ctx->peer_keys[i].peer_id, &ctx->local_id) == 0) {
+                continue;
+            }
+
+            /* Use this peer as introduction point */
+            memcpy(&service->intro_points[intro_count],
+                   &ctx->peer_keys[i].peer_id,
+                   sizeof(cyxwiz_node_id_t));
+            intro_count++;
+        }
+    }
+
+    if (intro_count == 0) {
+        CYXWIZ_ERROR("No peers available for introduction points");
+        return CYXWIZ_ERR_NO_ROUTE;
+    }
+
+    /* Build service descriptor */
+    uint8_t descriptor[128];
+    size_t desc_len = 0;
+
+    descriptor[desc_len++] = CYXWIZ_MSG_SERVICE_INTRO;
+
+    /* Service ID (32 bytes) */
+    memcpy(descriptor + desc_len, service->service_id.bytes, CYXWIZ_NODE_ID_LEN);
+    desc_len += CYXWIZ_NODE_ID_LEN;
+
+    /* Service public key (32 bytes) */
+    memcpy(descriptor + desc_len, service->public_key, CYXWIZ_PUBKEY_SIZE);
+    desc_len += CYXWIZ_PUBKEY_SIZE;
+
+    /* Publish to each introduction point */
+    size_t published = 0;
+    for (size_t i = 0; i < intro_count; i++) {
+        cyxwiz_error_t err = cyxwiz_onion_send_to(ctx, &service->intro_points[i],
+                                                  descriptor, desc_len);
+        if (err == CYXWIZ_OK) {
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(&service->intro_points[i], hex_id);
+            CYXWIZ_DEBUG("Published service descriptor to intro point %.16s...", hex_id);
+            published++;
+        } else {
+            CYXWIZ_WARN("Failed to publish to intro point: %s", cyxwiz_strerror(err));
+        }
+    }
+
+    if (published == 0) {
+        return CYXWIZ_ERR_NO_ROUTE;
+    }
+
+    service->last_publish_ms = cyxwiz_time_ms();
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&service->service_id, hex_id);
+    CYXWIZ_INFO("Published hidden service %.16s... to %zu intro points",
+                hex_id, published);
+
+    return CYXWIZ_OK;
+#endif
+}
+
+void cyxwiz_hidden_service_set_callback(
+    cyxwiz_hidden_service_t *service,
+    cyxwiz_delivery_callback_t callback,
+    void *user_data)
+{
+    if (service == NULL) {
+        return;
+    }
+    service->callback = callback;
+    service->user_data = user_data;
+}
+
+cyxwiz_error_t cyxwiz_hidden_service_connect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *service_pubkey)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service_id);
+    CYXWIZ_UNUSED(service_pubkey);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service_id == NULL || service_pubkey == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if already connected */
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (ctx->service_connections[i].connected &&
+            cyxwiz_node_id_cmp(&ctx->service_connections[i].service_id, service_id) == 0) {
+            return CYXWIZ_OK;  /* Already connected */
+        }
+    }
+
+    /* Find free connection slot */
+    int slot = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (!ctx->service_connections[i].connected) {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        CYXWIZ_ERROR("Service connection table full");
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Store the service info */
+    memcpy(&ctx->service_connections[slot].service_id, service_id, sizeof(cyxwiz_node_id_t));
+    memcpy(ctx->service_connections[slot].service_pubkey, service_pubkey, CYXWIZ_PUBKEY_SIZE);
+    ctx->service_connections[slot].connected = true;
+    ctx->connection_count++;
+
+    /* Send connection request via onion routing
+     * The service_id is used as the "destination" - in practice, this would
+     * go through an introduction point, but we simplify here by treating
+     * the service ID as if we have a route to it.
+     *
+     * For a full implementation, we would:
+     * 1. Query DHT/introduction points for the service descriptor
+     * 2. Connect via the introduction point
+     * 3. Do a rendezvous handshake
+     *
+     * For now, we simulate the connection by adding the service pubkey
+     * as a peer key, allowing future sends to be encrypted correctly.
+     */
+    cyxwiz_onion_add_peer_key(ctx, service_id, service_pubkey);
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(service_id, hex_id);
+    CYXWIZ_INFO("Connected to hidden service %.16s...", hex_id);
+
+    return CYXWIZ_OK;
+#endif
+}
+
+cyxwiz_error_t cyxwiz_hidden_service_send(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *data,
+    size_t len)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(service_id);
+    CYXWIZ_UNUSED(data);
+    CYXWIZ_UNUSED(len);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || service_id == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Find connection */
+    int slot = -1;
+    for (size_t i = 0; i < CYXWIZ_MAX_SERVICE_CONNECTIONS; i++) {
+        if (ctx->service_connections[i].connected &&
+            cyxwiz_node_id_cmp(&ctx->service_connections[i].service_id, service_id) == 0) {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(service_id, hex_id);
+        CYXWIZ_ERROR("Not connected to service %.16s...", hex_id);
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    /* Build service data message */
+    uint8_t msg[CYXWIZ_ONION_PAYLOAD_2HOP];
+    size_t msg_len = 0;
+
+    if (len > CYXWIZ_ONION_PAYLOAD_2HOP - 1) {
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    msg[msg_len++] = CYXWIZ_MSG_SERVICE_DATA;
+    memcpy(msg + msg_len, data, len);
+    msg_len += len;
+
+    /* Send via onion routing */
+    return cyxwiz_onion_send_to(ctx, service_id, msg, msg_len);
+#endif
+}
+
+void cyxwiz_hidden_service_destroy(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t *service)
+{
+    if (ctx == NULL || service == NULL) {
+        return;
+    }
+
+    /* Securely zero the secret key */
+    cyxwiz_secure_zero(service->secret_key, sizeof(service->secret_key));
+    cyxwiz_secure_zero(service->public_key, sizeof(service->public_key));
+
+    service->active = false;
+    service->callback = NULL;
+    service->user_data = NULL;
+
+    if (ctx->service_count > 0) {
+        ctx->service_count--;
+    }
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&service->service_id, hex_id);
+    CYXWIZ_INFO("Destroyed hidden service %.16s...", hex_id);
+
+    memset(&service->service_id, 0, sizeof(service->service_id));
+}
+
+size_t cyxwiz_hidden_service_count(const cyxwiz_onion_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return 0;
+    }
+    return ctx->service_count;
 }

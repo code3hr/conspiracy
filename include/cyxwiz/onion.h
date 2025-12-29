@@ -41,6 +41,16 @@
 #define CYXWIZ_PREBUILD_TARGET 4              /* Target number of prebuilt circuits */
 #define CYXWIZ_PREBUILD_INTERVAL_MS 5000      /* Check for prebuilding every 5s */
 
+/* Traffic analysis resistance - timing jitter */
+#define CYXWIZ_TIMING_JITTER_PERCENT 30       /* ±30% jitter on intervals */
+#define CYXWIZ_SEND_DELAY_MAX_MS 500          /* Max random send delay */
+
+/* Circuit health monitoring */
+#define CYXWIZ_CIRCUIT_HEALTH_INTERVAL_MS 15000  /* Health check every 15s */
+#define CYXWIZ_CIRCUIT_HEALTH_TIMEOUT_MS 5000    /* Probe timeout */
+#define CYXWIZ_CIRCUIT_MIN_SUCCESS_RATE 70       /* Min % for healthy circuit */
+#define CYXWIZ_CIRCUIT_PROBE_MAGIC 0xCAFEBABE    /* Health probe marker */
+
 /* Replay protection constants */
 #define CYXWIZ_MAX_SEEN_ONIONS 128            /* Max tracked onion packets */
 #define CYXWIZ_ONION_SEEN_TIMEOUT_MS 90000    /* 90 second expiry (circuit lifetime + buffer) */
@@ -126,6 +136,14 @@ typedef struct {
     uint8_t ephemeral_pubs[CYXWIZ_MAX_ONION_HOPS][CYXWIZ_EPHEMERAL_SIZE]; /* Per-hop ephemeral pubkeys */
     uint64_t created_at;
     bool active;
+
+    /* Health monitoring */
+    uint32_t messages_sent;           /* Total messages sent via this circuit */
+    uint32_t messages_failed;         /* Failed deliveries (timeout/error) */
+    uint64_t last_success_ms;         /* Last successful send timestamp */
+    uint16_t avg_latency_ms;          /* Running average RTT */
+    bool health_probe_pending;        /* Awaiting probe response */
+    uint64_t health_probe_sent_ms;    /* When probe was sent */
 } cyxwiz_circuit_t;
 
 /*
@@ -513,5 +531,134 @@ void cyxwiz_onion_enable_cover_traffic(
  * Check if cover traffic is enabled
  */
 bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx);
+
+/* ============ Hidden Services ============ */
+
+/* Hidden service constants */
+#define CYXWIZ_MAX_HIDDEN_SERVICES 4        /* Max hosted services */
+#define CYXWIZ_SERVICE_INTRO_POINTS 3       /* Introduction points per service */
+#define CYXWIZ_SERVICE_SURBS_PER_INTRO 2    /* SURBs per introduction point */
+#define CYXWIZ_SERVICE_DESCRIPTOR_TTL_MS 300000  /* Descriptor valid for 5 minutes */
+#define CYXWIZ_MAX_SERVICE_CONNECTIONS 8    /* Max client-side connections */
+
+/*
+ * Service descriptor (published to introduction points)
+ * Contains everything needed for a client to connect to the service.
+ */
+typedef struct {
+    cyxwiz_node_id_t service_id;              /* Derived from service pubkey */
+    uint8_t service_pubkey[CYXWIZ_PUBKEY_SIZE]; /* X25519 public key for encryption */
+    uint64_t created_at;                      /* Descriptor creation timestamp */
+    uint16_t version;                         /* Protocol version */
+} cyxwiz_service_descriptor_t;
+
+/*
+ * Hidden service context
+ * Represents a hosted anonymous service.
+ */
+typedef struct {
+    cyxwiz_node_id_t service_id;              /* Service identifier (derived from pubkey) */
+    uint8_t secret_key[CYXWIZ_KEY_SIZE];      /* X25519 secret key */
+    uint8_t public_key[CYXWIZ_PUBKEY_SIZE];   /* X25519 public key */
+    cyxwiz_node_id_t intro_points[CYXWIZ_SERVICE_INTRO_POINTS]; /* Introduction point nodes */
+    uint64_t last_publish_ms;                 /* Last descriptor publish time */
+    bool active;                              /* Service is running */
+    cyxwiz_delivery_callback_t callback;      /* Callback for incoming data */
+    void *user_data;                          /* User callback context */
+} cyxwiz_hidden_service_t;
+
+/*
+ * Create a new hidden service
+ *
+ * Generates a new X25519 keypair and derives the service ID.
+ *
+ * @param ctx           Onion context
+ * @param service_out   Output service pointer
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_hidden_service_create(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t **service_out
+);
+
+/*
+ * Publish service to introduction points
+ *
+ * Selects introduction points and publishes the service descriptor.
+ * Must be called after cyxwiz_hidden_service_create to make the
+ * service reachable.
+ *
+ * @param ctx       Onion context
+ * @param service   The service to publish
+ * @return          CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_hidden_service_publish(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t *service
+);
+
+/*
+ * Set callback for incoming service connections
+ *
+ * @param service   The hidden service
+ * @param callback  Function to call when data arrives
+ * @param user_data User context passed to callback
+ */
+void cyxwiz_hidden_service_set_callback(
+    cyxwiz_hidden_service_t *service,
+    cyxwiz_delivery_callback_t callback,
+    void *user_data
+);
+
+/*
+ * Connect to a hidden service as a client
+ *
+ * Fetches the service descriptor from introduction points and
+ * establishes a connection.
+ *
+ * @param ctx           Onion context
+ * @param service_id    Target service ID
+ * @param service_pubkey Service's X25519 public key (32 bytes)
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_hidden_service_connect(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *service_pubkey
+);
+
+/*
+ * Send data to a hidden service
+ *
+ * @param ctx           Onion context
+ * @param service_id    Target service ID
+ * @param data          Data to send
+ * @param len           Data length
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_hidden_service_send(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *service_id,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Destroy a hidden service
+ *
+ * Stops the service and clears all keys.
+ *
+ * @param ctx       Onion context
+ * @param service   Service to destroy
+ */
+void cyxwiz_hidden_service_destroy(
+    cyxwiz_onion_ctx_t *ctx,
+    cyxwiz_hidden_service_t *service
+);
+
+/*
+ * Get number of active hidden services
+ */
+size_t cyxwiz_hidden_service_count(const cyxwiz_onion_ctx_t *ctx);
 
 #endif /* CYXWIZ_ONION_H */
