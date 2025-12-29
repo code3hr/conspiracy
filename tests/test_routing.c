@@ -715,6 +715,58 @@ static int test_payload_size_limit(void)
     return 1;
 }
 
+/* Test route reply hop_count bounds validation (security fix verification) */
+static int test_route_reply_bounds(void)
+{
+    cyxwiz_peer_table_t *peer_table = NULL;
+    cyxwiz_transport_t *transport = NULL;
+    cyxwiz_router_t *router = NULL;
+    cyxwiz_node_id_t local_id, from_id;
+    cyxwiz_error_t err;
+
+    if (!check_transport_available()) return -1;
+
+    cyxwiz_peer_table_create(&peer_table);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_node_id_random(&local_id);
+    cyxwiz_node_id_random(&from_id);
+    cyxwiz_router_create(&router, peer_table, transport, &local_id);
+    cyxwiz_router_start(router);
+
+    /* Build a malformed route reply with hop_count = 0 */
+    cyxwiz_route_reply_t reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.type = CYXWIZ_MSG_ROUTE_REPLY;
+    reply.request_id = 12345;
+    memcpy(&reply.destination, &local_id, sizeof(cyxwiz_node_id_t));
+    reply.hop_count = 0;  /* Invalid - should be rejected */
+
+    err = cyxwiz_router_handle_message(router, &from_id, (uint8_t *)&reply, sizeof(reply));
+    if (err != CYXWIZ_ERR_INVALID) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    /* Build a malformed route reply with hop_count > CYXWIZ_MAX_HOPS */
+    reply.hop_count = CYXWIZ_MAX_HOPS + 1;  /* Invalid - exceeds max */
+
+    err = cyxwiz_router_handle_message(router, &from_id, (uint8_t *)&reply, sizeof(reply));
+    if (err != CYXWIZ_ERR_INVALID) {
+        cyxwiz_router_destroy(router);
+        cyxwiz_transport_destroy(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    cyxwiz_router_destroy(router);
+    cyxwiz_transport_destroy(transport);
+    cyxwiz_peer_table_destroy(peer_table);
+
+    return 1;
+}
+
 int main(void)
 {
     cyxwiz_log_init(CYXWIZ_LOG_NONE); /* Quiet during tests */
@@ -732,6 +784,7 @@ int main(void)
     TEST(send_to_self);
     TEST(invalidate_route);
     TEST(payload_size_limit);
+    TEST(route_reply_bounds);
 
     /* Anonymous routing tests */
     TEST(anon_route_req_format);

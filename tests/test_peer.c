@@ -352,6 +352,52 @@ static int test_peer_table_iterate(void)
     return 1;
 }
 
+/* Test that new peers have zeroed fields (security fix verification) */
+static int test_peer_init_zeroed(void)
+{
+    cyxwiz_peer_table_t *table = NULL;
+    cyxwiz_node_id_t id;
+    const cyxwiz_peer_t *peer;
+
+    cyxwiz_peer_table_create(&table);
+    cyxwiz_node_id_random(&id);
+
+    cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+
+    peer = cyxwiz_peer_table_find(table, &id);
+    if (peer == NULL) {
+        cyxwiz_peer_table_destroy(table);
+        return 0;
+    }
+
+    /* Verify rate limiting fields are zeroed */
+    if (peer->msgs_this_window != 0 || peer->rate_violations != 0) {
+        cyxwiz_peer_table_destroy(table);
+        return 0;
+    }
+
+    /* Verify latency tracking fields are zeroed */
+    if (peer->latency_idx != 0 || peer->latency_count != 0 || peer->jitter_ms != 0) {
+        cyxwiz_peer_table_destroy(table);
+        return 0;
+    }
+
+    /* Verify reputation fields are zeroed */
+    if (peer->relay_successes != 0 || peer->relay_failures != 0) {
+        cyxwiz_peer_table_destroy(table);
+        return 0;
+    }
+
+    /* Verify dead peer detection fields are zeroed */
+    if (peer->consecutive_failures != 0 || peer->ping_pending != false) {
+        cyxwiz_peer_table_destroy(table);
+        return 0;
+    }
+
+    cyxwiz_peer_table_destroy(table);
+    return 1;
+}
+
 int main(void)
 {
     cyxwiz_log_init(CYXWIZ_LOG_NONE); /* Quiet during tests */
@@ -369,6 +415,7 @@ int main(void)
     TEST(peer_state_name);
     TEST(peer_table_connected_count);
     TEST(peer_table_iterate);
+    TEST(peer_init_zeroed);
 
     printf("\n============================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);
