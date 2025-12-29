@@ -75,6 +75,15 @@ typedef struct {
     uint32_t messages_sent;           /* Total messages sent to peer */
     uint32_t messages_delivered;      /* Confirmed deliveries */
     uint64_t last_relay_activity;     /* When relay success/failure last updated */
+
+    /* Bandwidth tracking */
+    uint64_t bytes_sent_window;       /* Bytes sent in current window */
+    uint64_t bytes_recv_window;       /* Bytes received in current window */
+    uint64_t window_start_ms;         /* Window start time */
+    uint32_t bandwidth_kbps;          /* Calculated bandwidth (kbit/s) */
+
+    /* Connection state */
+    uint64_t last_send_ms;            /* Last successful send time */
 } cyxwiz_peer_t;
 
 /*
@@ -520,5 +529,43 @@ void cyxwiz_peer_relay_success(cyxwiz_peer_t *peer);
  * Record failed relay through peer
  */
 void cyxwiz_peer_relay_failure(cyxwiz_peer_t *peer);
+
+/* ============ Bandwidth Tracking ============ */
+
+#define CYXWIZ_BANDWIDTH_WINDOW_MS 10000  /* 10 second window */
+#define CYXWIZ_CONNECTION_WARM_MS  30000  /* 30 seconds for "warm" connection */
+
+/*
+ * Record bytes transferred to/from peer
+ */
+void cyxwiz_peer_record_transfer(cyxwiz_peer_t *peer, size_t bytes, bool is_send);
+
+/*
+ * Update bandwidth calculation (call periodically)
+ */
+void cyxwiz_peer_update_bandwidth(cyxwiz_peer_t *peer, uint64_t now);
+
+/*
+ * Get peer bandwidth in kbit/s
+ */
+uint32_t cyxwiz_peer_bandwidth(const cyxwiz_peer_t *peer);
+
+/*
+ * Check if connection is "warm" (recently active)
+ */
+bool cyxwiz_peer_is_warmed(const cyxwiz_peer_t *peer, uint64_t now);
+
+/* ============ Reputation Persistence ============ */
+
+/*
+ * Save peer table reputation data to file
+ */
+cyxwiz_error_t cyxwiz_peer_table_save(const cyxwiz_peer_table_t *table, const char *path);
+
+/*
+ * Load peer table reputation data from file
+ * Merges with existing peers, updates reputation metrics
+ */
+cyxwiz_error_t cyxwiz_peer_table_load(cyxwiz_peer_table_t *table, const char *path);
 
 #endif /* CYXWIZ_PEER_H */

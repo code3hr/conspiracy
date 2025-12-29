@@ -1251,6 +1251,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* Load saved reputation data */
+    cyxwiz_peer_table_load(peer_table, "cyxwiz_peers.dat");
+
     /* Set peer state change callback */
     cyxwiz_peer_table_set_callback(peer_table, on_peer_state_change, NULL);
 
@@ -1610,11 +1613,13 @@ int main(int argc, char *argv[])
         cyxwiz_transport_destroy(wifi_transport);
     }
 
-    /* Destroy peer table */
+    /* Save and destroy peer table */
     if (peer_table != NULL) {
         size_t peer_count = cyxwiz_peer_table_count(peer_table);
         if (peer_count > 0) {
             CYXWIZ_INFO("Had %zu peers in table", peer_count);
+            /* Save reputation data for next startup */
+            cyxwiz_peer_table_save(peer_table, "cyxwiz_peers.dat");
         }
         cyxwiz_peer_table_destroy(peer_table);
     }

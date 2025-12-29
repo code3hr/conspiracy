@@ -96,6 +96,7 @@ typedef enum {
     CYXWIZ_MSG_ONION_DATA = 0x24,     /* Onion-encrypted data packet */
     CYXWIZ_MSG_ANON_ROUTE_REQ = 0x25, /* Anonymous route request */
     CYXWIZ_MSG_ANON_ROUTE_REPLY = 0x26, /* Anonymous route reply */
+    CYXWIZ_MSG_RELAY_ACK = 0x27,      /* Relay acknowledgment */
 
     /* Compute messages (0x30-0x3F) */
     CYXWIZ_MSG_JOB_SUBMIT = 0x30,     /* Submit job to worker */

@@ -1006,10 +1006,11 @@ static size_t select_random_relays(
             continue;
         }
 
-        /* Get reputation score (0-100), default 50 if not in peer table */
+        /* Get peer and reputation score (0-100), default 50 if not in peer table */
         uint16_t rep = 50;
+        const cyxwiz_peer_t *peer = NULL;
         if (peer_table != NULL) {
-            const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(
+            peer = cyxwiz_peer_table_find(
                 peer_table, &ctx->peer_keys[i].peer_id);
             if (peer != NULL) {
                 rep = cyxwiz_peer_reputation(peer);
@@ -1021,11 +1022,25 @@ static size_t select_random_relays(
             continue;
         }
 
-        /* Weight = reputation + 10 (ensures low-rep peers still have a chance) */
+        /* Base weight = reputation + 10 */
+        uint16_t weight = rep + 10;
+
+        /* Bandwidth bonus: +1 per 10 kbit/s (max +20) */
+        if (peer != NULL) {
+            uint32_t bw_bonus = cyxwiz_peer_bandwidth(peer) / 10;
+            if (bw_bonus > 20) bw_bonus = 20;
+            weight += (uint16_t)bw_bonus;
+
+            /* Connection warmth bonus: +20 if recently active */
+            if (cyxwiz_peer_is_warmed(peer, cyxwiz_time_ms())) {
+                weight += 20;
+            }
+        }
+
         memcpy(&candidates[candidate_count].id, &ctx->peer_keys[i].peer_id,
                sizeof(cyxwiz_node_id_t));
-        candidates[candidate_count].weight = rep + 10;
-        total_weight += rep + 10;
+        candidates[candidate_count].weight = weight;
+        total_weight += weight;
         candidate_count++;
     }
 

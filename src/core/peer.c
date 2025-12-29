@@ -4,6 +4,10 @@
  * Maintains a table of known peers with their state and metadata.
  */
 
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include "cyxwiz/peer.h"
 #include "cyxwiz/zkp.h"
 #include "cyxwiz/memory.h"
@@ -620,4 +624,182 @@ void cyxwiz_peer_relay_failure(cyxwiz_peer_t *peer)
     if (peer != NULL) {
         peer->relay_failures++;
     }
+}
+
+/* ============ Bandwidth Tracking ============ */
+
+void cyxwiz_peer_record_transfer(cyxwiz_peer_t *peer, size_t bytes, bool is_send)
+{
+    if (peer == NULL || bytes == 0) {
+        return;
+    }
+
+    uint64_t now = cyxwiz_time_ms();
+
+    /* Reset window if expired */
+    if (peer->window_start_ms == 0 ||
+        now - peer->window_start_ms > CYXWIZ_BANDWIDTH_WINDOW_MS) {
+        peer->bytes_sent_window = 0;
+        peer->bytes_recv_window = 0;
+        peer->window_start_ms = now;
+    }
+
+    if (is_send) {
+        peer->bytes_sent_window += bytes;
+        peer->last_send_ms = now;
+    } else {
+        peer->bytes_recv_window += bytes;
+    }
+}
+
+void cyxwiz_peer_update_bandwidth(cyxwiz_peer_t *peer, uint64_t now)
+{
+    if (peer == NULL || peer->window_start_ms == 0) {
+        return;
+    }
+
+    uint64_t window_duration = now - peer->window_start_ms;
+    if (window_duration == 0) {
+        return;
+    }
+
+    /* Calculate total bytes and convert to kbit/s */
+    uint64_t total_bytes = peer->bytes_sent_window + peer->bytes_recv_window;
+    /* kbit/s = (bytes * 8) / (ms) = (bytes * 8000) / (ms * 1000) */
+    peer->bandwidth_kbps = (uint32_t)((total_bytes * 8) / window_duration);
+}
+
+uint32_t cyxwiz_peer_bandwidth(const cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return 0;
+    }
+    return peer->bandwidth_kbps;
+}
+
+bool cyxwiz_peer_is_warmed(const cyxwiz_peer_t *peer, uint64_t now)
+{
+    if (peer == NULL || peer->last_send_ms == 0) {
+        return false;
+    }
+    return (now - peer->last_send_ms) < CYXWIZ_CONNECTION_WARM_MS;
+}
+
+/* ============ Reputation Persistence ============ */
+
+cyxwiz_error_t cyxwiz_peer_table_save(const cyxwiz_peer_table_t *table, const char *path)
+{
+    if (table == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        CYXWIZ_WARN("Failed to open %s for writing", path);
+        return CYXWIZ_ERR_TRANSPORT;
+    }
+
+    fprintf(f, "# CyxWiz Peer Reputation Data\n");
+    fprintf(f, "# Format: node_id relay_successes relay_failures latency_ms pings_sent pongs_received\n");
+
+    for (size_t i = 0; i < table->count; i++) {
+        const cyxwiz_peer_t *peer = &table->peers[i];
+
+        /* Only save peers with reputation data */
+        if (peer->relay_successes == 0 && peer->relay_failures == 0 &&
+            peer->pings_sent == 0) {
+            continue;
+        }
+
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&peer->id, hex_id);
+
+        fprintf(f, "%s %u %u %u %u %u\n",
+                hex_id,
+                peer->relay_successes,
+                peer->relay_failures,
+                peer->latency_ms,
+                peer->pings_sent,
+                peer->pongs_received);
+    }
+
+    fclose(f);
+    CYXWIZ_INFO("Saved peer reputation to %s", path);
+    return CYXWIZ_OK;
+}
+
+static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        unsigned int byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) {
+            return -1;
+        }
+        bytes[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_load(cyxwiz_peer_table_t *table, const char *path)
+{
+    if (table == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        /* File doesn't exist - that's OK for first run */
+        return CYXWIZ_OK;
+    }
+
+    char line[256];
+    size_t loaded = 0;
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == '\n') {
+            continue;
+        }
+
+        char hex_id[65];
+        uint32_t relay_successes, relay_failures, latency_ms, pings_sent, pongs_received;
+
+        if (sscanf(line, "%64s %u %u %u %u %u",
+                   hex_id, &relay_successes, &relay_failures,
+                   &latency_ms, &pings_sent, &pongs_received) != 6) {
+            continue;
+        }
+
+        /* Convert hex to node ID */
+        cyxwiz_node_id_t id;
+        if (hex_to_bytes(hex_id, id.bytes, CYXWIZ_NODE_ID_LEN) != 0) {
+            continue;
+        }
+
+        /* Find or add peer */
+        int idx = -1;
+        for (size_t i = 0; i < table->count; i++) {
+            if (cyxwiz_node_id_cmp(&table->peers[i].id, &id) == 0) {
+                idx = (int)i;
+                break;
+            }
+        }
+
+        if (idx >= 0) {
+            /* Update existing peer with loaded reputation */
+            table->peers[idx].relay_successes = relay_successes;
+            table->peers[idx].relay_failures = relay_failures;
+            table->peers[idx].latency_ms = (uint16_t)latency_ms;
+            table->peers[idx].pings_sent = pings_sent;
+            table->peers[idx].pongs_received = pongs_received;
+            loaded++;
+        }
+        /* Don't add unknown peers - wait for discovery */
+    }
+
+    fclose(f);
+    if (loaded > 0) {
+        CYXWIZ_INFO("Loaded reputation for %zu peers from %s", loaded, path);
+    }
+    return CYXWIZ_OK;
 }

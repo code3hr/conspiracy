@@ -136,6 +136,11 @@ static cyxwiz_error_t handle_route_error(
     const cyxwiz_node_id_t *from,
     const cyxwiz_route_error_t *err);
 
+static cyxwiz_error_t handle_relay_ack(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_relay_ack_t *ack);
+
 static bool is_request_seen(
     cyxwiz_router_t *router,
     uint32_t request_id,
@@ -664,6 +669,12 @@ cyxwiz_error_t cyxwiz_router_handle_message(
             }
             break;
 
+        case CYXWIZ_MSG_RELAY_ACK:
+            if (len >= sizeof(cyxwiz_relay_ack_t)) {
+                return handle_relay_ack(router, from, (const cyxwiz_relay_ack_t *)data);
+            }
+            break;
+
         case CYXWIZ_MSG_ONION_DATA:
             /* Forward to onion layer for decryption/routing */
             if (router->on_onion != NULL) {
@@ -1070,6 +1081,30 @@ static cyxwiz_error_t handle_route_data(
             cyxwiz_peer_table_relay_success(router->peer_table, &msg->path[i]);
         }
 
+        /* Send RELAY_ACK back to origin */
+        cyxwiz_relay_ack_t ack;
+        memset(&ack, 0, sizeof(ack));
+        ack.type = CYXWIZ_MSG_RELAY_ACK;
+        ack.message_id = 0;  /* TODO: compute hash of message */
+        memcpy(&ack.origin, &msg->origin, sizeof(cyxwiz_node_id_t));
+        ack.hop_count = msg->hop_count;
+        ack.current_hop = msg->hop_count - 1;
+
+        /* Build reverse path */
+        for (uint8_t i = 0; i < msg->hop_count; i++) {
+            memcpy(&ack.path[i], &msg->path[msg->hop_count - 1 - i],
+                   sizeof(cyxwiz_node_id_t));
+        }
+
+        /* Send ACK to first hop of reverse path (or origin if direct) */
+        if (msg->hop_count > 1) {
+            router->transport->ops->send(router->transport,
+                &ack.path[0], (uint8_t *)&ack, sizeof(ack));
+        } else {
+            router->transport->ops->send(router->transport,
+                &msg->origin, (uint8_t *)&ack, sizeof(ack));
+        }
+
         char hex_id[65];
         cyxwiz_node_id_to_hex(&msg->origin, hex_id);
         CYXWIZ_DEBUG("Delivered %d bytes from %.16s...", msg->payload_len, hex_id);
@@ -1150,6 +1185,44 @@ static cyxwiz_error_t handle_route_error(
                 }
             }
         }
+    }
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Handle relay acknowledgment
+ * Forward to next hop or accept if we are the origin
+ */
+static cyxwiz_error_t handle_relay_ack(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const cyxwiz_relay_ack_t *ack)
+{
+    CYXWIZ_UNUSED(from);
+
+    /* Check if we are the origin */
+    if (cyxwiz_node_id_cmp(&ack->origin, &router->local_id) == 0) {
+        /* ACK received - message was successfully delivered */
+        CYXWIZ_DEBUG("Received relay ACK for message %u", ack->message_id);
+        return CYXWIZ_OK;
+    }
+
+    /* We are an intermediate hop - record success and forward */
+    if (ack->current_hop > 0) {
+        /* Mark the hop we received from as relay success */
+        cyxwiz_peer_table_relay_success(router->peer_table, from);
+
+        /* Forward to next hop in the ACK path */
+        cyxwiz_relay_ack_t fwd_ack;
+        memcpy(&fwd_ack, ack, sizeof(fwd_ack));
+        fwd_ack.current_hop = ack->current_hop - 1;
+
+        router->transport->ops->send(
+            router->transport,
+            &ack->path[fwd_ack.current_hop],
+            (uint8_t *)&fwd_ack,
+            sizeof(fwd_ack));
     }
 
     return CYXWIZ_OK;

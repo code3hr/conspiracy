@@ -156,6 +156,31 @@ cyxwiz_route_error_t;
 #pragma pack(pop)
 #endif
 
+/* ============ Relay Acknowledgment Message ============ */
+
+/*
+ * Relay acknowledgment (confirms successful delivery)
+ * Sent back along the path to update relay reputation
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                        /* CYXWIZ_MSG_RELAY_ACK */
+    uint32_t message_id;                 /* Hash of original message */
+    cyxwiz_node_id_t origin;             /* Original sender */
+    uint8_t hop_count;                   /* Hops in return path */
+    uint8_t current_hop;                 /* Current position */
+    cyxwiz_node_id_t path[CYXWIZ_MAX_HOPS]; /* Return path */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_relay_ack_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
 /* ============ Anonymous Routing Constants ============ */
 
 #define CYXWIZ_ANON_VERSION 1            /* Protocol version */

@@ -593,8 +593,16 @@ static int test_data_delivery(void)
         return 0;
     }
 
-    /* No message should have been sent (delivery, not forward) */
-    if (g_mock_state.send_count != 0) {
+    /* Exactly one message should have been sent: RELAY_ACK */
+    if (g_mock_state.send_count != 1) {
+        cyxwiz_router_destroy(router);
+        destroy_mock_transport(transport);
+        cyxwiz_peer_table_destroy(peer_table);
+        return 0;
+    }
+
+    /* Verify it was a RELAY_ACK */
+    if (last_sent_type() != CYXWIZ_MSG_RELAY_ACK) {
         cyxwiz_router_destroy(router);
         destroy_mock_transport(transport);
         cyxwiz_peer_table_destroy(peer_table);
