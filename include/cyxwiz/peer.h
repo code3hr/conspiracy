@@ -20,6 +20,8 @@
 #define CYXWIZ_DISCOVERY_INTERVAL_MS 5000  /* 5 seconds */
 #define CYXWIZ_HEARTBEAT_INTERVAL_MS 10000 /* 10 seconds */
 #define CYXWIZ_MIN_RELAY_REPUTATION 20     /* Blacklist threshold for relays */
+#define CYXWIZ_REPUTATION_DECAY_START_MS  300000   /* 5 min before decay starts */
+#define CYXWIZ_REPUTATION_DECAY_FULL_MS   1800000  /* 30 min for full decay */
 
 /* Peer states */
 typedef enum {
@@ -72,6 +74,7 @@ typedef struct {
     uint32_t relay_failures;          /* Relay timeouts/errors */
     uint32_t messages_sent;           /* Total messages sent to peer */
     uint32_t messages_delivered;      /* Confirmed deliveries */
+    uint64_t last_relay_activity;     /* When relay success/failure last updated */
 } cyxwiz_peer_t;
 
 /*

@@ -349,6 +349,7 @@ cyxwiz_error_t cyxwiz_peer_table_relay_success(
     }
 
     table->peers[idx].relay_successes++;
+    table->peers[idx].last_relay_activity = cyxwiz_time_ms();
     return CYXWIZ_OK;
 }
 
@@ -366,6 +367,7 @@ cyxwiz_error_t cyxwiz_peer_table_relay_failure(
     }
 
     table->peers[idx].relay_failures++;
+    table->peers[idx].last_relay_activity = cyxwiz_time_ms();
     return CYXWIZ_OK;
 }
 
@@ -574,6 +576,29 @@ uint8_t cyxwiz_peer_reputation(const cyxwiz_peer_t *peer)
     uint32_t total_relays = peer->relay_successes + peer->relay_failures;
     if (total_relays > 0) {
         int relay_rate = (int)((peer->relay_successes * 100) / total_relays);
+
+        /* Apply decay based on time since last relay activity */
+        if (peer->last_relay_activity > 0) {
+            uint64_t now = cyxwiz_time_ms();
+            uint64_t idle_time = now - peer->last_relay_activity;
+
+            if (idle_time > CYXWIZ_REPUTATION_DECAY_START_MS) {
+                /* Decay relay_rate toward 50 (neutral) */
+                uint64_t decay_time = idle_time - CYXWIZ_REPUTATION_DECAY_START_MS;
+                uint64_t decay_range = CYXWIZ_REPUTATION_DECAY_FULL_MS -
+                                       CYXWIZ_REPUTATION_DECAY_START_MS;
+
+                if (decay_time >= decay_range) {
+                    relay_rate = 50;  /* Fully decayed to neutral */
+                } else {
+                    /* Linear interpolation toward 50 */
+                    int diff = relay_rate - 50;
+                    relay_rate = 50 + (int)((diff * (int64_t)(decay_range - decay_time)) /
+                                            (int64_t)decay_range);
+                }
+            }
+        }
+
         /* 50/50 blend of quality and reliability */
         score = (score + relay_rate) / 2;
     }
