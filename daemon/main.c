@@ -420,6 +420,7 @@ static void cmd_help(void)
     printf("  /validators              List validators\n");
     printf("  /credits                 Show work credits\n");
     printf("  ───────────────────────────────────────────────\n");
+    printf("  /notallowed              Show prohibited activities\n");
     printf("  /quit                    Exit the daemon\n");
     printf("  ───────────────────────────────────────────────\n");
     printf("\n");
@@ -1002,6 +1003,31 @@ static void cmd_credits(void)
 #endif
 }
 
+/* Show prohibited activities */
+static void cmd_notallowed(void)
+{
+    printf("\n");
+    printf("  Prohibited Activities:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  The following are NOT ALLOWED on CyxWiz:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  - Mirrors/Userbots\n");
+    printf("  - Torrent Aggregators\n");
+    printf("  - Crypto Miners\n");
+    printf("  - Hosting/Distribution of DMCA protected content\n");
+    printf("  - Music Bots\n");
+    printf("  - VNCs/Virtual Desktops\n");
+    printf("  - Card Testing/Hosting Card Testing Services\n");
+    printf("  - Suspected Card Fraud/Payment Disputes\n");
+    printf("  - Trial Plan Abuse\n");
+    printf("  - Phishing\n");
+    printf("  - Sending Spam\n");
+    printf("  - Anything Illegal\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  Violation may result in network removal.\n");
+    printf("\n");
+}
+
 /* Process a complete command */
 static void process_command(const char *cmd)
 {
@@ -1043,6 +1069,8 @@ static void process_command(const char *cmd)
         cmd_validators();
     } else if (strcmp(cmd, "/credits") == 0) {
         cmd_credits();
+    } else if (strcmp(cmd, "/notallowed") == 0) {
+        cmd_notallowed();
     } else if (strcmp(cmd, "/quit") == 0 || strcmp(cmd, "/exit") == 0) {
         printf("  Shutting down...\n");
         g_running = false;

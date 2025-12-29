@@ -521,8 +521,20 @@ cyxwiz_error_t cyxwiz_router_send(
         cyxwiz_pad_message(packet, header_size + len, CYXWIZ_PADDED_SIZE);
 
         /* Send to first hop */
-        return router->transport->ops->send(
+        cyxwiz_error_t err = router->transport->ops->send(
             router->transport, &route->hops[0], packet, CYXWIZ_PADDED_SIZE);
+
+        if (err != CYXWIZ_OK) {
+            /* First hop unreachable - invalidate route and retry */
+            CYXWIZ_WARN("Route to first hop failed, invalidating and retrying");
+            cyxwiz_peer_table_relay_failure(router->peer_table, &route->hops[0]);
+            cyxwiz_router_invalidate_route(router, destination);
+
+            /* Queue for rediscovery (recursive call triggers discovery) */
+            return cyxwiz_router_send(router, destination, data, len);
+        }
+
+        return CYXWIZ_OK;
     }
 
     /* No route - queue message and start discovery */
@@ -1077,11 +1089,40 @@ static cyxwiz_error_t handle_route_data(
     cyxwiz_routed_data_t *fwd_msg = (cyxwiz_routed_data_t *)forward;
     fwd_msg->current_hop = next_hop_idx;
 
-    return router->transport->ops->send(
+    cyxwiz_error_t err = router->transport->ops->send(
         router->transport,
         &msg->path[next_hop_idx],
         forward,
         len);
+
+    if (err != CYXWIZ_OK) {
+        /* Send failed - notify origin and mark failure */
+        CYXWIZ_WARN("Forward to next hop failed, sending ROUTE_ERROR");
+
+        cyxwiz_peer_table_relay_failure(router->peer_table, &msg->path[next_hop_idx]);
+
+        /* Send ROUTE_ERROR back to origin */
+        cyxwiz_route_error_t route_err;
+        memset(&route_err, 0, sizeof(route_err));
+        route_err.type = CYXWIZ_MSG_ROUTE_ERROR;
+        memcpy(&route_err.origin, &msg->origin, sizeof(cyxwiz_node_id_t));
+        memcpy(&route_err.broken_link, &msg->path[next_hop_idx], sizeof(cyxwiz_node_id_t));
+
+        /* Send error back along path (previous hop or origin) */
+        if (msg->current_hop > 0) {
+            router->transport->ops->send(router->transport,
+                &msg->path[msg->current_hop - 1],
+                (uint8_t *)&route_err, sizeof(route_err));
+        } else {
+            router->transport->ops->send(router->transport,
+                &msg->origin,
+                (uint8_t *)&route_err, sizeof(route_err));
+        }
+
+        return err;
+    }
+
+    return CYXWIZ_OK;
 }
 
 static cyxwiz_error_t handle_route_error(

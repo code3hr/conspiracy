@@ -914,6 +914,31 @@ Found a vulnerability? Please report responsibly to the maintainers.
 
 ---
 
+## Not Allowed
+
+The following activities are strictly prohibited on the CyxWiz network:
+
+| Category | Description |
+|----------|-------------|
+| **Mirrors/Userbots** | Automated mirror accounts or userbot services |
+| **Torrent Aggregators** | Hosting or operating torrent indexing services |
+| **Crypto Miners** | Running cryptocurrency mining operations |
+| **DMCA Content** | Hosting or distributing DMCA-protected content |
+| **Music Bots** | Operating music streaming bots |
+| **VNC/Virtual Desktops** | Running virtual desktop or VNC services |
+| **Card Testing** | Any card testing or hosting card testing services |
+| **Card Fraud** | Suspected card fraud or payment disputes |
+| **Trial Abuse** | Abuse of trial plans or free tier resources |
+| **Phishing** | Phishing attempts or credential harvesting |
+| **Spam** | Sending unsolicited bulk messages |
+| **Illegal Activities** | Anything illegal under applicable law |
+
+Violation of these policies may result in immediate removal from the network.
+
+Use `/notallowed` in the daemon to view this list.
+
+---
+
 ## License
 
 [Add your license here]
