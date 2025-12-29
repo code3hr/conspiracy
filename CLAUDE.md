@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Commit Info
+
+Always use this information for commits:
+- **Code by**: code3hr (https://github.com/code3hr)
+- **Author**: cyxwiz-team
+
 ## Project Overview
 
 CyxWiz Protocol is a decentralized mesh network protocol for anonymous, privacy-first computing. Written in C for maximum portability (phones to servers) and security control.
