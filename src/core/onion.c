@@ -7,6 +7,10 @@
  * - Circuit management for multi-hop paths
  */
 
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include "cyxwiz/onion.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
@@ -16,6 +20,7 @@
 #endif
 
 #include <string.h>
+#include <stdio.h>
 
 /* Onion context structure */
 struct cyxwiz_onion_ctx {
@@ -34,6 +39,13 @@ struct cyxwiz_onion_ctx {
     cyxwiz_peer_key_t peer_keys[CYXWIZ_MAX_PEERS];
     size_t peer_key_count;
 
+    /* Guard nodes for consistent entry points */
+    cyxwiz_guard_t guards[CYXWIZ_NUM_GUARDS];
+
+    /* Cover traffic state */
+    bool cover_traffic_enabled;
+    uint64_t last_cover_traffic_ms;
+
     /* Delivery callback */
     cyxwiz_delivery_callback_t callback;
     void *user_data;
@@ -41,6 +53,9 @@ struct cyxwiz_onion_ctx {
     /* Next circuit ID */
     uint32_t next_circuit_id;
 };
+
+/* Forward declarations */
+static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx);
 
 /* ============ Helper Functions ============ */
 
@@ -160,6 +175,14 @@ cyxwiz_error_t cyxwiz_onion_poll(
                 ctx->circuits[i].active = false;
                 ctx->circuit_count--;
             }
+        }
+    }
+
+    /* Send cover traffic periodically */
+    if (ctx->cover_traffic_enabled) {
+        if (current_time_ms - ctx->last_cover_traffic_ms >= CYXWIZ_COVER_TRAFFIC_INTERVAL_MS) {
+            ctx->last_cover_traffic_ms = current_time_ms;
+            send_cover_traffic(ctx);
         }
     }
 
@@ -876,6 +899,17 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
 
     /* Check if this is the final destination */
     if (cyxwiz_node_id_is_zero(&next_hop)) {
+        /* Check for cover traffic magic marker */
+        if (inner_len >= sizeof(uint32_t)) {
+            uint32_t magic;
+            memcpy(&magic, inner, sizeof(magic));
+            if (magic == CYXWIZ_COVER_MAGIC) {
+                /* Silently discard cover traffic */
+                CYXWIZ_DEBUG("Discarded cover traffic");
+                return CYXWIZ_OK;
+            }
+        }
+
         /* Deliver to application */
         CYXWIZ_DEBUG("Onion reached destination, delivering %zu bytes", inner_len);
 
@@ -1035,6 +1069,18 @@ static size_t select_random_relays(
             if (cyxwiz_peer_is_warmed(peer, cyxwiz_time_ms())) {
                 weight += 20;
             }
+
+            /* Latency bonus: +15 for low latency peers */
+            if (peer->latency_ms > 0) {
+                if (peer->latency_ms < 50) {
+                    weight += 15;  /* Excellent: < 50ms */
+                } else if (peer->latency_ms < 100) {
+                    weight += 10;  /* Good: 50-100ms */
+                } else if (peer->latency_ms < 200) {
+                    weight += 5;   /* Acceptable: 100-200ms */
+                }
+                /* No bonus for > 200ms */
+            }
         }
 
         memcpy(&candidates[candidate_count].id, &ctx->peer_keys[i].peer_id,
@@ -1145,6 +1191,102 @@ static size_t calculate_relay_count(
 }
 
 /*
+ * Get available guard node (valid, has key, good reputation)
+ */
+static const cyxwiz_guard_t *get_available_guard(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination)
+{
+    cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
+    uint64_t now = cyxwiz_time_ms();
+
+    for (size_t i = 0; i < CYXWIZ_NUM_GUARDS; i++) {
+        if (!ctx->guards[i].valid) {
+            continue;
+        }
+
+        /* Check if guard is same as destination */
+        if (memcmp(&ctx->guards[i].id, destination, sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        /* Check if guard is expired */
+        if (now - ctx->guards[i].selected_at > CYXWIZ_GUARD_ROTATION_MS) {
+            ctx->guards[i].valid = false;
+            continue;
+        }
+
+        /* Check if we have a key with the guard */
+        if (!cyxwiz_onion_has_key(ctx, &ctx->guards[i].id)) {
+            continue;
+        }
+
+        /* Check guard reputation */
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(peer_table, &ctx->guards[i].id);
+        if (peer == NULL || cyxwiz_peer_reputation(peer) < CYXWIZ_GUARD_MIN_REPUTATION) {
+            continue;
+        }
+
+        return &ctx->guards[i];
+    }
+
+    return NULL;
+}
+
+/*
+ * Select a new guard node from available peers
+ */
+static void select_new_guard(cyxwiz_onion_ctx_t *ctx, size_t slot)
+{
+    cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
+    uint64_t now = cyxwiz_time_ms();
+
+    /* Find highest reputation peer that we have a key with */
+    const cyxwiz_peer_key_t *best = NULL;
+    uint8_t best_rep = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+        if (!ctx->peer_keys[i].valid) {
+            continue;
+        }
+
+        /* Skip if already a guard */
+        bool is_guard = false;
+        for (size_t j = 0; j < CYXWIZ_NUM_GUARDS; j++) {
+            if (ctx->guards[j].valid &&
+                memcmp(&ctx->guards[j].id, &ctx->peer_keys[i].peer_id, sizeof(cyxwiz_node_id_t)) == 0) {
+                is_guard = true;
+                break;
+            }
+        }
+        if (is_guard) {
+            continue;
+        }
+
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(peer_table, &ctx->peer_keys[i].peer_id);
+        if (peer == NULL) {
+            continue;
+        }
+
+        uint8_t rep = cyxwiz_peer_reputation(peer);
+        if (rep >= CYXWIZ_GUARD_MIN_REPUTATION && rep > best_rep) {
+            best = &ctx->peer_keys[i];
+            best_rep = rep;
+        }
+    }
+
+    if (best != NULL) {
+        memcpy(&ctx->guards[slot].id, &best->peer_id, sizeof(cyxwiz_node_id_t));
+        ctx->guards[slot].selected_at = now;
+        ctx->guards[slot].valid = true;
+
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&best->peer_id, hex_id);
+        CYXWIZ_INFO("Selected new guard node: %.16s... (reputation %u)", hex_id, best_rep);
+    }
+}
+
+/*
  * Build circuit to destination with automatic relay selection
  */
 static cyxwiz_error_t build_circuit_to(
@@ -1163,17 +1305,47 @@ static cyxwiz_error_t build_circuit_to(
     /* Calculate desired relay count based on network trust */
     size_t desired_relays = calculate_relay_count(ctx, destination);
 
-    /* Select relay nodes */
-    cyxwiz_node_id_t relays[CYXWIZ_MAX_ONION_HOPS - 1];
-    size_t relay_count = select_random_relays(ctx, destination, relays, desired_relays);
-
-    /* Build path: [relay(s)...] + destination */
+    /* Build path: [guard/relay(s)...] + destination */
     cyxwiz_node_id_t path[CYXWIZ_MAX_ONION_HOPS];
     uint8_t hop_count = 0;
 
-    /* Add relays to path */
-    for (size_t i = 0; i < relay_count; i++) {
-        memcpy(&path[hop_count++], &relays[i], sizeof(cyxwiz_node_id_t));
+    /* Try to use a guard as first hop if we need relays */
+    if (desired_relays > 0) {
+        const cyxwiz_guard_t *guard = get_available_guard(ctx, destination);
+
+        if (guard != NULL) {
+            memcpy(&path[hop_count++], &guard->id, sizeof(cyxwiz_node_id_t));
+            desired_relays--;
+            CYXWIZ_DEBUG("Using guard node as first hop");
+        } else {
+            /* No guard available - try to select one for next time */
+            for (size_t i = 0; i < CYXWIZ_NUM_GUARDS; i++) {
+                if (!ctx->guards[i].valid) {
+                    select_new_guard(ctx, i);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Select remaining relay nodes randomly */
+    if (desired_relays > 0) {
+        cyxwiz_node_id_t relays[CYXWIZ_MAX_ONION_HOPS - 1];
+        size_t relay_count = select_random_relays(ctx, destination, relays, desired_relays);
+
+        for (size_t i = 0; i < relay_count; i++) {
+            /* Skip if already in path (guard) */
+            bool skip = false;
+            for (uint8_t j = 0; j < hop_count; j++) {
+                if (memcmp(&path[j], &relays[i], sizeof(cyxwiz_node_id_t)) == 0) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (!skip) {
+                memcpy(&path[hop_count++], &relays[i], sizeof(cyxwiz_node_id_t));
+            }
+        }
     }
 
     /* Add destination as final hop */
@@ -1258,4 +1430,187 @@ size_t cyxwiz_onion_peer_key_count(const cyxwiz_onion_ctx_t *ctx)
         return 0;
     }
     return ctx->peer_key_count;
+}
+
+/* ============ Guard Node Management ============ */
+
+/*
+ * Convert node ID to hex string
+ */
+static void node_id_to_hex(const cyxwiz_node_id_t *id, char *hex)
+{
+    for (size_t i = 0; i < CYXWIZ_NODE_ID_LEN; i++) {
+        sprintf(hex + i * 2, "%02x", id->bytes[i]);
+    }
+    hex[CYXWIZ_NODE_ID_LEN * 2] = '\0';
+}
+
+/*
+ * Convert hex string to node ID
+ */
+static int hex_to_node_id(const char *hex, cyxwiz_node_id_t *id)
+{
+    for (size_t i = 0; i < CYXWIZ_NODE_ID_LEN; i++) {
+        unsigned int byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) {
+            return -1;
+        }
+        id->bytes[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+
+cyxwiz_error_t cyxwiz_onion_save_guards(
+    const cyxwiz_onion_ctx_t *ctx,
+    const char *path)
+{
+    if (ctx == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        CYXWIZ_WARN("Failed to open %s for writing guards", path);
+        return CYXWIZ_ERR_TRANSPORT;
+    }
+
+    fprintf(f, "# CyxWiz Guard Nodes\n");
+    fprintf(f, "# Format: node_id selected_at\n");
+
+    for (size_t i = 0; i < CYXWIZ_NUM_GUARDS; i++) {
+        if (ctx->guards[i].valid) {
+            char hex_id[65];
+            node_id_to_hex(&ctx->guards[i].id, hex_id);
+            fprintf(f, "%s %llu\n", hex_id, (unsigned long long)ctx->guards[i].selected_at);
+        }
+    }
+
+    fclose(f);
+    CYXWIZ_DEBUG("Saved %zu guards to %s", CYXWIZ_NUM_GUARDS, path);
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_onion_load_guards(
+    cyxwiz_onion_ctx_t *ctx,
+    const char *path)
+{
+    if (ctx == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        /* File doesn't exist - that's OK for first run */
+        return CYXWIZ_OK;
+    }
+
+    char line[256];
+    size_t loaded = 0;
+
+    while (fgets(line, sizeof(line), f) != NULL && loaded < CYXWIZ_NUM_GUARDS) {
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == '\n') {
+            continue;
+        }
+
+        char hex_id[65];
+        unsigned long long selected_at;
+
+        if (sscanf(line, "%64s %llu", hex_id, &selected_at) != 2) {
+            continue;
+        }
+
+        cyxwiz_node_id_t id;
+        if (hex_to_node_id(hex_id, &id) != 0) {
+            continue;
+        }
+
+        ctx->guards[loaded].id = id;
+        ctx->guards[loaded].selected_at = (uint64_t)selected_at;
+        ctx->guards[loaded].valid = true;
+        loaded++;
+    }
+
+    fclose(f);
+    CYXWIZ_INFO("Loaded %zu guards from %s", loaded, path);
+    return CYXWIZ_OK;
+}
+
+/* ============ Cover Traffic ============ */
+
+void cyxwiz_onion_enable_cover_traffic(cyxwiz_onion_ctx_t *ctx, bool enable)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    ctx->cover_traffic_enabled = enable;
+    if (enable) {
+        ctx->last_cover_traffic_ms = cyxwiz_time_ms();
+        CYXWIZ_INFO("Cover traffic enabled");
+    } else {
+        CYXWIZ_INFO("Cover traffic disabled");
+    }
+}
+
+bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return false;
+    }
+    return ctx->cover_traffic_enabled;
+}
+
+/*
+ * Send cover traffic to a random peer via onion route
+ * Cover traffic is indistinguishable from real traffic:
+ * - Same encryption
+ * - Same packet structure
+ * - Identified by magic marker at destination (silently discarded)
+ */
+static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    return;
+#else
+    /* Pick a random peer with valid key */
+    size_t valid_peers[CYXWIZ_MAX_PEERS];
+    size_t valid_count = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+        if (ctx->peer_keys[i].valid &&
+            memcmp(&ctx->peer_keys[i].peer_id, &ctx->local_id,
+                   sizeof(cyxwiz_node_id_t)) != 0) {
+            valid_peers[valid_count++] = i;
+        }
+    }
+
+    if (valid_count == 0) {
+        CYXWIZ_DEBUG("No peers available for cover traffic");
+        return;
+    }
+
+    /* Select random peer */
+    uint32_t r;
+    randombytes_buf(&r, sizeof(r));
+    size_t idx = valid_peers[r % valid_count];
+    const cyxwiz_node_id_t *peer_id = &ctx->peer_keys[idx].peer_id;
+
+    /* Build dummy payload with magic marker
+     * Use small fixed size (32 bytes) to fit any hop count configuration */
+    uint8_t dummy[32];
+    uint32_t magic = CYXWIZ_COVER_MAGIC;
+    memcpy(dummy, &magic, sizeof(magic));
+
+    /* Fill rest with random data */
+    randombytes_buf(dummy + sizeof(magic), sizeof(dummy) - sizeof(magic));
+
+    /* Send via onion routing */
+    cyxwiz_error_t err = cyxwiz_onion_send_to(ctx, peer_id, dummy, sizeof(dummy));
+    if (err == CYXWIZ_OK) {
+        CYXWIZ_DEBUG("Sent cover traffic");
+    } else {
+        CYXWIZ_DEBUG("Cover traffic send failed: %d", err);
+    }
+#endif
 }

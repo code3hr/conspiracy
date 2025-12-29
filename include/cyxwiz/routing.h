@@ -24,6 +24,17 @@
 #define CYXWIZ_PENDING_TIMEOUT_MS 10000   /* Pending message timeout */
 #define CYXWIZ_DEFAULT_TTL 10           /* Default time-to-live */
 
+/* ACK timeout tracking */
+#define CYXWIZ_ACK_TIMEOUT_MS 10000     /* 10 second ACK timeout */
+#define CYXWIZ_MAX_PENDING_ACKS 16      /* Max pending ACK slots */
+
+/* Message fragmentation */
+#define CYXWIZ_FRAG_MAX_PAYLOAD 180     /* Max payload per fragment */
+#define CYXWIZ_FRAG_MAX_COUNT 8         /* Max fragments per message (fits in 8-bit bitmap) */
+#define CYXWIZ_FRAG_TIMEOUT_MS 10000    /* Reassembly timeout (10 seconds) */
+#define CYXWIZ_MAX_REASSEMBLY 8         /* Max concurrent reassembly slots */
+#define CYXWIZ_FRAG_MAX_TOTAL (CYXWIZ_FRAG_MAX_PAYLOAD * CYXWIZ_FRAG_MAX_COUNT)  /* ~1.4KB */
+
 /* Maximum payload in routed data packet */
 #define CYXWIZ_MAX_ROUTED_PAYLOAD 48    /* ~200 byte header, 50 for data */
 
@@ -46,6 +57,16 @@ typedef struct {
     uint16_t reputation_sum;                 /* Sum of hop reputations (for route selection) */
     bool valid;
 } cyxwiz_route_t;
+
+/*
+ * Pending ACK entry (for tracking relay success/failure)
+ */
+typedef struct {
+    uint32_t message_id;                     /* Hash of message for correlation */
+    cyxwiz_node_id_t first_hop;              /* First hop in route (to record failure) */
+    uint64_t sent_at;                        /* When message was sent */
+    bool valid;
+} cyxwiz_pending_ack_t;
 
 /*
  * Router context
@@ -180,6 +201,47 @@ cyxwiz_relay_ack_t;
 #ifdef _MSC_VER
 #pragma pack(pop)
 #endif
+
+/* ============ Fragment Data Message ============ */
+
+/*
+ * Fragment data packet (for large messages)
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                        /* CYXWIZ_MSG_FRAG_DATA */
+    uint32_t message_id;                 /* Unique message identifier */
+    uint8_t frag_index;                  /* 0-indexed fragment number */
+    uint8_t frag_total;                  /* Total fragments */
+    uint8_t frag_len;                    /* Payload length in this fragment */
+    cyxwiz_node_id_t origin;             /* Original sender */
+    cyxwiz_node_id_t destination;        /* Final destination */
+    /* uint8_t data[frag_len] follows */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_frag_data_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/*
+ * Fragment reassembly state (internal to router)
+ */
+typedef struct {
+    uint32_t message_id;                 /* Message being reassembled */
+    cyxwiz_node_id_t origin;             /* Original sender */
+    uint8_t frag_total;                  /* Total expected fragments */
+    uint8_t frag_received;               /* Count of received fragments */
+    uint8_t frag_bitmap;                 /* Bitmap of received fragments (8 bits) */
+    uint8_t data[CYXWIZ_FRAG_MAX_TOTAL]; /* Reassembly buffer */
+    size_t fragment_lens[CYXWIZ_FRAG_MAX_COUNT]; /* Length of each fragment */
+    uint64_t started_at;                 /* When reassembly started */
+    bool valid;                          /* Slot in use */
+} cyxwiz_frag_reassembly_t;
 
 /* ============ Anonymous Routing Constants ============ */
 
@@ -351,6 +413,19 @@ cyxwiz_error_t cyxwiz_router_poll(
  * - Otherwise, initiates route discovery and queues message
  */
 cyxwiz_error_t cyxwiz_router_send(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len
+);
+
+/*
+ * Send large data to destination (auto-fragments if needed)
+ * - If data fits in single packet, sends normally
+ * - Otherwise, fragments into multiple packets with reassembly at destination
+ * - Max total size: CYXWIZ_FRAG_MAX_TOTAL (~1.4KB)
+ */
+cyxwiz_error_t cyxwiz_router_send_large(
     cyxwiz_router_t *router,
     const cyxwiz_node_id_t *destination,
     const uint8_t *data,

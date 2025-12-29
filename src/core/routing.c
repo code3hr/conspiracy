@@ -107,6 +107,13 @@ struct cyxwiz_router {
     size_t anon_seen_count;
     cyxwiz_anon_discovery_t anon_discoveries[CYXWIZ_MAX_PENDING];
 
+    /* Pending ACKs for timeout tracking */
+    cyxwiz_pending_ack_t pending_acks[CYXWIZ_MAX_PENDING_ACKS];
+
+    /* Fragment reassembly */
+    cyxwiz_frag_reassembly_t reassembly[CYXWIZ_MAX_REASSEMBLY];
+    uint32_t next_frag_message_id;
+
     /* State */
     bool running;
     uint32_t next_request_id;
@@ -141,6 +148,16 @@ static cyxwiz_error_t handle_relay_ack(
     const cyxwiz_node_id_t *from,
     const cyxwiz_relay_ack_t *ack);
 
+static cyxwiz_error_t handle_frag_data(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len);
+
+static void check_reassembly_timeouts(
+    cyxwiz_router_t *router,
+    uint64_t now);
+
 static bool is_request_seen(
     cyxwiz_router_t *router,
     uint32_t request_id,
@@ -173,6 +190,11 @@ static cyxwiz_error_t send_pending_messages(
 static bool is_direct_peer(
     cyxwiz_router_t *router,
     const cyxwiz_node_id_t *destination);
+
+static uint32_t compute_message_id(const uint8_t *data, size_t len);
+static void track_pending_ack(cyxwiz_router_t *router, uint32_t message_id,
+                              const cyxwiz_node_id_t *first_hop);
+static void clear_pending_ack(cyxwiz_router_t *router, uint32_t message_id);
 
 /* Anonymous routing forward declarations */
 #ifdef CYXWIZ_HAS_CRYPTO
@@ -451,6 +473,23 @@ cyxwiz_error_t cyxwiz_router_poll(
             }
         }
 
+        /* Check for ACK timeouts - mark relay failure if no ACK received */
+        for (size_t i = 0; i < CYXWIZ_MAX_PENDING_ACKS; i++) {
+            if (router->pending_acks[i].valid) {
+                uint64_t age = current_time_ms - router->pending_acks[i].sent_at;
+                if (age > CYXWIZ_ACK_TIMEOUT_MS) {
+                    /* No ACK received - record relay failure for first hop */
+                    cyxwiz_peer_table_relay_failure(router->peer_table,
+                        &router->pending_acks[i].first_hop);
+                    router->pending_acks[i].valid = false;
+                    CYXWIZ_DEBUG("ACK timeout - relay failure recorded");
+                }
+            }
+        }
+
+        /* Check for fragment reassembly timeouts */
+        check_reassembly_timeouts(router, current_time_ms);
+
         router->last_cleanup = current_time_ms;
     }
 
@@ -538,6 +577,10 @@ cyxwiz_error_t cyxwiz_router_send(
             /* Queue for rediscovery (recursive call triggers discovery) */
             return cyxwiz_router_send(router, destination, data, len);
         }
+
+        /* Track pending ACK for relay success/failure detection */
+        uint32_t msg_id = compute_message_id(data, len);
+        track_pending_ack(router, msg_id, &route->hops[0]);
 
         return CYXWIZ_OK;
     }
@@ -675,6 +718,12 @@ cyxwiz_error_t cyxwiz_router_handle_message(
             }
             break;
 
+        case CYXWIZ_MSG_FRAG_DATA:
+            if (len >= sizeof(cyxwiz_frag_data_t)) {
+                return handle_frag_data(router, from, data, len);
+            }
+            break;
+
         case CYXWIZ_MSG_ONION_DATA:
             /* Forward to onion layer for decryption/routing */
             if (router->on_onion != NULL) {
@@ -747,6 +796,46 @@ static bool is_direct_peer(
 {
     const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(router->peer_table, destination);
     return peer != NULL && peer->state == CYXWIZ_PEER_STATE_CONNECTED;
+}
+
+/* Compute simple message ID from data (FNV-1a hash) */
+static uint32_t compute_message_id(const uint8_t *data, size_t len)
+{
+    uint32_t hash = 2166136261u;  /* FNV offset basis */
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 16777619u;  /* FNV prime */
+    }
+    return hash;
+}
+
+/* Track pending ACK for sent message */
+static void track_pending_ack(cyxwiz_router_t *router, uint32_t message_id,
+                              const cyxwiz_node_id_t *first_hop)
+{
+    /* Find empty slot */
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_ACKS; i++) {
+        if (!router->pending_acks[i].valid) {
+            router->pending_acks[i].message_id = message_id;
+            memcpy(&router->pending_acks[i].first_hop, first_hop, sizeof(cyxwiz_node_id_t));
+            router->pending_acks[i].sent_at = cyxwiz_time_ms();
+            router->pending_acks[i].valid = true;
+            return;
+        }
+    }
+    /* Table full - oldest entry will be evicted by timeout */
+}
+
+/* Clear pending ACK (on successful ACK receipt) */
+static void clear_pending_ack(cyxwiz_router_t *router, uint32_t message_id)
+{
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING_ACKS; i++) {
+        if (router->pending_acks[i].valid &&
+            router->pending_acks[i].message_id == message_id) {
+            router->pending_acks[i].valid = false;
+            return;
+        }
+    }
 }
 
 static cyxwiz_route_t *find_route(
@@ -1205,6 +1294,14 @@ static cyxwiz_error_t handle_relay_ack(
     if (cyxwiz_node_id_cmp(&ack->origin, &router->local_id) == 0) {
         /* ACK received - message was successfully delivered */
         CYXWIZ_DEBUG("Received relay ACK for message %u", ack->message_id);
+
+        /* Clear pending ACK and record success for first hop */
+        clear_pending_ack(router, ack->message_id);
+        if (ack->hop_count > 0) {
+            /* Record relay success for first hop (last in reverse path) */
+            cyxwiz_peer_table_relay_success(router->peer_table,
+                &ack->path[ack->hop_count - 1]);
+        }
         return CYXWIZ_OK;
     }
 
@@ -1898,3 +1995,243 @@ bool cyxwiz_router_can_create_surb(const cyxwiz_router_t *router)
 }
 
 #endif /* CYXWIZ_HAS_CRYPTO */
+
+/* ============ Message Fragmentation ============ */
+
+/*
+ * Check for reassembly timeouts and clear stale entries
+ */
+static void check_reassembly_timeouts(
+    cyxwiz_router_t *router,
+    uint64_t now)
+{
+    for (size_t i = 0; i < CYXWIZ_MAX_REASSEMBLY; i++) {
+        if (router->reassembly[i].valid) {
+            uint64_t age = now - router->reassembly[i].started_at;
+            if (age > CYXWIZ_FRAG_TIMEOUT_MS) {
+                router->reassembly[i].valid = false;
+                CYXWIZ_DEBUG("Fragment reassembly timeout (msg_id %u)",
+                    router->reassembly[i].message_id);
+            }
+        }
+    }
+}
+
+/*
+ * Find or create reassembly slot for a message
+ */
+static cyxwiz_frag_reassembly_t *find_or_create_reassembly(
+    cyxwiz_router_t *router,
+    uint32_t message_id,
+    const cyxwiz_node_id_t *origin,
+    uint8_t frag_total,
+    uint64_t now)
+{
+    /* Look for existing reassembly for this message */
+    for (size_t i = 0; i < CYXWIZ_MAX_REASSEMBLY; i++) {
+        if (router->reassembly[i].valid &&
+            router->reassembly[i].message_id == message_id &&
+            cyxwiz_node_id_cmp(&router->reassembly[i].origin, origin) == 0) {
+            return &router->reassembly[i];
+        }
+    }
+
+    /* Find free slot */
+    for (size_t i = 0; i < CYXWIZ_MAX_REASSEMBLY; i++) {
+        if (!router->reassembly[i].valid) {
+            cyxwiz_frag_reassembly_t *r = &router->reassembly[i];
+            memset(r, 0, sizeof(*r));
+            r->message_id = message_id;
+            memcpy(&r->origin, origin, sizeof(cyxwiz_node_id_t));
+            r->frag_total = frag_total;
+            r->frag_received = 0;
+            r->frag_bitmap = 0;
+            r->started_at = now;
+            r->valid = true;
+            return r;
+        }
+    }
+
+    CYXWIZ_WARN("Fragment reassembly table full");
+    return NULL;
+}
+
+/*
+ * Handle incoming fragmented data
+ */
+static cyxwiz_error_t handle_frag_data(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *from,
+    const uint8_t *data,
+    size_t len)
+{
+    CYXWIZ_UNUSED(from);
+
+    const cyxwiz_frag_data_t *frag = (const cyxwiz_frag_data_t *)data;
+    size_t header_size = sizeof(cyxwiz_frag_data_t);
+
+    /* Validate header */
+    if (len < header_size) {
+        CYXWIZ_WARN("Fragment data too short");
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (frag->frag_total > CYXWIZ_FRAG_MAX_COUNT) {
+        CYXWIZ_WARN("Fragment count too high: %u", frag->frag_total);
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (frag->frag_index >= frag->frag_total) {
+        CYXWIZ_WARN("Invalid fragment index: %u/%u", frag->frag_index, frag->frag_total);
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check if this is for us */
+    if (cyxwiz_node_id_cmp(&frag->destination, &router->local_id) != 0) {
+        /* Forward to next hop (if we have a route) */
+        return cyxwiz_router_send(router, &frag->destination, data, len);
+    }
+
+    /* This fragment is for us - reassemble */
+    uint64_t now = cyxwiz_time_ms();
+    cyxwiz_frag_reassembly_t *r = find_or_create_reassembly(
+        router, frag->message_id, &frag->origin, frag->frag_total, now);
+
+    if (r == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Check for duplicate fragment */
+    uint8_t frag_bit = (1 << frag->frag_index);
+    if (r->frag_bitmap & frag_bit) {
+        CYXWIZ_DEBUG("Duplicate fragment %u/%u", frag->frag_index, frag->frag_total);
+        return CYXWIZ_OK;  /* Already have this fragment */
+    }
+
+    /* Copy fragment data */
+    const uint8_t *frag_payload = data + header_size;
+    size_t frag_payload_len = len - header_size;
+
+    if (frag_payload_len > CYXWIZ_FRAG_MAX_PAYLOAD) {
+        CYXWIZ_WARN("Fragment payload too large: %zu", frag_payload_len);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Store at correct offset */
+    size_t offset = (size_t)frag->frag_index * CYXWIZ_FRAG_MAX_PAYLOAD;
+    memcpy(r->data + offset, frag_payload, frag_payload_len);
+    r->fragment_lens[frag->frag_index] = frag_payload_len;
+
+    /* Mark fragment as received */
+    r->frag_bitmap |= frag_bit;
+    r->frag_received++;
+
+    CYXWIZ_DEBUG("Received fragment %u/%u (msg_id %u)",
+        frag->frag_index + 1, frag->frag_total, frag->message_id);
+
+    /* Check if all fragments received */
+    if (r->frag_received >= r->frag_total) {
+        /* Calculate total size */
+        size_t total_len = 0;
+        for (uint8_t i = 0; i < r->frag_total; i++) {
+            total_len += r->fragment_lens[i];
+        }
+
+        /* Compact the data (fragments may have different sizes) */
+        uint8_t reassembled[CYXWIZ_FRAG_MAX_TOTAL];
+        size_t pos = 0;
+        for (uint8_t i = 0; i < r->frag_total; i++) {
+            size_t src_offset = (size_t)i * CYXWIZ_FRAG_MAX_PAYLOAD;
+            memcpy(reassembled + pos, r->data + src_offset, r->fragment_lens[i]);
+            pos += r->fragment_lens[i];
+        }
+
+        CYXWIZ_INFO("Reassembled fragmented message: %zu bytes from %u fragments",
+            total_len, r->frag_total);
+
+        /* Clear reassembly slot */
+        r->valid = false;
+
+        /* Deliver to application */
+        if (router->on_delivery != NULL) {
+            router->on_delivery(&frag->origin, reassembled, total_len, router->user_data);
+        }
+    }
+
+    return CYXWIZ_OK;
+}
+
+/*
+ * Send large data with automatic fragmentation
+ */
+cyxwiz_error_t cyxwiz_router_send_large(
+    cyxwiz_router_t *router,
+    const cyxwiz_node_id_t *destination,
+    const uint8_t *data,
+    size_t len)
+{
+    if (router == NULL || destination == NULL || data == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* If small enough, send directly */
+    if (len <= CYXWIZ_MAX_ROUTED_PAYLOAD) {
+        return cyxwiz_router_send(router, destination, data, len);
+    }
+
+    /* Check max size */
+    if (len > CYXWIZ_FRAG_MAX_TOTAL) {
+        CYXWIZ_WARN("Data too large for fragmentation: %zu > %d",
+            len, CYXWIZ_FRAG_MAX_TOTAL);
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Calculate number of fragments needed */
+    uint8_t frag_total = (uint8_t)((len + CYXWIZ_FRAG_MAX_PAYLOAD - 1) / CYXWIZ_FRAG_MAX_PAYLOAD);
+    if (frag_total > CYXWIZ_FRAG_MAX_COUNT) {
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    /* Generate message ID */
+    uint32_t message_id = router->next_frag_message_id++;
+
+    CYXWIZ_DEBUG("Fragmenting %zu bytes into %u fragments (msg_id %u)",
+        len, frag_total, message_id);
+
+    /* Send each fragment */
+    size_t offset = 0;
+    for (uint8_t i = 0; i < frag_total; i++) {
+        size_t frag_len = CYXWIZ_FRAG_MAX_PAYLOAD;
+        if (offset + frag_len > len) {
+            frag_len = len - offset;
+        }
+
+        /* Build fragment packet */
+        uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+        cyxwiz_frag_data_t *frag = (cyxwiz_frag_data_t *)packet;
+
+        frag->type = CYXWIZ_MSG_FRAG_DATA;
+        frag->message_id = message_id;
+        frag->frag_index = i;
+        frag->frag_total = frag_total;
+        frag->frag_len = (uint8_t)frag_len;
+        memcpy(&frag->origin, &router->local_id, sizeof(cyxwiz_node_id_t));
+        memcpy(&frag->destination, destination, sizeof(cyxwiz_node_id_t));
+
+        /* Copy payload */
+        memcpy(packet + sizeof(cyxwiz_frag_data_t), data + offset, frag_len);
+
+        size_t packet_len = sizeof(cyxwiz_frag_data_t) + frag_len;
+
+        /* Send fragment */
+        cyxwiz_error_t err = cyxwiz_router_send(router, destination, packet, packet_len);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_WARN("Failed to send fragment %u/%u: %d", i + 1, frag_total, err);
+            return err;
+        }
+
+        offset += frag_len;
+    }
+
+    return CYXWIZ_OK;
+}

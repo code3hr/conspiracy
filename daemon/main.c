@@ -61,8 +61,14 @@ static bool g_batch_mode = false;
 /* Key refresh interval: 1 hour (in milliseconds) */
 #define CYXWIZ_KEY_REFRESH_INTERVAL_MS (60 * 60 * 1000)
 
+/* Reputation save interval: 5 minutes (in milliseconds) */
+#define CYXWIZ_REPUTATION_SAVE_INTERVAL_MS (5 * 60 * 1000)
+
 /* Track last key refresh time */
 static uint64_t g_last_key_refresh_ms = 0;
+
+/* Track last reputation save time */
+static uint64_t g_last_reputation_save_ms = 0;
 
 /* MPC party ID (for status display) */
 static uint8_t g_party_id = 1;
@@ -409,6 +415,7 @@ static void cmd_help(void)
     printf("  /peers                   List connected peers\n");
     printf("  /send <peer_id> <msg>    Send direct message\n");
     printf("  /anon <peer_id> <msg>    Send anonymous message\n");
+    printf("  /cover on|off            Enable/disable cover traffic\n");
     printf("  ───────────────────────────────────────────────\n");
     printf("  /store <data>            Store data (returns ID)\n");
     printf("  /retrieve <storage_id>   Retrieve stored data\n");
@@ -652,6 +659,39 @@ static void cmd_anon(const char *args)
         printf("  Sent anonymously to %.16s...\n", hex_id);
     } else {
         printf("  Error sending: %s\n", cyxwiz_strerror(err));
+    }
+#endif
+}
+
+/* Enable/disable cover traffic */
+static void cmd_cover(const char *args)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(args);
+    printf("  Error: Cover traffic not available (no crypto)\n");
+    return;
+#else
+    if (g_onion == NULL) {
+        printf("  Error: Onion routing not initialized\n");
+        return;
+    }
+
+    if (args == NULL || *args == '\0') {
+        /* Show current status */
+        bool enabled = cyxwiz_onion_cover_traffic_enabled(g_onion);
+        printf("  Cover traffic: %s\n", enabled ? "ON" : "OFF");
+        printf("  Usage: /cover on|off\n");
+        return;
+    }
+
+    if (strcmp(args, "on") == 0) {
+        cyxwiz_onion_enable_cover_traffic(g_onion, true);
+        printf("  Cover traffic enabled\n");
+    } else if (strcmp(args, "off") == 0) {
+        cyxwiz_onion_enable_cover_traffic(g_onion, false);
+        printf("  Cover traffic disabled\n");
+    } else {
+        printf("  Usage: /cover on|off\n");
     }
 #endif
 }
@@ -1055,6 +1095,10 @@ static void process_command(const char *cmd)
         cmd_send(cmd + 6);
     } else if (strncmp(cmd, "/anon ", 6) == 0) {
         cmd_anon(cmd + 6);
+    } else if (strcmp(cmd, "/cover") == 0) {
+        cmd_cover(NULL);
+    } else if (strncmp(cmd, "/cover ", 7) == 0) {
+        cmd_cover(cmd + 7);
     } else if (strncmp(cmd, "/store ", 7) == 0) {
         cmd_store(cmd + 7);
     } else if (strncmp(cmd, "/retrieve ", 10) == 0) {
@@ -1348,6 +1392,9 @@ int main(int argc, char *argv[])
                     }
                 }
 
+                /* Load saved guard nodes */
+                cyxwiz_onion_load_guards(g_onion, "cyxwiz_guards.dat");
+
                 CYXWIZ_INFO("Onion routing enabled");
             }
 #endif
@@ -1545,6 +1592,15 @@ int main(int argc, char *argv[])
         }
 #endif
 
+        /* Periodic reputation save */
+        if (now - g_last_reputation_save_ms >= CYXWIZ_REPUTATION_SAVE_INTERVAL_MS) {
+            g_last_reputation_save_ms = now;
+            if (peer_table != NULL) {
+                cyxwiz_peer_table_save(peer_table, "cyxwiz_peers.dat");
+                CYXWIZ_DEBUG("Periodic reputation save");
+            }
+        }
+
         sleep_ms(100);
     }
 
@@ -1585,8 +1641,9 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef CYXWIZ_HAS_CRYPTO
-    /* Destroy onion context (before router) */
+    /* Save guard nodes and destroy onion context (before router) */
     if (g_onion != NULL) {
+        cyxwiz_onion_save_guards(g_onion, "cyxwiz_guards.dat");
         cyxwiz_onion_destroy(g_onion);
         g_onion = NULL;
     }

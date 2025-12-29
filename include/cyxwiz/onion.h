@@ -28,6 +28,15 @@
 #define CYXWIZ_PUBKEY_SIZE 32           /* X25519 public key size */
 #define CYXWIZ_EPHEMERAL_SIZE 32        /* Ephemeral public key per layer */
 
+/* Guard node constants */
+#define CYXWIZ_NUM_GUARDS 3             /* Number of guard nodes to maintain */
+#define CYXWIZ_GUARD_ROTATION_MS (30ULL * 24 * 60 * 60 * 1000) /* 30 days */
+#define CYXWIZ_GUARD_MIN_REPUTATION 70  /* Minimum reputation for guard */
+
+/* Cover traffic constants */
+#define CYXWIZ_COVER_TRAFFIC_INTERVAL_MS 30000  /* Send cover traffic every 30s */
+#define CYXWIZ_COVER_MAGIC 0xDEADBEEF           /* Magic marker for cover traffic */
+
 /*
  * Maximum payload per hop count (with ephemeral keys)
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
@@ -410,5 +419,58 @@ bool cyxwiz_node_id_is_zero(const cyxwiz_node_id_t *id);
  */
 size_t cyxwiz_onion_circuit_count(const cyxwiz_onion_ctx_t *ctx);
 size_t cyxwiz_onion_peer_key_count(const cyxwiz_onion_ctx_t *ctx);
+
+/* ============ Guard Node Management ============ */
+
+/*
+ * Guard node entry
+ */
+typedef struct {
+    cyxwiz_node_id_t id;                     /* Guard node ID */
+    uint64_t selected_at;                    /* When guard was selected */
+    bool valid;
+} cyxwiz_guard_t;
+
+/*
+ * Save guard nodes to file
+ *
+ * @param ctx   Onion context
+ * @param path  File path
+ * @return      CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_save_guards(
+    const cyxwiz_onion_ctx_t *ctx,
+    const char *path
+);
+
+/*
+ * Load guard nodes from file
+ *
+ * @param ctx   Onion context
+ * @param path  File path
+ * @return      CYXWIZ_OK on success (or if file doesn't exist)
+ */
+cyxwiz_error_t cyxwiz_onion_load_guards(
+    cyxwiz_onion_ctx_t *ctx,
+    const char *path
+);
+
+/* ============ Cover Traffic ============ */
+
+/*
+ * Enable or disable cover traffic generation
+ *
+ * @param ctx     Onion context
+ * @param enable  true to enable, false to disable
+ */
+void cyxwiz_onion_enable_cover_traffic(
+    cyxwiz_onion_ctx_t *ctx,
+    bool enable
+);
+
+/*
+ * Check if cover traffic is enabled
+ */
+bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx);
 
 #endif /* CYXWIZ_ONION_H */
