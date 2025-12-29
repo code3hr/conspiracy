@@ -23,6 +23,12 @@
 #define CYXWIZ_REPUTATION_DECAY_START_MS  300000   /* 5 min before decay starts */
 #define CYXWIZ_REPUTATION_DECAY_FULL_MS   1800000  /* 30 min for full decay */
 
+/* Rate limiting */
+#define CYXWIZ_RATE_WINDOW_MS 10000           /* 10 second rate limit window */
+#define CYXWIZ_RATE_LIMIT_MSGS 50             /* Max messages per window */
+#define CYXWIZ_RATE_LIMIT_DISCOVERY 5         /* Max discovery msgs per window */
+#define CYXWIZ_RATE_LIMIT_ROUTE_REQ 10        /* Max route requests per window */
+
 /* Peer states */
 typedef enum {
     CYXWIZ_PEER_STATE_UNKNOWN = 0,
@@ -84,6 +90,11 @@ typedef struct {
 
     /* Connection state */
     uint64_t last_send_ms;            /* Last successful send time */
+
+    /* Rate limiting */
+    uint32_t msgs_this_window;        /* Messages in current window */
+    uint64_t rate_window_start;       /* Window start timestamp */
+    uint32_t rate_violations;         /* Violation count */
 } cyxwiz_peer_t;
 
 /*
@@ -554,6 +565,42 @@ uint32_t cyxwiz_peer_bandwidth(const cyxwiz_peer_t *peer);
  * Check if connection is "warm" (recently active)
  */
 bool cyxwiz_peer_is_warmed(const cyxwiz_peer_t *peer, uint64_t now);
+
+/* ============ Rate Limiting ============ */
+
+/*
+ * Check rate limit for peer - returns true if message allowed, false if over limit
+ * Automatically resets window if expired
+ */
+bool cyxwiz_peer_check_rate_limit(cyxwiz_peer_t *peer, uint64_t now);
+
+/*
+ * Record incoming message from peer (increments counter)
+ */
+void cyxwiz_peer_record_message(cyxwiz_peer_t *peer, uint64_t now);
+
+/*
+ * Record rate limit violation (affects reputation)
+ */
+void cyxwiz_peer_record_rate_violation(cyxwiz_peer_t *peer);
+
+/*
+ * Check rate limit for specific message type
+ * Returns true if allowed, false if limit exceeded
+ */
+bool cyxwiz_peer_check_rate_limit_type(cyxwiz_peer_t *peer, uint64_t now, uint8_t msg_type);
+
+/*
+ * Check rate limit for peer by ID (table version)
+ * Returns true if message allowed, false if rate limited
+ * Automatically records the message if allowed
+ */
+bool cyxwiz_peer_table_check_rate_limit(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    uint64_t now,
+    uint8_t msg_type
+);
 
 /* ============ Reputation Persistence ============ */
 

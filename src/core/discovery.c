@@ -720,6 +720,15 @@ cyxwiz_error_t cyxwiz_discovery_handle_message(
 
     uint8_t msg_type = data[0];
 
+    /* Rate limit check for discovery messages */
+    uint64_t now = cyxwiz_time_ms();
+    if (!cyxwiz_peer_table_check_rate_limit(discovery->peer_table, from, now, msg_type)) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(from, hex_id);
+        CYXWIZ_DEBUG("Rate limited discovery message 0x%02x from %.16s...", msg_type, hex_id);
+        return CYXWIZ_ERR_INVALID;
+    }
+
     switch (msg_type) {
         case CYXWIZ_DISC_ANNOUNCE:
             /* Minimum size is v1, handle_announce will check version */

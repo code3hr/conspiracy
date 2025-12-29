@@ -685,6 +685,120 @@ bool cyxwiz_peer_is_warmed(const cyxwiz_peer_t *peer, uint64_t now)
     return (now - peer->last_send_ms) < CYXWIZ_CONNECTION_WARM_MS;
 }
 
+/* ============ Rate Limiting ============ */
+
+bool cyxwiz_peer_check_rate_limit(cyxwiz_peer_t *peer, uint64_t now)
+{
+    if (peer == NULL) {
+        return false;
+    }
+
+    /* Reset window if expired */
+    if (peer->rate_window_start == 0 ||
+        now - peer->rate_window_start >= CYXWIZ_RATE_WINDOW_MS) {
+        peer->msgs_this_window = 0;
+        peer->rate_window_start = now;
+    }
+
+    /* Check against limit */
+    return peer->msgs_this_window < CYXWIZ_RATE_LIMIT_MSGS;
+}
+
+void cyxwiz_peer_record_message(cyxwiz_peer_t *peer, uint64_t now)
+{
+    if (peer == NULL) {
+        return;
+    }
+
+    /* Reset window if expired */
+    if (peer->rate_window_start == 0 ||
+        now - peer->rate_window_start >= CYXWIZ_RATE_WINDOW_MS) {
+        peer->msgs_this_window = 0;
+        peer->rate_window_start = now;
+    }
+
+    peer->msgs_this_window++;
+}
+
+void cyxwiz_peer_record_rate_violation(cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return;
+    }
+
+    peer->rate_violations++;
+
+    /* Impact reputation: each violation counts as a relay failure */
+    peer->relay_failures++;
+    peer->last_relay_activity = cyxwiz_time_ms();
+
+    char hex_id[65];
+    cyxwiz_node_id_to_hex(&peer->id, hex_id);
+    CYXWIZ_WARN("Rate limit violation from peer %.16s... (count: %u)",
+                hex_id, peer->rate_violations);
+}
+
+bool cyxwiz_peer_check_rate_limit_type(cyxwiz_peer_t *peer, uint64_t now, uint8_t msg_type)
+{
+    if (peer == NULL) {
+        return false;
+    }
+
+    /* First check overall rate limit */
+    if (!cyxwiz_peer_check_rate_limit(peer, now)) {
+        return false;
+    }
+
+    /* Check type-specific limits based on message type ranges from types.h */
+    /* Discovery messages (0x01-0x0F) */
+    if (msg_type >= 0x01 && msg_type <= 0x0F) {
+        /* Count discovery messages in current window */
+        /* We track overall messages, so we use a stricter threshold */
+        if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_DISCOVERY) {
+            return false;
+        }
+    }
+
+    /* Route request messages (0x20-0x21) */
+    if (msg_type == 0x20 || msg_type == 0x25) {  /* ROUTE_REQ or ANON_ROUTE_REQ */
+        if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_ROUTE_REQ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool cyxwiz_peer_table_check_rate_limit(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id,
+    uint64_t now,
+    uint8_t msg_type)
+{
+    if (table == NULL || id == NULL) {
+        return false;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        /* Unknown peer - allow message but don't track */
+        return true;
+    }
+
+    cyxwiz_peer_t *peer = &table->peers[idx];
+
+    /* Check rate limit */
+    if (!cyxwiz_peer_check_rate_limit_type(peer, now, msg_type)) {
+        /* Rate limit exceeded */
+        cyxwiz_peer_record_rate_violation(peer);
+        return false;
+    }
+
+    /* Record this message */
+    cyxwiz_peer_record_message(peer, now);
+    return true;
+}
+
 /* ============ Reputation Persistence ============ */
 
 cyxwiz_error_t cyxwiz_peer_table_save(const cyxwiz_peer_table_t *table, const char *path)

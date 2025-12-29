@@ -1395,6 +1395,9 @@ int main(int argc, char *argv[])
                 /* Load saved guard nodes */
                 cyxwiz_onion_load_guards(g_onion, "cyxwiz_guards.dat");
 
+                /* Load pinned keys for MITM detection */
+                cyxwiz_onion_load_pinned_keys(g_onion, "cyxwiz_pinned_keys.dat");
+
                 CYXWIZ_INFO("Onion routing enabled");
             }
 #endif
@@ -1641,9 +1644,10 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef CYXWIZ_HAS_CRYPTO
-    /* Save guard nodes and destroy onion context (before router) */
+    /* Save guard nodes and pinned keys, then destroy onion context (before router) */
     if (g_onion != NULL) {
         cyxwiz_onion_save_guards(g_onion, "cyxwiz_guards.dat");
+        cyxwiz_onion_save_pinned_keys(g_onion, "cyxwiz_pinned_keys.dat");
         cyxwiz_onion_destroy(g_onion);
         g_onion = NULL;
     }

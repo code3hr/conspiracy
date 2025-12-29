@@ -46,6 +46,9 @@ struct cyxwiz_onion_ctx {
     bool cover_traffic_enabled;
     uint64_t last_cover_traffic_ms;
 
+    /* Circuit prebuilding state */
+    uint64_t last_prebuild_ms;
+
     /* Delivery callback */
     cyxwiz_delivery_callback_t callback;
     void *user_data;
@@ -56,6 +59,7 @@ struct cyxwiz_onion_ctx {
 
 /* Forward declarations */
 static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx);
+static void prebuild_circuits(cyxwiz_onion_ctx_t *ctx, uint64_t now);
 
 /* ============ Helper Functions ============ */
 
@@ -186,6 +190,12 @@ cyxwiz_error_t cyxwiz_onion_poll(
         }
     }
 
+    /* Prebuild circuits periodically */
+    if (current_time_ms - ctx->last_prebuild_ms >= CYXWIZ_PREBUILD_INTERVAL_MS) {
+        ctx->last_prebuild_ms = current_time_ms;
+        prebuild_circuits(ctx, current_time_ms);
+    }
+
     return CYXWIZ_OK;
 }
 
@@ -261,6 +271,22 @@ cyxwiz_error_t cyxwiz_onion_add_peer_key(
     /* Check if already exists */
     cyxwiz_peer_key_t *existing = find_peer_key(ctx, peer_id);
     if (existing != NULL) {
+        /* Key pinning: check for key changes (potential MITM) */
+        if (existing->key_pinned) {
+            if (memcmp(existing->pinned_pubkey, peer_pubkey, CYXWIZ_PUBKEY_SIZE) != 0) {
+                char hex_id[65];
+                cyxwiz_node_id_to_hex(peer_id, hex_id);
+                CYXWIZ_WARN("KEY CHANGE DETECTED for peer %.16s... - possible MITM!", hex_id);
+                existing->key_changed = true;
+            }
+        } else {
+            /* First time seeing this peer with a valid key - pin it */
+            memcpy(existing->pinned_pubkey, peer_pubkey, CYXWIZ_PUBKEY_SIZE);
+            existing->key_pinned = true;
+            existing->pinned_at = cyxwiz_time_ms();
+            existing->key_changed = false;
+        }
+
         /* Update existing */
         memcpy(existing->peer_pubkey, peer_pubkey, CYXWIZ_PUBKEY_SIZE);
 
@@ -303,9 +329,16 @@ cyxwiz_error_t cyxwiz_onion_add_peer_key(
     memcpy(slot->peer_pubkey, peer_pubkey, CYXWIZ_PUBKEY_SIZE);
     slot->established_at = cyxwiz_time_ms();
     slot->valid = true;
+
+    /* Pin the key on first contact */
+    memcpy(slot->pinned_pubkey, peer_pubkey, CYXWIZ_PUBKEY_SIZE);
+    slot->key_pinned = true;
+    slot->pinned_at = cyxwiz_time_ms();
+    slot->key_changed = false;
+
     ctx->peer_key_count++;
 
-    CYXWIZ_DEBUG("Added shared key with peer");
+    CYXWIZ_DEBUG("Added shared key with peer (key pinned)");
     return CYXWIZ_OK;
 #endif
 }
@@ -1536,6 +1569,141 @@ cyxwiz_error_t cyxwiz_onion_load_guards(
     return CYXWIZ_OK;
 }
 
+/* ============ Key Pinning ============ */
+
+/*
+ * Convert bytes to hex string
+ */
+static void bytes_to_hex(const uint8_t *bytes, size_t len, char *hex)
+{
+    for (size_t i = 0; i < len; i++) {
+        sprintf(hex + i * 2, "%02x", bytes[i]);
+    }
+    hex[len * 2] = '\0';
+}
+
+/*
+ * Convert hex string to bytes
+ */
+static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        unsigned int byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) {
+            return -1;
+        }
+        bytes[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+
+cyxwiz_error_t cyxwiz_onion_save_pinned_keys(
+    const cyxwiz_onion_ctx_t *ctx,
+    const char *path)
+{
+    if (ctx == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        CYXWIZ_WARN("Failed to open %s for writing pinned keys", path);
+        return CYXWIZ_ERR_TRANSPORT;
+    }
+
+    fprintf(f, "# CyxWiz Pinned Keys (MITM Detection)\n");
+    fprintf(f, "# Format: node_id pubkey pinned_at key_changed\n");
+
+    size_t saved = 0;
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+        if (ctx->peer_keys[i].valid && ctx->peer_keys[i].key_pinned) {
+            char hex_id[65];
+            char hex_pubkey[65];
+            node_id_to_hex(&ctx->peer_keys[i].peer_id, hex_id);
+            bytes_to_hex(ctx->peer_keys[i].pinned_pubkey, CYXWIZ_PUBKEY_SIZE, hex_pubkey);
+            fprintf(f, "%s %s %llu %d\n",
+                    hex_id, hex_pubkey,
+                    (unsigned long long)ctx->peer_keys[i].pinned_at,
+                    ctx->peer_keys[i].key_changed ? 1 : 0);
+            saved++;
+        }
+    }
+
+    fclose(f);
+    CYXWIZ_DEBUG("Saved %zu pinned keys to %s", saved, path);
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_onion_load_pinned_keys(
+    cyxwiz_onion_ctx_t *ctx,
+    const char *path)
+{
+    if (ctx == NULL || path == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        /* File doesn't exist - that's OK for first run */
+        return CYXWIZ_OK;
+    }
+
+    char line[256];
+    size_t loaded = 0;
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == '\n') {
+            continue;
+        }
+
+        char hex_id[65];
+        char hex_pubkey[65];
+        unsigned long long pinned_at;
+        int key_changed;
+
+        if (sscanf(line, "%64s %64s %llu %d", hex_id, hex_pubkey, &pinned_at, &key_changed) != 4) {
+            continue;
+        }
+
+        cyxwiz_node_id_t id;
+        if (hex_to_node_id(hex_id, &id) != 0) {
+            continue;
+        }
+
+        uint8_t pubkey[CYXWIZ_PUBKEY_SIZE];
+        if (hex_to_bytes(hex_pubkey, pubkey, CYXWIZ_PUBKEY_SIZE) != 0) {
+            continue;
+        }
+
+        /* Find or create peer key entry */
+        cyxwiz_peer_key_t *entry = find_peer_key(ctx, &id);
+        if (entry == NULL) {
+            /* Find free slot to store pinned key info for future use */
+            for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+                if (!ctx->peer_keys[i].valid) {
+                    entry = &ctx->peer_keys[i];
+                    memcpy(&entry->peer_id, &id, sizeof(cyxwiz_node_id_t));
+                    entry->valid = false;  /* Not valid until we get their current key */
+                    break;
+                }
+            }
+        }
+
+        if (entry != NULL) {
+            memcpy(entry->pinned_pubkey, pubkey, CYXWIZ_PUBKEY_SIZE);
+            entry->key_pinned = true;
+            entry->pinned_at = (uint64_t)pinned_at;
+            entry->key_changed = (key_changed != 0);
+            loaded++;
+        }
+    }
+
+    fclose(f);
+    CYXWIZ_INFO("Loaded %zu pinned keys from %s", loaded, path);
+    return CYXWIZ_OK;
+}
+
 /* ============ Cover Traffic ============ */
 
 void cyxwiz_onion_enable_cover_traffic(cyxwiz_onion_ctx_t *ctx, bool enable)
@@ -1611,6 +1779,84 @@ static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx)
         CYXWIZ_DEBUG("Sent cover traffic");
     } else {
         CYXWIZ_DEBUG("Cover traffic send failed: %d", err);
+    }
+#endif
+}
+
+/*
+ * Prebuild circuits to random peers for faster first-message latency
+ * Called periodically from poll. Builds at most one circuit per call
+ * to avoid traffic bursts.
+ */
+static void prebuild_circuits(cyxwiz_onion_ctx_t *ctx, uint64_t now)
+{
+    CYXWIZ_UNUSED(now);  /* Reserved for future use (e.g., rate limiting) */
+
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    return;
+#else
+    /* Count active circuits */
+    size_t active_count = 0;
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        if (ctx->circuits[i].active) {
+            active_count++;
+        }
+    }
+
+    /* Check if we need more circuits */
+    if (active_count >= CYXWIZ_PREBUILD_TARGET) {
+        return;  /* Already at target */
+    }
+
+    /* Collect peers that don't already have circuits */
+    cyxwiz_node_id_t candidates[CYXWIZ_MAX_PEERS];
+    size_t candidate_count = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS && candidate_count < CYXWIZ_MAX_PEERS; i++) {
+        if (!ctx->peer_keys[i].valid) {
+            continue;
+        }
+
+        /* Skip self */
+        if (memcmp(&ctx->peer_keys[i].peer_id, &ctx->local_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        /* Skip if already have circuit to this destination */
+        if (cyxwiz_onion_has_circuit_to(ctx, &ctx->peer_keys[i].peer_id)) {
+            continue;
+        }
+
+        memcpy(&candidates[candidate_count++], &ctx->peer_keys[i].peer_id,
+               sizeof(cyxwiz_node_id_t));
+    }
+
+    if (candidate_count == 0) {
+        CYXWIZ_DEBUG("No candidates for circuit prebuilding");
+        return;
+    }
+
+    /* Pick a random candidate */
+    uint32_t r;
+    randombytes_buf(&r, sizeof(r));
+    size_t idx = r % candidate_count;
+
+    /* Build circuit to this peer */
+    cyxwiz_circuit_t *circuit = NULL;
+    cyxwiz_error_t err = build_circuit_to(ctx, &candidates[idx], &circuit);
+
+    if (err == CYXWIZ_OK && circuit != NULL) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&candidates[idx], hex_id);
+        CYXWIZ_DEBUG("Prebuilt circuit to %.16s... (%zu/%d active)",
+                     hex_id, active_count + 1, CYXWIZ_PREBUILD_TARGET);
+    } else {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&candidates[idx], hex_id);
+        CYXWIZ_DEBUG("Failed to prebuild circuit to %.16s...: %s",
+                     hex_id, cyxwiz_strerror(err));
     }
 #endif
 }

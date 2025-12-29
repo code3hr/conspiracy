@@ -37,6 +37,10 @@
 #define CYXWIZ_COVER_TRAFFIC_INTERVAL_MS 30000  /* Send cover traffic every 30s */
 #define CYXWIZ_COVER_MAGIC 0xDEADBEEF           /* Magic marker for cover traffic */
 
+/* Circuit prebuilding constants */
+#define CYXWIZ_PREBUILD_TARGET 4              /* Target number of prebuilt circuits */
+#define CYXWIZ_PREBUILD_INTERVAL_MS 5000      /* Check for prebuilding every 5s */
+
 /*
  * Maximum payload per hop count (with ephemeral keys)
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
@@ -128,6 +132,12 @@ typedef struct {
     uint8_t peer_pubkey[CYXWIZ_PUBKEY_SIZE];
     uint64_t established_at;
     bool valid;
+
+    /* Key pinning (MITM detection) */
+    uint8_t pinned_pubkey[CYXWIZ_PUBKEY_SIZE];  /* First-seen public key */
+    bool key_pinned;                             /* Whether key is pinned */
+    uint64_t pinned_at;                          /* When key was pinned */
+    bool key_changed;                            /* Key changed since pin */
 } cyxwiz_peer_key_t;
 
 /*
@@ -451,6 +461,32 @@ cyxwiz_error_t cyxwiz_onion_save_guards(
  * @return      CYXWIZ_OK on success (or if file doesn't exist)
  */
 cyxwiz_error_t cyxwiz_onion_load_guards(
+    cyxwiz_onion_ctx_t *ctx,
+    const char *path
+);
+
+/* ============ Key Pinning ============ */
+
+/*
+ * Save pinned keys to file for MITM detection persistence
+ *
+ * @param ctx   Onion context
+ * @param path  File path
+ * @return      CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_save_pinned_keys(
+    const cyxwiz_onion_ctx_t *ctx,
+    const char *path
+);
+
+/*
+ * Load pinned keys from file
+ *
+ * @param ctx   Onion context
+ * @param path  File path
+ * @return      CYXWIZ_OK on success (or if file doesn't exist)
+ */
+cyxwiz_error_t cyxwiz_onion_load_pinned_keys(
     cyxwiz_onion_ctx_t *ctx,
     const char *path
 );
