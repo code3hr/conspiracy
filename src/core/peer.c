@@ -176,18 +176,17 @@ cyxwiz_error_t cyxwiz_peer_table_add(
     }
 
     cyxwiz_peer_t *peer = &table->peers[table->count];
+
+    /* Zero all fields first to avoid uninitialized data */
+    cyxwiz_secure_zero(peer, sizeof(cyxwiz_peer_t));
+
+    /* Set specific values */
     memcpy(&peer->id, id, sizeof(cyxwiz_node_id_t));
     peer->state = CYXWIZ_PEER_STATE_DISCOVERED;
     peer->transport = transport;
-    peer->capabilities = 0;
     peer->rssi = rssi;
     peer->last_seen = now;
     peer->discovered_at = now;
-    peer->latency_ms = 0;
-    peer->bytes_sent = 0;
-    peer->bytes_recv = 0;
-    peer->identity_verified = false;
-    memset(peer->ed25519_pubkey, 0, sizeof(peer->ed25519_pubkey));
 
     table->count++;
 
@@ -782,6 +781,58 @@ bool cyxwiz_peer_check_rate_limit_type(cyxwiz_peer_t *peer, uint64_t now, uint8_
         }
     }
 
+    /* Onion relay messages (0x24) */
+    if (msg_type == 0x24) {  /* ONION_DATA */
+        if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_ONION) {
+            return false;
+        }
+    }
+
+    /* Compute messages (0x30-0x3F) */
+    if (msg_type >= 0x30 && msg_type <= 0x3F) {
+        /* Job submission has stricter limit */
+        if (msg_type == 0x30 || msg_type == 0x3B) {  /* JOB_SUBMIT or JOB_SUBMIT_ANON */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_JOB_SUBMIT) {
+                return false;
+            }
+        } else {
+            /* General compute messages */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_COMPUTE) {
+                return false;
+            }
+        }
+    }
+
+    /* Storage messages (0x40-0x5F, includes Proof of Storage) */
+    if (msg_type >= 0x40 && msg_type <= 0x5F) {
+        /* Store requests have stricter limit */
+        if (msg_type == 0x40 || msg_type == 0x4B) {  /* STORE_REQ or STORE_REQ_ANON */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_STORE_REQ) {
+                return false;
+            }
+        } else {
+            /* General storage messages */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_STORAGE) {
+                return false;
+            }
+        }
+    }
+
+    /* Consensus messages (0x60-0x6F) */
+    if (msg_type >= 0x60 && msg_type <= 0x6F) {
+        /* Validator registration has stricter limit */
+        if (msg_type == 0x60) {  /* VALIDATOR_REGISTER */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_VALIDATOR_REG) {
+                return false;
+            }
+        } else {
+            /* General consensus messages */
+            if (peer->msgs_this_window >= CYXWIZ_RATE_LIMIT_CONSENSUS) {
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -791,8 +842,13 @@ bool cyxwiz_peer_table_check_rate_limit(
     uint64_t now,
     uint8_t msg_type)
 {
-    if (table == NULL || id == NULL) {
+    if (id == NULL) {
         return false;
+    }
+
+    /* No peer table - skip rate limiting */
+    if (table == NULL) {
+        return true;
     }
 
     int idx = find_peer_index(table, id);
@@ -904,10 +960,14 @@ cyxwiz_error_t cyxwiz_peer_table_save(const cyxwiz_peer_table_t *table, const ch
         return CYXWIZ_ERR_TRANSPORT;
     }
 
-    fprintf(f, "# CyxWiz Peer Reputation Data\n");
-    fprintf(f, "# Format: node_id relay_successes relay_failures latency_ms pings_sent pongs_received\n");
+    bool write_error = false;
 
-    for (size_t i = 0; i < table->count; i++) {
+    if (fprintf(f, "# CyxWiz Peer Reputation Data\n") < 0 ||
+        fprintf(f, "# Format: node_id relay_successes relay_failures latency_ms pings_sent pongs_received\n") < 0) {
+        write_error = true;
+    }
+
+    for (size_t i = 0; i < table->count && !write_error; i++) {
         const cyxwiz_peer_t *peer = &table->peers[i];
 
         /* Only save peers with reputation data */
@@ -919,22 +979,38 @@ cyxwiz_error_t cyxwiz_peer_table_save(const cyxwiz_peer_table_t *table, const ch
         char hex_id[65];
         cyxwiz_node_id_to_hex(&peer->id, hex_id);
 
-        fprintf(f, "%s %u %u %u %u %u\n",
-                hex_id,
-                peer->relay_successes,
-                peer->relay_failures,
-                peer->latency_ms,
-                peer->pings_sent,
-                peer->pongs_received);
+        if (fprintf(f, "%s %u %u %u %u %u\n",
+                    hex_id,
+                    peer->relay_successes,
+                    peer->relay_failures,
+                    peer->latency_ms,
+                    peer->pings_sent,
+                    peer->pongs_received) < 0) {
+            write_error = true;
+        }
     }
 
-    fclose(f);
+    if (fclose(f) != 0 || write_error) {
+        CYXWIZ_WARN("Failed to save peer reputation to %s", path);
+        return CYXWIZ_ERR_TRANSPORT;
+    }
+
     CYXWIZ_INFO("Saved peer reputation to %s", path);
     return CYXWIZ_OK;
 }
 
 static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len)
 {
+    if (hex == NULL || bytes == NULL) {
+        return -1;
+    }
+
+    /* Validate input string length before reading */
+    size_t hex_len = strlen(hex);
+    if (hex_len < len * 2) {
+        return -1;  /* Input too short */
+    }
+
     for (size_t i = 0; i < len; i++) {
         unsigned int byte;
         if (sscanf(hex + i * 2, "%2x", &byte) != 1) {
@@ -1002,7 +1078,11 @@ cyxwiz_error_t cyxwiz_peer_table_load(cyxwiz_peer_table_t *table, const char *pa
         /* Don't add unknown peers - wait for discovery */
     }
 
-    fclose(f);
+    if (fclose(f) != 0) {
+        CYXWIZ_WARN("Error closing %s after reading", path);
+        /* Non-fatal for read - data already loaded */
+    }
+
     if (loaded > 0) {
         CYXWIZ_INFO("Loaded reputation for %zu peers from %s", loaded, path);
     }

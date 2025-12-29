@@ -1066,6 +1066,15 @@ cyxwiz_error_t cyxwiz_storage_handle_message(
 
     uint8_t msg_type = data[0];
 
+    /* Rate limit check */
+    uint64_t now = cyxwiz_time_ms();
+    if (!cyxwiz_peer_table_check_rate_limit(ctx->peer_table, from, now, msg_type)) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(from, hex_id);
+        CYXWIZ_WARN("Rate limit exceeded for storage message from %.16s...", hex_id);
+        return CYXWIZ_ERR_RATE_LIMITED;
+    }
+
     switch (msg_type) {
         case CYXWIZ_MSG_STORE_REQ:
             return handle_store_req(ctx, from, data, len);

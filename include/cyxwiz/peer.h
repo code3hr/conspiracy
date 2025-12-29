@@ -28,6 +28,13 @@
 #define CYXWIZ_RATE_LIMIT_MSGS 50             /* Max messages per window */
 #define CYXWIZ_RATE_LIMIT_DISCOVERY 5         /* Max discovery msgs per window */
 #define CYXWIZ_RATE_LIMIT_ROUTE_REQ 10        /* Max route requests per window */
+#define CYXWIZ_RATE_LIMIT_JOB_SUBMIT 3        /* Job submissions per window */
+#define CYXWIZ_RATE_LIMIT_COMPUTE 20          /* General compute msgs per window */
+#define CYXWIZ_RATE_LIMIT_STORE_REQ 5         /* Store requests per window */
+#define CYXWIZ_RATE_LIMIT_STORAGE 30          /* General storage msgs per window */
+#define CYXWIZ_RATE_LIMIT_VALIDATOR_REG 2     /* Validator registrations per window */
+#define CYXWIZ_RATE_LIMIT_CONSENSUS 25        /* General consensus msgs per window */
+#define CYXWIZ_RATE_LIMIT_ONION 40            /* Onion relay msgs per window */
 
 /* Dead peer detection */
 #define CYXWIZ_PEER_MAX_FAILURES 3            /* Failures before marking unresponsive */

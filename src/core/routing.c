@@ -1139,6 +1139,12 @@ static cyxwiz_error_t handle_route_reply(
 {
     CYXWIZ_UNUSED(from);
 
+    /* Validate hop_count bounds before accessing path array */
+    if (reply->hop_count == 0 || reply->hop_count > CYXWIZ_MAX_HOPS) {
+        CYXWIZ_WARN("Invalid hop_count in route reply: %d", reply->hop_count);
+        return CYXWIZ_ERR_INVALID;
+    }
+
     /* Check if this reply is for us (we initiated the discovery) */
     if (cyxwiz_node_id_cmp(&reply->destination, &router->local_id) == 0) {
         /* We found a route! */

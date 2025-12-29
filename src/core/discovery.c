@@ -611,36 +611,39 @@ static cyxwiz_error_t handle_announce(
 
     uint8_t version = data[1];
 
-    /* Check for own announcements by peeking at node_id field */
-    if (len >= sizeof(cyxwiz_disc_announce_t)) {
-        const cyxwiz_disc_announce_t *base = (const cyxwiz_disc_announce_t *)data;
-        if (cyxwiz_node_id_cmp(&base->node_id, &discovery->local_id) == 0) {
-            return CYXWIZ_OK;  /* Ignore our own */
-        }
-    }
-
-    cyxwiz_error_t err;
-
+    /* Validate packet size based on version FIRST */
+    size_t min_size;
     if (version == CYXWIZ_PROTOCOL_VERSION_V2) {
-        if (len < sizeof(cyxwiz_disc_announce_v2_t)) {
-            CYXWIZ_WARN("v2 announce too short: %zu < %zu",
-                        len, sizeof(cyxwiz_disc_announce_v2_t));
-            return CYXWIZ_ERR_INVALID;
-        }
-        err = handle_announce_v2(discovery, (const cyxwiz_disc_announce_v2_t *)data, is_ack);
+        min_size = sizeof(cyxwiz_disc_announce_v2_t);
     } else if (version == CYXWIZ_PROTOCOL_VERSION_V1) {
-        if (len < sizeof(cyxwiz_disc_announce_t)) {
-            return CYXWIZ_ERR_INVALID;
-        }
-        err = handle_announce_v1(discovery, (const cyxwiz_disc_announce_t *)data, is_ack);
+        min_size = sizeof(cyxwiz_disc_announce_t);
     } else {
         CYXWIZ_WARN("Unknown announce version: %d", version);
         return CYXWIZ_OK;  /* Ignore unknown versions */
     }
 
+    if (len < min_size) {
+        CYXWIZ_WARN("Announce packet too short for version %d: %zu < %zu",
+                    version, len, min_size);
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Now safe to access packet fields - check for own announcements */
+    const cyxwiz_disc_announce_t *base = (const cyxwiz_disc_announce_t *)data;
+    if (cyxwiz_node_id_cmp(&base->node_id, &discovery->local_id) == 0) {
+        return CYXWIZ_OK;  /* Ignore our own */
+    }
+
+    cyxwiz_error_t err;
+
+    if (version == CYXWIZ_PROTOCOL_VERSION_V2) {
+        err = handle_announce_v2(discovery, (const cyxwiz_disc_announce_v2_t *)data, is_ack);
+    } else {
+        err = handle_announce_v1(discovery, (const cyxwiz_disc_announce_t *)data, is_ack);
+    }
+
     /* Send ACK if this was an announce (not an ACK) */
     if (!is_ack && err == CYXWIZ_OK) {
-        const cyxwiz_disc_announce_t *base = (const cyxwiz_disc_announce_t *)data;
         send_announce_ack(discovery, &base->node_id);
     }
 

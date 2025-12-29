@@ -1307,8 +1307,18 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
         return CYXWIZ_ERR_INVALID;
     }
 
-    /* Replay protection: check if we've seen this packet before */
+    /* Rate limit check */
     uint64_t now = cyxwiz_time_ms();
+    cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
+    if (peer_table != NULL &&
+        !cyxwiz_peer_table_check_rate_limit(peer_table, from, now, data[0])) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(from, hex_id);
+        CYXWIZ_WARN("Rate limit exceeded for onion message from %.16s...", hex_id);
+        return CYXWIZ_ERR_RATE_LIMITED;
+    }
+
+    /* Replay protection: check if we've seen this packet before */
     if (is_onion_seen(ctx, data, len)) {
         CYXWIZ_DEBUG("Dropped replayed onion packet");
         return CYXWIZ_OK;  /* Silently drop replayed packets */

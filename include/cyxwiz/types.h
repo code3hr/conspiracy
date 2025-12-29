@@ -61,6 +61,7 @@ typedef enum {
     CYXWIZ_ERR_CREDENTIAL_INVALID = -40,  /* Credential verification failed */
     CYXWIZ_ERR_TOKEN_EXPIRED = -41,       /* Service token has expired */
     CYXWIZ_ERR_TOKEN_INSUFFICIENT = -42,  /* Insufficient token units */
+    CYXWIZ_ERR_RATE_LIMITED = -43,        /* Rate limit exceeded */
     CYXWIZ_ERR_UNKNOWN = -99
 } cyxwiz_error_t;
 
