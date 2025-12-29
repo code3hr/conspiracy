@@ -1125,7 +1125,20 @@ cyxwiz_error_t cyxwiz_onion_send_to(
     /* Find existing circuit to destination */
     cyxwiz_circuit_t *circuit = cyxwiz_onion_find_circuit_to(ctx, destination);
 
-    /* Build new circuit if none exists */
+    /* Check if circuit needs rotation */
+    if (circuit != NULL) {
+        uint64_t now = cyxwiz_time_ms();
+        uint64_t age = now - circuit->created_at;
+
+        if (age > CYXWIZ_CIRCUIT_ROTATION_MS) {
+            CYXWIZ_DEBUG("Rotating circuit %u (age %llu ms)",
+                        circuit->circuit_id, (unsigned long long)age);
+            cyxwiz_onion_destroy_circuit(ctx, circuit);
+            circuit = NULL;
+        }
+    }
+
+    /* Build new circuit if none exists or was rotated */
     if (circuit == NULL) {
         cyxwiz_error_t err = build_circuit_to(ctx, destination, &circuit);
         if (err != CYXWIZ_OK) {

@@ -24,6 +24,7 @@
 #define CYXWIZ_CIRCUIT_ID_SIZE 4        /* Circuit identifier size */
 #define CYXWIZ_MAX_CIRCUITS 16          /* Max active circuits */
 #define CYXWIZ_CIRCUIT_TIMEOUT_MS 60000 /* Circuit expires after 60s */
+#define CYXWIZ_CIRCUIT_ROTATION_MS 30000 /* Rotate circuit after 30s */
 #define CYXWIZ_PUBKEY_SIZE 32           /* X25519 public key size */
 #define CYXWIZ_EPHEMERAL_SIZE 32        /* Ephemeral public key per layer */
 
