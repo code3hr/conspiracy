@@ -1225,7 +1225,18 @@ static cyxwiz_error_t handle_route_data(
         cyxwiz_relay_ack_t ack;
         memset(&ack, 0, sizeof(ack));
         ack.type = CYXWIZ_MSG_RELAY_ACK;
-        ack.message_id = 0;  /* TODO: compute hash of message */
+
+        /* Compute message hash for ACK correlation */
+#ifdef CYXWIZ_HAS_CRYPTO
+        uint8_t hash[16];
+        const uint8_t *payload = data + header_size;
+        if (cyxwiz_crypto_hash(payload, msg->payload_len, hash, sizeof(hash)) == CYXWIZ_OK) {
+            ack.message_id = ((uint32_t)hash[0] << 24) |
+                             ((uint32_t)hash[1] << 16) |
+                             ((uint32_t)hash[2] << 8) |
+                             (uint32_t)hash[3];
+        }
+#endif
         memcpy(&ack.origin, &msg->origin, sizeof(cyxwiz_node_id_t));
         ack.hop_count = msg->hop_count;
         ack.current_hop = msg->hop_count - 1;
