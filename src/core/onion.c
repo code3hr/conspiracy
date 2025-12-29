@@ -49,6 +49,17 @@ struct cyxwiz_onion_ctx {
     /* Circuit prebuilding state */
     uint64_t last_prebuild_ms;
 
+    /* Path diversity: track relays in active circuits */
+    cyxwiz_node_id_t active_relays[CYXWIZ_MAX_CIRCUITS * CYXWIZ_MAX_ONION_HOPS];
+    size_t active_relay_count;
+
+    /* Replay protection: track seen onion packets */
+    struct {
+        uint8_t hash[CYXWIZ_ONION_HASH_SIZE];
+        uint64_t seen_at;
+    } seen_onions[CYXWIZ_MAX_SEEN_ONIONS];
+    size_t seen_onion_count;
+
     /* Delivery callback */
     cyxwiz_delivery_callback_t callback;
     void *user_data;
@@ -60,6 +71,7 @@ struct cyxwiz_onion_ctx {
 /* Forward declarations */
 static void send_cover_traffic(cyxwiz_onion_ctx_t *ctx);
 static void prebuild_circuits(cyxwiz_onion_ctx_t *ctx, uint64_t now);
+static void expire_seen_onions(cyxwiz_onion_ctx_t *ctx, uint64_t now);
 
 /* ============ Helper Functions ============ */
 
@@ -181,6 +193,9 @@ cyxwiz_error_t cyxwiz_onion_poll(
             }
         }
     }
+
+    /* Expire old seen onion entries */
+    expire_seen_onions(ctx, current_time_ms);
 
     /* Send cover traffic periodically */
     if (ctx->cover_traffic_enabled) {
@@ -845,6 +860,87 @@ cyxwiz_error_t cyxwiz_onion_send(
 #endif
 }
 
+/* ============ Replay Protection ============ */
+
+/*
+ * Compute truncated blake2b hash of onion packet for replay detection
+ */
+static void compute_onion_hash(const uint8_t *data, size_t len, uint8_t *hash_out)
+{
+#ifdef CYXWIZ_HAS_CRYPTO
+    crypto_generichash(hash_out, CYXWIZ_ONION_HASH_SIZE,
+                       data, len, NULL, 0);
+#else
+    /* Simple fallback hash (not secure, but better than nothing) */
+    memset(hash_out, 0, CYXWIZ_ONION_HASH_SIZE);
+    for (size_t i = 0; i < len; i++) {
+        hash_out[i % CYXWIZ_ONION_HASH_SIZE] ^= data[i];
+    }
+#endif
+}
+
+/*
+ * Check if onion packet has been seen before
+ */
+static bool is_onion_seen(cyxwiz_onion_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    uint8_t hash[CYXWIZ_ONION_HASH_SIZE];
+    compute_onion_hash(data, len, hash);
+
+    for (size_t i = 0; i < ctx->seen_onion_count; i++) {
+        if (memcmp(ctx->seen_onions[i].hash, hash, CYXWIZ_ONION_HASH_SIZE) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Mark onion packet as seen
+ */
+static void mark_onion_seen(cyxwiz_onion_ctx_t *ctx, const uint8_t *data, size_t len, uint64_t now)
+{
+    uint8_t hash[CYXWIZ_ONION_HASH_SIZE];
+    compute_onion_hash(data, len, hash);
+
+    /* Find free slot or reuse oldest */
+    size_t slot = ctx->seen_onion_count;
+    if (slot >= CYXWIZ_MAX_SEEN_ONIONS) {
+        /* Find oldest entry to evict */
+        slot = 0;
+        uint64_t oldest = ctx->seen_onions[0].seen_at;
+        for (size_t i = 1; i < CYXWIZ_MAX_SEEN_ONIONS; i++) {
+            if (ctx->seen_onions[i].seen_at < oldest) {
+                oldest = ctx->seen_onions[i].seen_at;
+                slot = i;
+            }
+        }
+    } else {
+        ctx->seen_onion_count++;
+    }
+
+    memcpy(ctx->seen_onions[slot].hash, hash, CYXWIZ_ONION_HASH_SIZE);
+    ctx->seen_onions[slot].seen_at = now;
+}
+
+/*
+ * Expire old seen onion entries
+ */
+static void expire_seen_onions(cyxwiz_onion_ctx_t *ctx, uint64_t now)
+{
+    size_t write_idx = 0;
+    for (size_t i = 0; i < ctx->seen_onion_count; i++) {
+        if (now - ctx->seen_onions[i].seen_at < CYXWIZ_ONION_SEEN_TIMEOUT_MS) {
+            if (write_idx != i) {
+                memcpy(&ctx->seen_onions[write_idx], &ctx->seen_onions[i],
+                       sizeof(ctx->seen_onions[0]));
+            }
+            write_idx++;
+        }
+    }
+    ctx->seen_onion_count = write_idx;
+}
+
 /* ============ Message Handling ============ */
 
 cyxwiz_error_t cyxwiz_onion_handle_message(
@@ -874,6 +970,14 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
     if (data[0] != CYXWIZ_MSG_ONION_DATA) {
         return CYXWIZ_ERR_INVALID;
     }
+
+    /* Replay protection: check if we've seen this packet before */
+    uint64_t now = cyxwiz_time_ms();
+    if (is_onion_seen(ctx, data, len)) {
+        CYXWIZ_DEBUG("Dropped replayed onion packet");
+        return CYXWIZ_OK;  /* Silently drop replayed packets */
+    }
+    mark_onion_seen(ctx, data, len, now);
 
     uint32_t circuit_id = ((uint32_t)data[1] << 24) |
                           ((uint32_t)data[2] << 16) |
@@ -1023,6 +1127,46 @@ bool cyxwiz_onion_has_circuit_to(
 }
 
 /*
+ * Path diversity: Update active relay list from all active circuits
+ */
+static void update_active_relays(cyxwiz_onion_ctx_t *ctx)
+{
+    ctx->active_relay_count = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        if (!ctx->circuits[i].active) {
+            continue;
+        }
+
+        /* Add all hops except the destination (last hop) to active relays */
+        size_t relay_hops = ctx->circuits[i].hop_count > 1 ?
+                            ctx->circuits[i].hop_count - 1 : 0;
+
+        for (size_t h = 0; h < relay_hops; h++) {
+            if (ctx->active_relay_count >= CYXWIZ_MAX_CIRCUITS * CYXWIZ_MAX_ONION_HOPS) {
+                break;
+            }
+            memcpy(&ctx->active_relays[ctx->active_relay_count],
+                   &ctx->circuits[i].hops[h], sizeof(cyxwiz_node_id_t));
+            ctx->active_relay_count++;
+        }
+    }
+}
+
+/*
+ * Path diversity: Check if relay is already in use by another circuit
+ */
+static bool is_relay_in_use(cyxwiz_onion_ctx_t *ctx, const cyxwiz_node_id_t *relay)
+{
+    for (size_t i = 0; i < ctx->active_relay_count; i++) {
+        if (memcmp(&ctx->active_relays[i], relay, sizeof(cyxwiz_node_id_t)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
  * Relay candidate with reputation weight
  */
 typedef struct {
@@ -1051,6 +1195,9 @@ static size_t select_random_relays(
     /* Get peer table for reputation lookup */
     cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
 
+    /* Path diversity: refresh active relay list */
+    update_active_relays(ctx);
+
     /* Collect candidates with reputation weights */
     relay_candidate_t candidates[CYXWIZ_MAX_PEERS];
     size_t candidate_count = 0;
@@ -1070,6 +1217,11 @@ static size_t select_random_relays(
         /* Don't use self as relay */
         if (memcmp(&ctx->peer_keys[i].peer_id, &ctx->local_id,
                    sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        /* Path diversity: skip relays already in use by other circuits */
+        if (is_relay_in_use(ctx, &ctx->peer_keys[i].peer_id)) {
             continue;
         }
 

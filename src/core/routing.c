@@ -481,6 +481,9 @@ cyxwiz_error_t cyxwiz_router_poll(
                     /* No ACK received - record relay failure for first hop */
                     cyxwiz_peer_table_relay_failure(router->peer_table,
                         &router->pending_acks[i].first_hop);
+                    /* Also record for dead peer detection */
+                    cyxwiz_peer_table_record_failure(router->peer_table,
+                        &router->pending_acks[i].first_hop);
                     router->pending_acks[i].valid = false;
                     CYXWIZ_DEBUG("ACK timeout - relay failure recorded");
                 }
@@ -1309,6 +1312,9 @@ static cyxwiz_error_t handle_relay_ack(
         if (ack->hop_count > 0) {
             /* Record relay success for first hop (last in reverse path) */
             cyxwiz_peer_table_relay_success(router->peer_table,
+                &ack->path[ack->hop_count - 1]);
+            /* Also record for dead peer detection (resets failure counter) */
+            cyxwiz_peer_table_record_success(router->peer_table,
                 &ack->path[ack->hop_count - 1]);
         }
         return CYXWIZ_OK;

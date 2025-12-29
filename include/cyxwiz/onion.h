@@ -41,6 +41,11 @@
 #define CYXWIZ_PREBUILD_TARGET 4              /* Target number of prebuilt circuits */
 #define CYXWIZ_PREBUILD_INTERVAL_MS 5000      /* Check for prebuilding every 5s */
 
+/* Replay protection constants */
+#define CYXWIZ_MAX_SEEN_ONIONS 128            /* Max tracked onion packets */
+#define CYXWIZ_ONION_SEEN_TIMEOUT_MS 90000    /* 90 second expiry (circuit lifetime + buffer) */
+#define CYXWIZ_ONION_HASH_SIZE 16             /* Blake2b truncated hash */
+
 /*
  * Maximum payload per hop count (with ephemeral keys)
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes

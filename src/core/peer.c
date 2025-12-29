@@ -251,6 +251,22 @@ const cyxwiz_peer_t *cyxwiz_peer_table_find(
     return &table->peers[idx];
 }
 
+cyxwiz_peer_t *cyxwiz_peer_table_find_mutable(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return NULL;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return NULL;
+    }
+
+    return &table->peers[idx];
+}
+
 cyxwiz_error_t cyxwiz_peer_table_set_state(
     cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id,
@@ -797,6 +813,81 @@ bool cyxwiz_peer_table_check_rate_limit(
     /* Record this message */
     cyxwiz_peer_record_message(peer, now);
     return true;
+}
+
+/* ============ Dead Peer Detection ============ */
+
+void cyxwiz_peer_record_failure(cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return;
+    }
+
+    peer->consecutive_failures++;
+
+    if (peer->consecutive_failures >= CYXWIZ_PEER_MAX_FAILURES) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&peer->id, hex_id);
+        CYXWIZ_WARN("Peer %.16s... unresponsive after %u consecutive failures",
+                    hex_id, peer->consecutive_failures);
+    }
+}
+
+void cyxwiz_peer_record_success(cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return;
+    }
+
+    /* Reset failures on any success */
+    if (peer->consecutive_failures > 0) {
+        peer->consecutive_failures = 0;
+    }
+
+    /* Clear ping pending flag */
+    peer->ping_pending = false;
+}
+
+bool cyxwiz_peer_is_responsive(const cyxwiz_peer_t *peer)
+{
+    if (peer == NULL) {
+        return false;
+    }
+    return peer->consecutive_failures < CYXWIZ_PEER_MAX_FAILURES;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_record_failure(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    cyxwiz_peer_record_failure(&table->peers[idx]);
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_peer_table_record_success(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id)
+{
+    if (table == NULL || id == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    int idx = find_peer_index(table, id);
+    if (idx < 0) {
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    }
+
+    cyxwiz_peer_record_success(&table->peers[idx]);
+    return CYXWIZ_OK;
 }
 
 /* ============ Reputation Persistence ============ */

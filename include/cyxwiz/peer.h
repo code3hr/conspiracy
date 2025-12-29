@@ -29,6 +29,11 @@
 #define CYXWIZ_RATE_LIMIT_DISCOVERY 5         /* Max discovery msgs per window */
 #define CYXWIZ_RATE_LIMIT_ROUTE_REQ 10        /* Max route requests per window */
 
+/* Dead peer detection */
+#define CYXWIZ_PEER_MAX_FAILURES 3            /* Failures before marking unresponsive */
+#define CYXWIZ_PEER_PING_INTERVAL_MS 10000    /* Active ping every 10s */
+#define CYXWIZ_PEER_PONG_TIMEOUT_MS 5000      /* Pong must arrive within 5s */
+
 /* Peer states */
 typedef enum {
     CYXWIZ_PEER_STATE_UNKNOWN = 0,
@@ -95,6 +100,11 @@ typedef struct {
     uint32_t msgs_this_window;        /* Messages in current window */
     uint64_t rate_window_start;       /* Window start timestamp */
     uint32_t rate_violations;         /* Violation count */
+
+    /* Dead peer detection */
+    uint8_t consecutive_failures;     /* Consecutive failed pings/operations */
+    uint64_t last_ping_sent;          /* When we last sent a PING */
+    bool ping_pending;                /* Waiting for PONG response */
 } cyxwiz_peer_t;
 
 /*
@@ -158,6 +168,15 @@ cyxwiz_error_t cyxwiz_peer_table_remove(
  */
 const cyxwiz_peer_t *cyxwiz_peer_table_find(
     const cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
+);
+
+/*
+ * Find a peer by ID (mutable version)
+ * Returns NULL if not found
+ */
+cyxwiz_peer_t *cyxwiz_peer_table_find_mutable(
+    cyxwiz_peer_table_t *table,
     const cyxwiz_node_id_t *id
 );
 
@@ -600,6 +619,41 @@ bool cyxwiz_peer_table_check_rate_limit(
     const cyxwiz_node_id_t *id,
     uint64_t now,
     uint8_t msg_type
+);
+
+/* ============ Dead Peer Detection ============ */
+
+/*
+ * Record a failure (ping timeout, relay failure, etc.)
+ * Increments consecutive_failures, warns at threshold
+ */
+void cyxwiz_peer_record_failure(cyxwiz_peer_t *peer);
+
+/*
+ * Record a success (pong received, relay ACK, etc.)
+ * Resets consecutive_failures to 0
+ */
+void cyxwiz_peer_record_success(cyxwiz_peer_t *peer);
+
+/*
+ * Check if peer is responsive (consecutive_failures < MAX)
+ */
+bool cyxwiz_peer_is_responsive(const cyxwiz_peer_t *peer);
+
+/*
+ * Table version: record failure by peer ID
+ */
+cyxwiz_error_t cyxwiz_peer_table_record_failure(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
+);
+
+/*
+ * Table version: record success by peer ID
+ */
+cyxwiz_error_t cyxwiz_peer_table_record_success(
+    cyxwiz_peer_table_t *table,
+    const cyxwiz_node_id_t *id
 );
 
 /* ============ Reputation Persistence ============ */

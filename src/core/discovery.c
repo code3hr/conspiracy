@@ -258,6 +258,85 @@ static cyxwiz_error_t send_pong(
 }
 
 /*
+ * Send ping to a peer
+ */
+static cyxwiz_error_t send_ping(
+    cyxwiz_discovery_t *discovery,
+    const cyxwiz_node_id_t *peer_id,
+    uint64_t timestamp)
+{
+    cyxwiz_disc_ping_t msg;
+    msg.type = CYXWIZ_DISC_PING;
+    msg.timestamp = timestamp;
+
+    return discovery->transport->ops->send(
+        discovery->transport,
+        peer_id,
+        (uint8_t *)&msg,
+        sizeof(msg)
+    );
+}
+
+/*
+ * Context for active ping iteration
+ */
+typedef struct {
+    cyxwiz_discovery_t *discovery;
+    uint64_t current_time_ms;
+} ping_ctx_t;
+
+/*
+ * Iterator callback for active ping mechanism
+ */
+static int active_ping_iter(const cyxwiz_peer_t *peer, void *user_data)
+{
+    ping_ctx_t *ctx = (ping_ctx_t *)user_data;
+    cyxwiz_peer_t *mutable_peer;
+
+    /* Only process connected peers */
+    if (peer->state != CYXWIZ_PEER_STATE_CONNECTED) {
+        return 0;
+    }
+
+    /* Get mutable pointer to peer */
+    mutable_peer = cyxwiz_peer_table_find_mutable(
+        ctx->discovery->peer_table, &peer->id);
+    if (mutable_peer == NULL) {
+        return 0;
+    }
+
+    /* Check for ping timeout */
+    if (mutable_peer->ping_pending) {
+        uint64_t elapsed = ctx->current_time_ms - mutable_peer->last_ping_sent;
+        if (elapsed >= CYXWIZ_PEER_PONG_TIMEOUT_MS) {
+            /* Ping timed out - record failure */
+            cyxwiz_peer_record_failure(mutable_peer);
+            mutable_peer->ping_pending = false;
+
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(&peer->id, hex_id);
+            CYXWIZ_DEBUG("Ping timeout for %.16s... (failures: %u)",
+                         hex_id, mutable_peer->consecutive_failures);
+        }
+    }
+
+    /* Send ping if interval elapsed and no pending ping */
+    if (!mutable_peer->ping_pending) {
+        uint64_t since_last_ping = ctx->current_time_ms - mutable_peer->last_ping_sent;
+        if (mutable_peer->last_ping_sent == 0 ||
+            since_last_ping >= CYXWIZ_PEER_PING_INTERVAL_MS) {
+
+            if (send_ping(ctx->discovery, &peer->id, ctx->current_time_ms) == CYXWIZ_OK) {
+                mutable_peer->last_ping_sent = ctx->current_time_ms;
+                mutable_peer->ping_pending = true;
+            }
+        }
+    }
+
+    return 0; /* Continue iteration */
+}
+
+/*
  * Send announcement ACK (can be v1 or v2 depending on identity)
  */
 static cyxwiz_error_t send_announce_ack(
@@ -610,6 +689,9 @@ static cyxwiz_error_t handle_pong(
     /* Update peer state */
     cyxwiz_peer_table_set_state(discovery->peer_table, from, CYXWIZ_PEER_STATE_CONNECTED);
 
+    /* Record successful response - resets failure counter and clears ping_pending */
+    cyxwiz_peer_table_record_success(discovery->peer_table, from);
+
     return CYXWIZ_OK;
 }
 
@@ -692,6 +774,13 @@ cyxwiz_error_t cyxwiz_discovery_poll(
         send_announce(discovery);
         discovery->last_announce = current_time_ms;
     }
+
+    /* Active ping mechanism for dead peer detection */
+    ping_ctx_t ping_ctx = {
+        .discovery = discovery,
+        .current_time_ms = current_time_ms
+    };
+    cyxwiz_peer_table_iterate(discovery->peer_table, active_ping_iter, &ping_ctx);
 
     /* Cleanup stale peers periodically */
     if (current_time_ms - discovery->last_cleanup >= CYXWIZ_PEER_TIMEOUT_MS / 2) {
