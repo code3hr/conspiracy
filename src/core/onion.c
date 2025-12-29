@@ -1065,6 +1065,71 @@ static size_t select_random_relays(
 }
 
 /*
+ * Calculate desired relay count based on network trust level
+ * High trust (avg rep > 70): 0 relays (direct)
+ * Medium trust (40-70): 1 relay
+ * Low trust (< 40): 2 relays (max privacy)
+ */
+static size_t calculate_relay_count(
+    cyxwiz_onion_ctx_t *ctx,
+    const cyxwiz_node_id_t *destination)
+{
+    cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
+    if (peer_table == NULL) {
+        return 1;  /* Default: 1 relay */
+    }
+
+    /* Calculate average reputation of relay candidates */
+    uint32_t total_rep = 0;
+    size_t count = 0;
+
+    for (size_t i = 0; i < CYXWIZ_MAX_PEERS; i++) {
+        if (!ctx->peer_keys[i].valid) {
+            continue;
+        }
+
+        /* Skip destination */
+        if (memcmp(&ctx->peer_keys[i].peer_id, destination,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        /* Skip self */
+        if (memcmp(&ctx->peer_keys[i].peer_id, &ctx->local_id,
+                   sizeof(cyxwiz_node_id_t)) == 0) {
+            continue;
+        }
+
+        const cyxwiz_peer_t *peer = cyxwiz_peer_table_find(
+            peer_table, &ctx->peer_keys[i].peer_id);
+        if (peer != NULL) {
+            uint8_t rep = cyxwiz_peer_reputation(peer);
+            if (rep >= CYXWIZ_MIN_RELAY_REPUTATION) {
+                total_rep += rep;
+                count++;
+            }
+        }
+    }
+
+    if (count == 0) {
+        return 0;  /* No relays available */
+    }
+
+    uint8_t avg_rep = (uint8_t)(total_rep / count);
+
+    if (avg_rep > 70) {
+        CYXWIZ_DEBUG("High trust network (avg rep %u), using direct connection", avg_rep);
+        return 0;  /* High trust: direct connection */
+    } else if (avg_rep >= 40) {
+        CYXWIZ_DEBUG("Medium trust network (avg rep %u), using 1 relay", avg_rep);
+        return 1;  /* Medium trust: 1 relay */
+    } else {
+        CYXWIZ_DEBUG("Low trust network (avg rep %u), using 2 relays", avg_rep);
+        return 2;  /* Low trust: 2 relays (max privacy) */
+    }
+}
+
+/*
  * Build circuit to destination with automatic relay selection
  */
 static cyxwiz_error_t build_circuit_to(
@@ -1080,9 +1145,12 @@ static cyxwiz_error_t build_circuit_to(
         return CYXWIZ_ERR_NO_KEY;
     }
 
-    /* Select relay nodes (prefer 1 relay for better payload capacity) */
+    /* Calculate desired relay count based on network trust */
+    size_t desired_relays = calculate_relay_count(ctx, destination);
+
+    /* Select relay nodes */
     cyxwiz_node_id_t relays[CYXWIZ_MAX_ONION_HOPS - 1];
-    size_t relay_count = select_random_relays(ctx, destination, relays, 1);
+    size_t relay_count = select_random_relays(ctx, destination, relays, desired_relays);
 
     /* Build path: [relay(s)...] + destination */
     cyxwiz_node_id_t path[CYXWIZ_MAX_ONION_HOPS];
