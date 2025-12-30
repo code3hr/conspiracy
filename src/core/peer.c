@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifdef CYXWIZ_HAS_CRYPTO
 extern void cyxwiz_crypto_random(uint8_t *buf, size_t len);
