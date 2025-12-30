@@ -75,6 +75,7 @@ include/cyxwiz/       Public headers
   transport.h         Transport abstraction interface
   peer.h              Peer table and discovery protocol
   routing.h           Mesh routing (route discovery, source routing)
+  dht.h               DHT for decentralized peer discovery
   onion.h             Onion routing (layered encryption, circuits)
   crypto.h            MPC crypto (secret sharing, encryption, MACs)
   compute.h           Compute job marketplace
@@ -90,6 +91,7 @@ src/
     peer.c            Peer table management
     discovery.c       Peer discovery protocol (with X25519 key exchange)
     routing.c         Mesh routing implementation
+    dht.c             Kademlia DHT (XOR distance, k-buckets, iterative lookup)
     onion.c           Onion routing implementation
     compute.c         Distributed compute job marketplace
     storage.c         K-of-N threshold storage (CyxCloud)
@@ -114,7 +116,7 @@ src/
     log.c             Logging implementation
 
 daemon/main.c         Node daemon with interactive commands
-tests/                Unit tests (14 test suites)
+tests/                Unit tests (15 test suites)
 ```
 
 ## Transport Abstraction
@@ -277,6 +279,89 @@ cyxwiz_router_invalidate_route(router, &destination);
 - `CYXWIZ_MSG_ROUTE_DATA` (0x22) - Routed data packet
 - `CYXWIZ_MSG_ROUTE_ERROR` (0x23) - Route error notification
 - `CYXWIZ_MSG_ONION_DATA` (0x24) - Onion-encrypted data packet
+
+All messages fit within 250-byte LoRa limit.
+
+## DHT Module
+
+Kademlia-style Distributed Hash Table for decentralized peer discovery without centralized bootstrap servers.
+
+### Why DHT?
+- **Local discovery** (broadcast) only works within direct radio range
+- **Bootstrap servers** create centralization and single points of failure
+- **DHT** enables global peer discovery through iterative lookups
+
+### Key Types
+- `cyxwiz_dht_t` - DHT context (routing table, lookups, stats)
+- `cyxwiz_dht_bucket_t` - K-bucket storing nodes at similar XOR distance
+- `cyxwiz_dht_node_t` - Node entry (ID, last_seen, latency, failures)
+- `cyxwiz_dht_lookup_t` - Active iterative lookup state
+
+### How It Works
+1. **XOR Distance** - Nodes organized by XOR distance from local ID
+2. **K-Buckets** - 256 buckets (one per bit), each holds K=8 nodes
+3. **Iterative Lookup** - Query α=3 closest nodes in parallel
+4. **Convergence** - Each response gives closer nodes until target found
+
+```
+Node A wants to find Node X:
+  A → closest known peers → get closer nodes
+  A → closer peers → get even closer nodes
+  ... repeat until X found or no progress
+```
+
+### Core Operations
+```c
+// Create DHT (router can be NULL for routing-table-only mode)
+cyxwiz_dht_create(&dht, router, &local_id);
+
+// Bootstrap with seed nodes
+cyxwiz_dht_bootstrap(dht, seed_nodes, count);
+
+// Add known node to routing table
+cyxwiz_dht_add_node(dht, &node_id);
+
+// Find a node (async with callback)
+cyxwiz_dht_find_node(dht, &target, callback, user_data);
+
+// Get closest known nodes (sync)
+size_t n = cyxwiz_dht_get_closest(dht, &target, out_nodes, max);
+
+// Poll (call in main loop)
+cyxwiz_dht_poll(dht, current_time_ms);
+
+// Handle incoming DHT message
+cyxwiz_dht_handle_message(dht, &from, data, len);
+
+// Get statistics
+cyxwiz_dht_get_stats(dht, &stats);
+```
+
+### Integration with Discovery
+When DHT is attached to discovery, locally discovered peers are automatically added to the DHT:
+```c
+cyxwiz_discovery_set_dht(discovery, dht);
+// Now broadcast-discovered peers populate DHT routing table
+```
+
+### Constants
+- `CYXWIZ_DHT_K` = 8 (bucket size / replication factor)
+- `CYXWIZ_DHT_ALPHA` = 3 (parallel lookup concurrency)
+- `CYXWIZ_DHT_BUCKET_COUNT` = 256 (one per bit of node ID)
+- `CYXWIZ_DHT_MAX_PEERS_RESP` = 6 (max peers per response, fits LoRa)
+- `CYXWIZ_DHT_REFRESH_MS` = 600000 (bucket refresh every 10 min)
+- `CYXWIZ_DHT_PING_TIMEOUT_MS` = 5000 (ping timeout 5 sec)
+- `CYXWIZ_DHT_LOOKUP_TIMEOUT_MS` = 10000 (lookup timeout 10 sec)
+
+### DHT Messages (0x05-0x0A)
+| Message | Size | Description |
+|---------|------|-------------|
+| `DHT_PING` (0x05) | 37 bytes | Node liveness check |
+| `DHT_PONG` (0x06) | 37 bytes | Ping response |
+| `DHT_FIND_NODE` (0x07) | 37 bytes | Find nodes close to target |
+| `DHT_FIND_NODE_RESP` (0x08) | 6 + N×36 bytes | Response with closest nodes (max N=6 = 222 bytes) |
+| `DHT_STORE` (0x09) | variable | Store value (for service announcements) |
+| `DHT_STORE_RESP` (0x0A) | 6 bytes | Store confirmation |
 
 All messages fit within 250-byte LoRa limit.
 
