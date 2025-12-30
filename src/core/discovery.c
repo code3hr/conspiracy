@@ -24,6 +24,10 @@
 /* Context string for announce proofs */
 static const char *ANNOUNCE_PROOF_CONTEXT = "cyxwiz_announce_v2";
 
+/* Forward declaration for DHT */
+struct cyxwiz_dht;
+typedef struct cyxwiz_dht cyxwiz_dht_t;
+
 /*
  * Discovery context
  */
@@ -47,6 +51,9 @@ struct cyxwiz_discovery {
     /* Key exchange callback */
     cyxwiz_key_exchange_cb_t key_callback;
     void *key_user_data;
+
+    /* DHT for decentralized peer discovery (optional) */
+    cyxwiz_dht_t *dht;
 };
 
 /*
@@ -82,6 +89,7 @@ cyxwiz_error_t cyxwiz_discovery_create(
     d->has_identity = false;
     d->key_callback = NULL;
     d->key_user_data = NULL;
+    d->dht = NULL;
 
     *discovery = d;
 
@@ -158,6 +166,26 @@ void cyxwiz_discovery_set_identity(
 
     CYXWIZ_DEBUG("Set Ed25519 identity for discovery (v2 mode)");
 }
+
+/*
+ * Set DHT for decentralized peer discovery
+ */
+void cyxwiz_discovery_set_dht(
+    cyxwiz_discovery_t *discovery,
+    void *dht)
+{
+    if (discovery == NULL) {
+        return;
+    }
+    discovery->dht = (cyxwiz_dht_t *)dht;
+    CYXWIZ_DEBUG("DHT attached to discovery for decentralized peer lookup");
+}
+
+/* DHT add node function (forward declaration to avoid header dependency) */
+extern cyxwiz_error_t cyxwiz_dht_add_node(
+    cyxwiz_dht_t *dht,
+    const cyxwiz_node_id_t *node_id
+);
 
 /*
  * Send announcement message
@@ -496,6 +524,11 @@ static cyxwiz_error_t handle_announce_v1(
         );
     }
 
+    /* Add to DHT for decentralized discovery if available */
+    if (discovery->dht) {
+        cyxwiz_dht_add_node(discovery->dht, &msg->node_id);
+    }
+
     char hex_id[65];
     cyxwiz_node_id_to_hex(&msg->node_id, hex_id);
     CYXWIZ_DEBUG("Processed v1 %s from %.16s... (unverified identity)",
@@ -585,6 +618,11 @@ static cyxwiz_error_t handle_announce_v2(
             &msg->node_id,
             CYXWIZ_PEER_STATE_CONNECTED
         );
+    }
+
+    /* Add to DHT for decentralized discovery if available */
+    if (discovery->dht) {
+        cyxwiz_dht_add_node(discovery->dht, &msg->node_id);
     }
 
     CYXWIZ_DEBUG("Processed v2 %s from %.16s... (identity VERIFIED)",

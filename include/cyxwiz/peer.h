@@ -335,6 +335,19 @@ void cyxwiz_discovery_set_identity(
 );
 
 /*
+ * Set DHT context for decentralized peer discovery
+ * When set, discovered peers are automatically added to the DHT routing table.
+ * This enables global peer discovery without centralized bootstrap servers.
+ *
+ * @param discovery  Discovery context
+ * @param dht        DHT context (cyxwiz_dht_t*, passed as void* to avoid circular deps)
+ */
+void cyxwiz_discovery_set_dht(
+    cyxwiz_discovery_t *discovery,
+    void *dht
+);
+
+/*
  * Create discovery context
  * Attaches to a peer table and transport
  */

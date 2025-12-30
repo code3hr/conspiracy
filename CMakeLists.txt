@@ -154,7 +154,7 @@ if(CYXWIZ_OBFUSCATION)
     add_compile_definitions(CYXWIZ_HAS_OBFUSCATION=1)
 endif()
 
-# Core modules (peer discovery, routing, compute, consensus)
+# Core modules (peer discovery, routing, compute, consensus, DHT)
 list(APPEND CYXWIZ_SOURCES
     src/core/peer.c
     src/core/discovery.c
@@ -162,6 +162,7 @@ list(APPEND CYXWIZ_SOURCES
     src/core/compute.c
     src/core/storage.c
     src/core/consensus.c
+    src/core/dht.c
 )
 add_compile_definitions(CYXWIZ_HAS_COMPUTE=1)
 add_compile_definitions(CYXWIZ_HAS_STORAGE=1)
@@ -255,6 +256,10 @@ if(CYXWIZ_BUILD_TESTS)
     add_executable(test_routing_multihop tests/test_routing_multihop.c)
     target_link_libraries(test_routing_multihop PRIVATE cyxwiz)
     add_test(NAME test_routing_multihop COMMAND test_routing_multihop)
+
+    add_executable(test_dht tests/test_dht.c)
+    target_link_libraries(test_dht PRIVATE cyxwiz)
+    add_test(NAME test_dht COMMAND test_dht)
 
     if(CYXWIZ_TRANSPORT_UDP)
         add_executable(test_udp tests/test_udp.c)

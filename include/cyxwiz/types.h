@@ -85,6 +85,14 @@ typedef enum {
     CYXWIZ_MSG_DISCOVER = 0x03,
     CYXWIZ_MSG_ANNOUNCE = 0x04,
 
+    /* DHT messages (0x05-0x0A) */
+    CYXWIZ_MSG_DHT_PING = 0x05,           /* DHT node liveness check */
+    CYXWIZ_MSG_DHT_PONG = 0x06,           /* DHT ping response */
+    CYXWIZ_MSG_DHT_FIND_NODE = 0x07,      /* Find nodes close to target */
+    CYXWIZ_MSG_DHT_FIND_NODE_RESP = 0x08, /* Response with closest nodes */
+    CYXWIZ_MSG_DHT_STORE = 0x09,          /* Store value in DHT */
+    CYXWIZ_MSG_DHT_STORE_RESP = 0x0A,     /* Store confirmation */
+
     /* Data messages (0x10-0x1F) */
     CYXWIZ_MSG_DATA = 0x10,
     CYXWIZ_MSG_DATA_ACK = 0x11,
