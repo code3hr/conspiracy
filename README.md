@@ -548,6 +548,62 @@ Privacy:      PEDERSEN_COMMIT, PEDERSEN_OPEN, RANGE_PROOF, CRED_ISSUE_REQ/RESP,
 
 ---
 
+## Production Readiness
+
+### Current Status: **Alpha**
+
+The protocol is functional for development and testing, but not yet production-ready.
+
+| Category | Status | Notes |
+|----------|--------|-------|
+| Core Protocol Logic | ✅ Ready | All modules implemented, 14 test suites pass |
+| Crypto (MPC/SPDZ) | ✅ Ready | libsodium-based, MACs verified |
+| Onion Routing | ✅ Ready | 3-hop circuits, key exchange working |
+| Mesh Routing | ✅ Ready | Multi-hop tested up to 5 hops |
+| Consensus (PoUW) | ✅ Ready | Basic implementation with slashing |
+| Test Coverage | ✅ Good | 10K+ lines across 14 test suites |
+| Integration Tests | ⚠️ Partial | Tests use mocks, need real hardware |
+| Security Audit | ❌ Not Done | Critical for production |
+| Stress Testing | ❌ Not Done | Unknown behavior under load |
+| Hardware Testing | ❌ Not Done | WiFi/BT/LoRa untested on real devices |
+| Long-running Stability | ❌ Not Done | Memory leaks, edge cases unknown |
+
+### Path to Production
+
+**Phase A: Integration Testing** (Current Priority)
+- [ ] Real transport integration tests (UDP with actual network)
+- [ ] Multi-node mesh testing on local network
+- [ ] Hardware driver testing (LoRa modules, Bluetooth, WiFi Direct)
+
+**Phase B: Security Hardening**
+- [ ] Fuzzing for packet parsing and crypto inputs
+- [ ] Adversarial testing (malformed packets, replay attacks)
+- [ ] External security audit of crypto and routing
+
+**Phase C: Stability**
+- [ ] Stress testing (high message volume, many peers)
+- [ ] Long-running stability tests (24h+ uptime)
+- [ ] Memory leak detection and fixes
+- [ ] Edge case handling for key rotation, circuit timeouts
+
+**Phase D: Production Deployment**
+- [ ] Performance benchmarks documented
+- [ ] Deployment guides for various platforms
+- [ ] Monitoring and observability
+- [ ] Mainnet launch
+
+### What You Can Use Today
+
+| Use Case | Ready? |
+|----------|--------|
+| Development against the API | ✅ Yes |
+| Local testing with mock transports | ✅ Yes |
+| Multi-node testing via UDP bootstrap | ✅ Yes |
+| Production deployment | ❌ Not yet |
+| Real hardware mesh (LoRa/BT/WiFi) | ⚠️ Untested |
+
+---
+
 ## CYXWIZ Token (CYWZ)
 
 The native token that powers the protocol:

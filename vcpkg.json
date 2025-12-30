@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "cyxwiz",
+  "version": "0.3.0",
+  "description": "CyxWiz Protocol - Decentralized mesh network for anonymous computing",
+  "dependencies": [
+    {
+      "name": "libsodium",
+      "version>=": "1.0.18"
+    }
+  ]
+}

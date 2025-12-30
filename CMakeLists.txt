@@ -260,6 +260,11 @@ if(CYXWIZ_BUILD_TESTS)
         add_executable(test_udp tests/test_udp.c)
         target_link_libraries(test_udp PRIVATE cyxwiz)
         add_test(NAME test_udp COMMAND test_udp)
+
+        # Integration tests (real network I/O)
+        add_executable(test_integration_udp tests/test_integration_udp.c)
+        target_link_libraries(test_integration_udp PRIVATE cyxwiz)
+        add_test(NAME test_integration_udp COMMAND test_integration_udp)
     endif()
 
     # Compute tests (requires crypto for MAC verification)

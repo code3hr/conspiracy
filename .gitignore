@@ -35,3 +35,6 @@ CMakeUserPresets.json
 
 # CyxChat app (separate development)
 cyxchat/
+
+# Personal notes
+reflect.md

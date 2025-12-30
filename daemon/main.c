@@ -1232,13 +1232,21 @@ int main(int argc, char *argv[])
     CYXWIZ_INFO("Starting CyxWiz node daemon...");
 
     cyxwiz_error_t err;
+    int exit_code = 0;
+
+    /* Variables for cleanup - must be declared before first goto */
+    cyxwiz_crypto_ctx_t *crypto_ctx = NULL;
+    cyxwiz_peer_table_t *peer_table = NULL;
+    cyxwiz_transport_t *wifi_transport = NULL;
+    cyxwiz_transport_t *udp_transport = NULL;
 
     /* Initialize crypto subsystem */
 #ifdef CYXWIZ_HAS_CRYPTO
     err = cyxwiz_crypto_init();
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to initialize crypto: %s", cyxwiz_strerror(err));
-        return 1;
+        exit_code = 1;
+        goto cleanup;
     }
 
     /* Get party ID from environment (default: 1) */
@@ -1254,14 +1262,14 @@ int main(int argc, char *argv[])
     }
 
     /* Create crypto context (3-of-5 MPC) */
-    cyxwiz_crypto_ctx_t *crypto_ctx = NULL;
     err = cyxwiz_crypto_create(&crypto_ctx,
                                CYXWIZ_DEFAULT_THRESHOLD,
                                CYXWIZ_DEFAULT_PARTIES,
                                g_party_id);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to create crypto context: %s", cyxwiz_strerror(err));
-        return 1;
+        exit_code = 1;
+        goto cleanup;
     }
 #endif
 
@@ -1271,13 +1279,15 @@ int main(int argc, char *argv[])
     err = cyxwiz_identity_keygen(&g_identity);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to generate identity: %s", cyxwiz_strerror(err));
-        return 1;
+        exit_code = 1;
+        goto cleanup;
     }
     /* Derive node ID from identity for consistent addressing */
     err = cyxwiz_identity_to_node_id(&g_identity, &local_id);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to derive node ID: %s", cyxwiz_strerror(err));
-        return 1;
+        exit_code = 1;
+        goto cleanup;
     }
 #else
     cyxwiz_node_id_random(&local_id);
@@ -1288,11 +1298,11 @@ int main(int argc, char *argv[])
     CYXWIZ_INFO("Local node ID: %.16s...", hex_id);
 
     /* Create peer table */
-    cyxwiz_peer_table_t *peer_table = NULL;
     err = cyxwiz_peer_table_create(&peer_table);
     if (err != CYXWIZ_OK) {
         CYXWIZ_ERROR("Failed to create peer table: %s", cyxwiz_strerror(err));
-        return 1;
+        exit_code = 1;
+        goto cleanup;
     }
 
     /* Load saved reputation data */
@@ -1302,8 +1312,6 @@ int main(int argc, char *argv[])
     cyxwiz_peer_table_set_callback(peer_table, on_peer_state_change, NULL);
 
     /* Create transports */
-    cyxwiz_transport_t *wifi_transport = NULL;
-    cyxwiz_transport_t *udp_transport = NULL;
     cyxwiz_transport_t *primary_transport = NULL;
 
 #ifdef CYXWIZ_HAS_UDP
@@ -1607,6 +1615,7 @@ int main(int argc, char *argv[])
         sleep_ms(100);
     }
 
+cleanup:
     /* Cleanup */
     CYXWIZ_INFO("Shutting down...");
 
@@ -1692,5 +1701,5 @@ int main(int argc, char *argv[])
 #endif
 
     CYXWIZ_INFO("Goodbye.");
-    return 0;
+    return exit_code;
 }

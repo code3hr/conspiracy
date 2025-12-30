@@ -947,6 +947,7 @@ static void handle_wpa_event(wifi_direct_state_t *state,
         bool is_go;
         if (parse_p2p_group_started(event, iface, &is_go)) {
             strncpy(state->p2p_iface, iface, sizeof(state->p2p_iface) - 1);
+            state->p2p_iface[sizeof(state->p2p_iface) - 1] = '\0';
             state->is_group_owner = is_go;
             state->in_group = true;
 
@@ -1079,6 +1080,7 @@ static cyxwiz_error_t wifi_direct_init(cyxwiz_transport_t *transport)
         iface = "wlan0";
     }
     strncpy(state->iface, iface, sizeof(state->iface) - 1);
+    state->iface[sizeof(state->iface) - 1] = '\0';
 
     /* Build control path */
     snprintf(state->ctrl_path, sizeof(state->ctrl_path),
@@ -1088,6 +1090,7 @@ static cyxwiz_error_t wifi_direct_init(cyxwiz_transport_t *transport)
     const char *alt_path = getenv("CYXWIZ_WPA_CTRL");
     if (alt_path) {
         strncpy(state->ctrl_path, alt_path, sizeof(state->ctrl_path) - 1);
+        state->ctrl_path[sizeof(state->ctrl_path) - 1] = '\0';
     }
 
     /* Open control connection */

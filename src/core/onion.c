@@ -2052,11 +2052,18 @@ size_t cyxwiz_onion_peer_key_count(const cyxwiz_onion_ctx_t *ctx)
 
 /*
  * Convert node ID to hex string
+ * Buffer must be at least 65 bytes (32*2 + 1)
  */
-static void node_id_to_hex(const cyxwiz_node_id_t *id, char *hex)
+static void node_id_to_hex(const cyxwiz_node_id_t *id, char *hex, size_t hex_size)
 {
+    static const char hex_chars[] = "0123456789abcdef";
+    if (hex_size < CYXWIZ_NODE_ID_LEN * 2 + 1) {
+        if (hex_size > 0) hex[0] = '\0';
+        return;
+    }
     for (size_t i = 0; i < CYXWIZ_NODE_ID_LEN; i++) {
-        sprintf(hex + i * 2, "%02x", id->bytes[i]);
+        hex[i * 2]     = hex_chars[(id->bytes[i] >> 4) & 0xF];
+        hex[i * 2 + 1] = hex_chars[id->bytes[i] & 0xF];
     }
     hex[CYXWIZ_NODE_ID_LEN * 2] = '\0';
 }
@@ -2096,7 +2103,7 @@ cyxwiz_error_t cyxwiz_onion_save_guards(
     for (size_t i = 0; i < CYXWIZ_NUM_GUARDS; i++) {
         if (ctx->guards[i].valid) {
             char hex_id[65];
-            node_id_to_hex(&ctx->guards[i].id, hex_id);
+            node_id_to_hex(&ctx->guards[i].id, hex_id, sizeof(hex_id));
             fprintf(f, "%s %llu\n", hex_id, (unsigned long long)ctx->guards[i].selected_at);
         }
     }
@@ -2156,11 +2163,18 @@ cyxwiz_error_t cyxwiz_onion_load_guards(
 
 /*
  * Convert bytes to hex string
+ * Buffer must be at least len*2 + 1 bytes
  */
-static void bytes_to_hex(const uint8_t *bytes, size_t len, char *hex)
+static void bytes_to_hex(const uint8_t *bytes, size_t len, char *hex, size_t hex_size)
 {
+    static const char hex_chars[] = "0123456789abcdef";
+    if (hex_size < len * 2 + 1) {
+        if (hex_size > 0) hex[0] = '\0';
+        return;
+    }
     for (size_t i = 0; i < len; i++) {
-        sprintf(hex + i * 2, "%02x", bytes[i]);
+        hex[i * 2]     = hex_chars[(bytes[i] >> 4) & 0xF];
+        hex[i * 2 + 1] = hex_chars[bytes[i] & 0xF];
     }
     hex[len * 2] = '\0';
 }
@@ -2202,8 +2216,8 @@ cyxwiz_error_t cyxwiz_onion_save_pinned_keys(
         if (ctx->peer_keys[i].valid && ctx->peer_keys[i].key_pinned) {
             char hex_id[65];
             char hex_pubkey[65];
-            node_id_to_hex(&ctx->peer_keys[i].peer_id, hex_id);
-            bytes_to_hex(ctx->peer_keys[i].pinned_pubkey, CYXWIZ_PUBKEY_SIZE, hex_pubkey);
+            node_id_to_hex(&ctx->peer_keys[i].peer_id, hex_id, sizeof(hex_id));
+            bytes_to_hex(ctx->peer_keys[i].pinned_pubkey, CYXWIZ_PUBKEY_SIZE, hex_pubkey, sizeof(hex_pubkey));
             fprintf(f, "%s %s %llu %d\n",
                     hex_id, hex_pubkey,
                     (unsigned long long)ctx->peer_keys[i].pinned_at,

@@ -1317,6 +1317,7 @@ static cyxwiz_error_t lora_init(cyxwiz_transport_t *transport)
     }
 
     strncpy(state->serial_port, serial_port, sizeof(state->serial_port) - 1);
+    state->serial_port[sizeof(state->serial_port) - 1] = '\0';
     state->serial = serial_open(serial_port, LORA_SERIAL_BAUD);
 
     if (state->serial != INVALID_SERIAL) {
@@ -1340,6 +1341,7 @@ static cyxwiz_error_t lora_init(cyxwiz_transport_t *transport)
         }
 
         strncpy(state->spi_device, spi_device, sizeof(state->spi_device) - 1);
+        state->spi_device[sizeof(state->spi_device) - 1] = '\0';
         state->spi_fd = spi_open(spi_device);
 
         if (state->spi_fd >= 0) {
