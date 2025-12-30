@@ -14,6 +14,7 @@
 #include "cyxwiz/transport.h"
 #include "cyxwiz/peer.h"
 #include "cyxwiz/routing.h"
+#include "cyxwiz/dht.h"
 #include "cyxwiz/log.h"
 #include "cyxwiz/memory.h"
 
@@ -83,6 +84,7 @@ static void signal_handler(int sig)
 /* Forward declarations */
 static cyxwiz_discovery_t *g_discovery = NULL;
 static cyxwiz_router_t *g_router = NULL;
+static cyxwiz_dht_t *g_dht = NULL;
 #ifdef CYXWIZ_HAS_CRYPTO
 static cyxwiz_onion_ctx_t *g_onion = NULL;
 #endif
@@ -155,7 +157,12 @@ static void on_data_received(
         if (g_router != NULL) {
             cyxwiz_router_handle_message(g_router, from, data, len);
         }
-    } else if (msg_type >= 0x01 && msg_type <= 0x0F) {
+    } else if (msg_type >= 0x05 && msg_type <= 0x0A) {
+        /* DHT messages (PING, PONG, FIND_NODE, etc.) */
+        if (g_dht != NULL) {
+            cyxwiz_dht_handle_message(g_dht, from, data, len);
+        }
+    } else if (msg_type >= 0x01 && msg_type <= 0x04) {
         /* Discovery messages (ANNOUNCE, ANNOUNCE_ACK) */
         if (g_discovery != NULL) {
             cyxwiz_discovery_handle_message(g_discovery, from, data, len);
@@ -413,6 +420,7 @@ static void cmd_help(void)
     printf("  /help                    Show this help\n");
     printf("  /status                  Show node status\n");
     printf("  /peers                   List connected peers\n");
+    printf("  /dht                     Show DHT status\n");
     printf("  /send <peer_id> <msg>    Send direct message\n");
     printf("  /anon <peer_id> <msg>    Send anonymous message\n");
     printf("  /cover on|off            Enable/disable cover traffic\n");
@@ -522,6 +530,31 @@ static void cmd_peers(void)
     }
 
     printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+}
+
+/* Show DHT status */
+static void cmd_dht(void)
+{
+    if (g_dht == NULL) {
+        printf("  Error: DHT not initialized\n");
+        return;
+    }
+
+    cyxwiz_dht_stats_t stats;
+    cyxwiz_dht_get_stats(g_dht, &stats);
+
+    printf("\n");
+    printf("  DHT Status:\n");
+    printf("  ───────────────────────────────────────────────\n");
+    printf("  Total nodes:      %zu\n", stats.total_nodes);
+    printf("  Active buckets:   %zu / %d\n", stats.active_buckets, CYXWIZ_DHT_BUCKET_COUNT);
+    printf("  Pending lookups:  %zu / %d\n", stats.pending_lookups, CYXWIZ_DHT_MAX_LOOKUPS);
+    printf("  Messages sent:    %llu\n", (unsigned long long)stats.messages_sent);
+    printf("  Messages recv:    %llu\n", (unsigned long long)stats.messages_received);
+    printf("  ───────────────────────────────────────────────\n");
+    printf("\n");
+    printf("  Bootstrap with CYXWIZ_DHT_SEEDS=<node_id>,<node_id>,...\n");
     printf("\n");
 }
 
@@ -1091,6 +1124,8 @@ static void process_command(const char *cmd)
         cmd_status();
     } else if (strcmp(cmd, "/peers") == 0) {
         cmd_peers();
+    } else if (strcmp(cmd, "/dht") == 0) {
+        cmd_dht();
     } else if (strncmp(cmd, "/send ", 6) == 0) {
         cmd_send(cmd + 6);
     } else if (strncmp(cmd, "/anon ", 6) == 0) {
@@ -1376,6 +1411,54 @@ int main(int argc, char *argv[])
                 CYXWIZ_ERROR("Failed to start router: %s", cyxwiz_strerror(err));
             }
 
+            /* Create DHT for decentralized peer discovery */
+            err = cyxwiz_dht_create(&g_dht, g_router, &local_id);
+            if (err != CYXWIZ_OK) {
+                CYXWIZ_ERROR("Failed to create DHT: %s", cyxwiz_strerror(err));
+            } else {
+                /* Attach DHT to discovery (auto-populate from broadcast discoveries) */
+                if (g_discovery != NULL) {
+                    cyxwiz_discovery_set_dht(g_discovery, g_dht);
+                }
+
+                /* Bootstrap DHT from environment variable if set */
+                const char *dht_seeds = getenv("CYXWIZ_DHT_SEEDS");
+                if (dht_seeds != NULL && strlen(dht_seeds) > 0) {
+                    /* Parse comma-separated hex node IDs */
+                    char seeds_copy[512];
+                    strncpy(seeds_copy, dht_seeds, sizeof(seeds_copy) - 1);
+                    seeds_copy[sizeof(seeds_copy) - 1] = '\0';
+
+                    cyxwiz_node_id_t seed_nodes[8];
+                    size_t seed_count = 0;
+                    char *token = strtok(seeds_copy, ",");
+
+                    while (token != NULL && seed_count < 8) {
+                        /* Skip whitespace */
+                        while (*token == ' ') token++;
+
+                        /* Parse hex node ID (at least 64 hex chars) */
+                        if (strlen(token) >= 64) {
+                            for (int i = 0; i < 32; i++) {
+                                unsigned int byte;
+                                if (sscanf(token + i * 2, "%02x", &byte) == 1) {
+                                    seed_nodes[seed_count].bytes[i] = (uint8_t)byte;
+                                }
+                            }
+                            seed_count++;
+                        }
+                        token = strtok(NULL, ",");
+                    }
+
+                    if (seed_count > 0) {
+                        cyxwiz_dht_bootstrap(g_dht, seed_nodes, seed_count);
+                        CYXWIZ_INFO("DHT bootstrapped with %zu seed nodes", seed_count);
+                    }
+                }
+
+                CYXWIZ_INFO("DHT enabled for decentralized peer discovery");
+            }
+
 #ifdef CYXWIZ_HAS_CRYPTO
             /* Create onion routing context */
             err = cyxwiz_onion_create(&g_onion, g_router, &local_id);
@@ -1499,6 +1582,11 @@ int main(int argc, char *argv[])
         /* Poll router (handles route discovery, pending sends, route expiry) */
         if (g_router != NULL) {
             cyxwiz_router_poll(g_router, now);
+        }
+
+        /* Poll DHT (handles lookups, bucket refresh, timeouts) */
+        if (g_dht != NULL) {
+            cyxwiz_dht_poll(g_dht, now);
         }
 
 #ifdef CYXWIZ_HAS_CRYPTO
@@ -1661,6 +1749,12 @@ cleanup:
         g_onion = NULL;
     }
 #endif
+
+    /* Destroy DHT (before router since it may reference router) */
+    if (g_dht != NULL) {
+        cyxwiz_dht_destroy(g_dht);
+        g_dht = NULL;
+    }
 
     /* Stop and destroy router */
     if (g_router != NULL) {
