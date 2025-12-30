@@ -7,9 +7,13 @@
  * NOTE: These tests start a bootstrap server subprocess for peer discovery.
  */
 
-/* Enable POSIX features for clock_gettime on Linux */
+/* Enable POSIX features for clock_gettime and usleep on Linux/macOS */
 #ifndef _WIN32
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 500
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 
 #ifdef _MSC_VER
