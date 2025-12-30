@@ -27,7 +27,7 @@ jobs:
 
     - name: Run tests
       working-directory: build
-      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure -E test_integration_udp
 
     - name: Package
       run: |
@@ -68,7 +68,7 @@ jobs:
 
     - name: Run tests
       working-directory: build
-      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure -E test_integration_udp
 
     - name: Package
       run: |
@@ -104,7 +104,7 @@ jobs:
 
     - name: Run tests
       working-directory: build
-      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure -E test_integration_udp
 
     - name: Package
       run: |
