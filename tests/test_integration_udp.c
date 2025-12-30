@@ -7,6 +7,11 @@
  * NOTE: These tests start a bootstrap server subprocess for peer discovery.
  */
 
+/* Enable POSIX features for clock_gettime on Linux */
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 199309L
+#endif
+
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -42,6 +47,7 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <time.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
