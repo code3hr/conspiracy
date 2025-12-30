@@ -5,6 +5,30 @@ All notable changes to CyxWiz Protocol will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-31
+
+### Added
+
+#### DHT (Distributed Hash Table)
+- Kademlia-style DHT for decentralized peer discovery
+- 256-bit XOR distance metric for node routing
+- K-buckets (K=8) with 256 buckets for routing table organization
+- Iterative lookup with parallel queries (alpha=3)
+- Bucket refresh and node liveness checking (ping/pong)
+- All DHT messages fit 250-byte LoRa constraint
+- DHT message types: PING, PONG, FIND_NODE, FIND_NODE_RESP, STORE, STORE_RESP
+- Integration with discovery (local peers auto-populate DHT)
+- `CYXWIZ_DHT_SEEDS` environment variable for bootstrapping
+- `/dht` command in daemon to show DHT statistics
+
+#### Daemon Integration
+- DHT context creation and polling in main loop
+- DHT message handling in message dispatcher
+- DHT cleanup on shutdown
+
+### Changed
+- Discovery module now supports optional DHT attachment via `cyxwiz_discovery_set_dht()`
+
 ## [0.3.0] - 2025-12-30
 
 ### Added
