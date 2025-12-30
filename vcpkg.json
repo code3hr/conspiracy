@@ -3,7 +3,7 @@
   "name": "cyxwiz",
   "version": "0.3.0",
   "description": "CyxWiz Protocol - Decentralized mesh network for anonymous computing",
-  "builtin-baseline": "c9fa965c2a1b1334469b4539063f3ce95383653c",
+  "builtin-baseline": "55fab67aea1027f7179ae6b5c54a5ba9091c16aa",
   "dependencies": [
     "libsodium"
   ]
