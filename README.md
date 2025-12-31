@@ -9,6 +9,14 @@ You Don't Even Exist.
 
 ---
 
+> **READ THIS FIRST: [TRUTH.md](TRUTH.md)**
+>
+> This project is in **ALPHA**. The features described below are **goals**, not guarantees.
+> Nothing has been security audited. Nothing has been tested on real networks with real users.
+> **Do not use for anything security-critical.**
+
+---
+
 ## Vision
 
 The future is scary. Surveillance capitalism tracks every click. Governments monitor every message. Big Tech owns your data, your identity, your digital soul.

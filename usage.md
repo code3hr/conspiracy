@@ -1,5 +1,21 @@
 # CyxWiz Protocol - Usage Guide
 
+---
+
+> **IMPORTANT DISCLAIMER**
+>
+> **This document describes the VISION for CyxWiz - not the current state.**
+>
+> Everything below describes what we're building toward. Most features:
+> - Exist as code (unit tests pass)
+> - Have **NOT** been tested on real networks
+> - Have **NOT** been security audited
+> - Should **NOT** be used for production or security-critical applications
+>
+> For an honest assessment of where we actually are, see **[TRUTH.md](TRUTH.md)**.
+
+---
+
 ## What CyxWiz Really Is
 
 CyxWiz is a **secure overlay network** - a private network layer that runs on top of existing infrastructure. Think of it as your own private internet where:
@@ -871,16 +887,16 @@ cyxwiz alert broadcast "Tsunami warning" --priority critical
 
 ## What You Can Build Today
 
-The protocol is **production-ready** for these applications:
+The protocol **aims to support** these applications (see [TRUTH.md](TRUTH.md) for actual status):
 
 | Application | Privacy Level | Status |
 |-------------|---------------|--------|
-| Anonymous messaging | Full (sender + receiver hidden) | ✓ Ready |
-| Censorship-resistant publishing | High (distributed, no takedowns) | ✓ Ready |
-| Secure file storage | High (K-of-N threshold) | ✓ Ready |
-| Private compute jobs | High (MAC verified) | ✓ Ready |
-| Emergency mesh networks | Medium (no internet required) | ✓ Ready |
-| Whistleblower platforms | Full (anonymous route discovery) | ✓ Ready |
+| Anonymous messaging | Full (sender + receiver hidden) | Code exists, untested on real networks |
+| Censorship-resistant publishing | High (distributed, no takedowns) | Code exists, untested |
+| Secure file storage | High (K-of-N threshold) | Code exists, untested |
+| Private compute jobs | High (MAC verified) | Code exists, untested |
+| Emergency mesh networks | Medium (no internet required) | Code exists, untested |
+| Whistleblower platforms | Full (anonymous route discovery) | Code exists, untested |
 
 ---
 
