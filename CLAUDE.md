@@ -644,15 +644,217 @@ echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 - Device discovery, connection management
 
 ### LoRa (`lora.c`)
+- **Status: Implemented but untested on real hardware**
 - Serial: AT command modules (RYLR890/RYLR896)
 - SPI: Direct SX127x register access (Linux)
 - CSMA/CA collision avoidance
 - Environment variables: `CYXWIZ_LORA_SERIAL`, `CYXWIZ_LORA_SPI`, `CYXWIZ_LORA_FREQ`
+- Falls back to stub mode if no hardware detected
 
 ### UDP (`udp.c`)
 - NAT traversal via STUN (Google, Cloudflare servers)
 - UDP hole punching for peer-to-peer
 - Bootstrap server for peer discovery
+
+## LoRa for IoT Security
+
+CyxWiz over LoRa solves critical IoT security vulnerabilities by eliminating centralized infrastructure.
+
+### Traditional LoRaWAN vs CyxWiz
+
+| Problem | Traditional LoRaWAN | CyxWiz + LoRa |
+|---------|---------------------|---------------|
+| Default credentials | Join EUI/App Key often reused | Node ID = unique X25519 keypair |
+| Centralized trust | Network server holds all keys | MPC: keys split across nodes |
+| Traffic analysis | Gateway sees source/destination | Onion routing hides metadata |
+| Server compromise | All devices exposed | No servers to compromise |
+| Key management | Keys provisioned at factory | Keys generated on-device, refresh hourly |
+| Replay attacks | Frame counters can overflow | Cryptographic nonces + MACs |
+| Gateway attacks | Fake gateway = MitM all devices | No gateways, direct mesh |
+
+### Architecture Comparison
+
+**Traditional LoRaWAN** (centralized, vulnerable):
+```
+Device ──▶ Gateway ──▶ Network Server ──▶ App Server
+              │               │               │
+       Single point     Holds keys      Data breach
+        of failure                        risk
+```
+
+**CyxWiz LoRa Mesh** (decentralized, secure):
+```
+Device A ◀──LoRa──▶ Device B ◀──LoRa──▶ Device C
+    │                   │                   │
+    └───────── E2E Encrypted + Onion Routed ┘
+    No gateway, no server, no single point of failure
+```
+
+### Security Layers
+
+| Layer | CyxWiz Protection |
+|-------|-------------------|
+| Physical | LoRa: long range, low power, license-free spectrum |
+| Network | Mesh topology: no single point of failure |
+| Transport | Onion routing: each hop only sees next hop |
+| Session | X25519 key exchange per peer |
+| Application | XChaCha20-Poly1305 authenticated encryption |
+| Key Management | MPC: keys distributed across nodes, hourly refresh |
+
+### Use Cases
+
+**Smart Agriculture**
+```
+Soil sensors ◀──LoRa mesh──▶ Farmer's phone
+Direct E2E encrypted - no cloud, no gateway
+```
+
+**Industrial Monitoring**
+```
+Factory sensors ◀──LoRa mesh──▶ Control nodes
+MPC: compromise one node ≠ compromise system
+```
+
+**Disaster Response**
+```
+Emergency devices ◀──LoRa mesh──▶ Responders
+Works without cell towers or internet
+```
+
+## Using CyxWiz on LoRa Devices
+
+### Supported Hardware
+
+| Type | Modules | Interface |
+|------|---------|-----------|
+| Serial/AT | RYLR890, RYLR896, E32-433T | UART (115200 baud) |
+| SPI | SX1276, SX1278, RFM95W | SPI (Linux only) |
+
+### Hardware Setup
+
+**Option 1: Serial Module (Easiest)**
+```
+┌─────────────┐         ┌─────────────┐
+│ Raspberry Pi│         │ RYLR896     │
+│             │         │             │
+│ TX (GPIO14) ├────────▶│ RX          │
+│ RX (GPIO15) │◀────────┤ TX          │
+│ 3.3V        ├────────▶│ VDD         │
+│ GND         ├────────▶│ GND         │
+└─────────────┘         └─────────────┘
+```
+
+**Option 2: SPI Module (Better Performance)**
+```
+┌─────────────┐         ┌─────────────┐
+│ Raspberry Pi│         │ RFM95W      │
+│             │         │             │
+│ MOSI (GPIO10)├───────▶│ MOSI        │
+│ MISO (GPIO9) │◀───────┤ MISO        │
+│ SCLK (GPIO11)├───────▶│ SCK         │
+│ CE0 (GPIO8)  ├───────▶│ NSS         │
+│ GPIO17       ├───────▶│ RST         │
+│ GPIO22       │◀───────┤ DIO0        │
+│ 3.3V         ├───────▶│ VCC         │
+│ GND          ├───────▶│ GND         │
+└─────────────┘         └─────────────┘
+```
+
+### Configuration
+
+**Environment Variables:**
+```bash
+# Serial module
+export CYXWIZ_LORA_SERIAL=/dev/ttyUSB0   # or /dev/ttyAMA0 on Pi
+export CYXWIZ_LORA_FREQ=915000000        # 915 MHz (US) or 868000000 (EU)
+export CYXWIZ_LORA_SF=9                  # Spreading factor 7-12
+export CYXWIZ_LORA_POWER=14              # TX power 2-20 dBm
+
+# SPI module (Linux only)
+export CYXWIZ_LORA_SPI=/dev/spidev0.0
+export CYXWIZ_LORA_FREQ=915000000
+```
+
+### Building for LoRa
+
+```bash
+# Enable LoRa transport
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCYXWIZ_TRANSPORT_LORA=ON
+
+# Build
+cmake --build build
+```
+
+### Running the Daemon
+
+**Node 1:**
+```bash
+export CYXWIZ_LORA_SERIAL=/dev/ttyUSB0
+./build/cyxwizd
+```
+
+**Node 2 (on another device):**
+```bash
+export CYXWIZ_LORA_SERIAL=/dev/ttyUSB0
+./build/cyxwizd
+```
+
+### Testing Communication
+
+On Node 1:
+```
+/status              # Get your node ID
+/peers               # Wait for Node 2 to appear
+```
+
+On Node 2:
+```
+/peers               # Should see Node 1
+/send <node1_id> hello    # Send message
+```
+
+### LoRa Parameters Guide
+
+| Parameter | Low Power | Balanced | Long Range |
+|-----------|-----------|----------|------------|
+| SF | 7 | 9 | 12 |
+| BW | 125 kHz | 125 kHz | 125 kHz |
+| Range | ~2 km | ~5 km | ~15 km |
+| Data rate | 5.5 kbps | 1.8 kbps | 0.3 kbps |
+| Air time (50 bytes) | 36 ms | 165 ms | 1.3 s |
+
+### Troubleshooting
+
+**Module not detected:**
+```bash
+# Check serial port
+ls -la /dev/ttyUSB*
+dmesg | grep tty
+
+# Test AT commands manually
+screen /dev/ttyUSB0 115200
+AT        # Should respond +OK
+AT+VER?   # Shows firmware version
+```
+
+**SPI not working (Linux):**
+```bash
+# Enable SPI in raspi-config
+sudo raspi-config
+# Interface Options -> SPI -> Enable
+
+# Check SPI device
+ls -la /dev/spidev*
+
+# Load SPI module
+sudo modprobe spi-bcm2835
+```
+
+**No peers discovered:**
+- Ensure both nodes use same frequency
+- Check antenna is connected
+- Reduce SF for faster discovery, increase for range
+- Check for obstructions (LoRa is line-of-sight sensitive)
 
 ## Security Considerations
 
