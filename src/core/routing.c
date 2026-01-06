@@ -549,8 +549,38 @@ cyxwiz_error_t cyxwiz_router_send(
         if (len > CYXWIZ_MAX_PACKET_SIZE) {
             return CYXWIZ_ERR_PACKET_TOO_LARGE;
         }
-        return router->transport->ops->send(
+        cyxwiz_error_t err = router->transport->ops->send(
             router->transport, destination, data, len);
+        if (err != CYXWIZ_OK) {
+            char hex_id[65];
+            cyxwiz_node_id_to_hex(destination, hex_id);
+            CYXWIZ_ERROR("cyxwiz_router_send: direct send to %.16s... failed, err=%d (%s)",
+                         hex_id, err, cyxwiz_strerror(err));
+        }
+        return err;
+    }
+
+    /*
+     * Onion packets (type 0x24) must be sent directly to the first hop.
+     * They cannot go through mesh routing as that would break the layered encryption.
+     * If the peer is not a direct peer, try to send via transport anyway and let
+     * the transport layer handle the error (e.g., if there's UDP hole punch info).
+     */
+    if (len > 0 && data[0] == CYXWIZ_MSG_ONION_DATA) {
+        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+            return CYXWIZ_ERR_PACKET_TOO_LARGE;
+        }
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(destination, hex_id);
+        CYXWIZ_WARN("cyxwiz_router_send: onion packet to non-direct peer %.16s..., attempting direct send",
+                    hex_id);
+        cyxwiz_error_t err = router->transport->ops->send(
+            router->transport, destination, data, len);
+        if (err != CYXWIZ_OK) {
+            CYXWIZ_ERROR("cyxwiz_router_send: onion send to %.16s... failed, err=%d (%s)",
+                         hex_id, err, cyxwiz_strerror(err));
+        }
+        return err;
     }
 
     /* For multi-hop routed messages, enforce smaller payload limit */

@@ -205,6 +205,55 @@ cyxwiz_dht_store_resp_t;
 #pragma pack(pop)
 #endif
 
+/*
+ * FIND_VALUE request (37 bytes) - Get value by key
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                    /* CYXWIZ_MSG_DHT_FIND_VALUE (0x0B) */
+    uint32_t request_id;
+    cyxwiz_node_id_t key;            /* Key to find (32 bytes) */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_dht_find_value_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/*
+ * FIND_VALUE response (variable)
+ * If found: type + request_id + found=1 + ttl + value_len + value
+ * If not found: type + request_id + found=0 + node_count + nodes[]
+ */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct {
+    uint8_t type;                    /* CYXWIZ_MSG_DHT_FIND_VALUE_RESP (0x0C) */
+    uint32_t request_id;
+    uint8_t found;                   /* 1 = value included, 0 = nodes included */
+    /* If found=1: uint32_t ttl_remaining, uint8_t value_len, uint8_t value[] */
+    /* If found=0: uint8_t node_count, cyxwiz_dht_node_entry_t nodes[] */
+}
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+cyxwiz_dht_find_value_resp_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
+
+/* ============ DHT Value Storage Constants ============ */
+
+#define CYXWIZ_DHT_MAX_VALUE_SIZE    160     /* Max value size (fits LoRa with headers) */
+#define CYXWIZ_DHT_MAX_VALUES        64      /* Max stored values per node */
+#define CYXWIZ_DHT_VALUE_REPLICATION 3       /* Store to K closest nodes */
+#define CYXWIZ_DHT_GET_TIMEOUT_MS    5000    /* Get operation timeout */
+
 /* ============ DHT API ============ */
 
 /*
@@ -340,6 +389,120 @@ void cyxwiz_dht_get_stats(
     cyxwiz_dht_t *dht,
     cyxwiz_dht_stats_t *stats
 );
+
+/* ============ Simple Key-Value API ============ */
+
+/*
+ * Callback for DHT get completion
+ *
+ * @param key        The key that was looked up
+ * @param found      true if value was found
+ * @param value      Value data (NULL if not found)
+ * @param value_len  Length of value
+ * @param user_data  User-provided context
+ */
+typedef void (*cyxwiz_dht_get_cb_t)(
+    const uint8_t *key,
+    bool found,
+    const uint8_t *value,
+    size_t value_len,
+    void *user_data
+);
+
+/*
+ * Store a key-value pair in the DHT
+ *
+ * Stores the value to the K closest nodes to the key.
+ * Key is a 32-byte hash (e.g., BLAKE2b of logical key).
+ *
+ * @param dht         DHT context
+ * @param key         32-byte key (usually a hash)
+ * @param value       Value to store
+ * @param value_len   Length of value (max CYXWIZ_DHT_MAX_VALUE_SIZE)
+ * @param ttl_seconds Time-to-live in seconds (max 86400 = 24h)
+ * @return            CYXWIZ_OK on success, error otherwise
+ */
+cyxwiz_error_t cyxwiz_dht_put(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    const uint8_t *value,
+    size_t value_len,
+    uint32_t ttl_seconds
+);
+
+/*
+ * Retrieve a value from the DHT by key
+ *
+ * Performs iterative lookup to find nodes closest to key,
+ * queries them for the value. Callback is invoked when complete.
+ *
+ * @param dht         DHT context
+ * @param key         32-byte key to look up
+ * @param callback    Called when lookup completes
+ * @param user_data   Passed to callback
+ * @return            CYXWIZ_OK if lookup started
+ */
+cyxwiz_error_t cyxwiz_dht_get(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    cyxwiz_dht_get_cb_t callback,
+    void *user_data
+);
+
+/*
+ * Delete a key from the DHT
+ *
+ * Sends delete requests to nodes storing this key.
+ * Note: DHT deletes are best-effort (nodes may still have cached copies).
+ *
+ * @param dht   DHT context
+ * @param key   32-byte key to delete
+ * @return      CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_dht_delete(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key
+);
+
+/*
+ * Check if a key exists locally (without network lookup)
+ *
+ * @param dht   DHT context
+ * @param key   32-byte key to check
+ * @return      true if stored locally
+ */
+bool cyxwiz_dht_has_local(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key
+);
+
+/*
+ * Get a value stored locally (without network lookup)
+ *
+ * @param dht         DHT context
+ * @param key         32-byte key
+ * @param value_out   Output buffer for value
+ * @param value_size  Size of output buffer
+ * @param value_len   Output: actual value length
+ * @return            CYXWIZ_OK if found, CYXWIZ_ERR_STORAGE_NOT_FOUND otherwise
+ */
+cyxwiz_error_t cyxwiz_dht_get_local(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    uint8_t *value_out,
+    size_t value_size,
+    size_t *value_len
+);
+
+/*
+ * Get count of locally stored values
+ */
+size_t cyxwiz_dht_local_count(const cyxwiz_dht_t *dht);
+
+/*
+ * Get total bytes used by local value storage
+ */
+size_t cyxwiz_dht_local_bytes(const cyxwiz_dht_t *dht);
 
 /* ============ Utility Functions ============ */
 

@@ -92,6 +92,8 @@ typedef enum {
     CYXWIZ_MSG_DHT_FIND_NODE_RESP = 0x08, /* Response with closest nodes */
     CYXWIZ_MSG_DHT_STORE = 0x09,          /* Store value in DHT */
     CYXWIZ_MSG_DHT_STORE_RESP = 0x0A,     /* Store confirmation */
+    CYXWIZ_MSG_DHT_FIND_VALUE = 0x0B,     /* Find value by key */
+    CYXWIZ_MSG_DHT_FIND_VALUE_RESP = 0x0C,/* Value response (value or closer nodes) */
 
     /* Data messages (0x10-0x1F) */
     CYXWIZ_MSG_DATA = 0x10,

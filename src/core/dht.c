@@ -36,6 +36,33 @@ typedef struct {
     bool active;
 } cyxwiz_dht_pending_ping_t;
 
+/* Locally stored value */
+typedef struct {
+    uint8_t key[CYXWIZ_NODE_ID_LEN];        /* 32-byte key */
+    uint8_t value[CYXWIZ_DHT_MAX_VALUE_SIZE];
+    size_t value_len;
+    cyxwiz_node_id_t publisher;              /* Who published this value */
+    uint64_t expires_at;                     /* Absolute expiry timestamp */
+    bool active;
+} cyxwiz_dht_value_t;
+
+/* Pending get operation */
+typedef struct {
+    uint8_t key[CYXWIZ_NODE_ID_LEN];
+    uint32_t request_id;
+    uint64_t started_at;
+    cyxwiz_node_id_t queried[CYXWIZ_DHT_K * 2];
+    size_t queried_count;
+    cyxwiz_dht_get_cb_t callback;
+    void *user_data;
+    bool active;
+    bool found;
+    uint8_t found_value[CYXWIZ_DHT_MAX_VALUE_SIZE];
+    size_t found_value_len;
+} cyxwiz_dht_get_op_t;
+
+#define CYXWIZ_DHT_MAX_GET_OPS 4
+
 /*
  * DHT context
  */
@@ -52,6 +79,13 @@ struct cyxwiz_dht {
     /* Pending pings */
     cyxwiz_dht_pending_ping_t pending_pings[CYXWIZ_DHT_K];
     size_t pending_ping_count;
+
+    /* Local value storage */
+    cyxwiz_dht_value_t values[CYXWIZ_DHT_MAX_VALUES];
+    size_t value_count;
+
+    /* Pending get operations */
+    cyxwiz_dht_get_op_t get_ops[CYXWIZ_DHT_MAX_GET_OPS];
 
     /* Callbacks */
     cyxwiz_dht_node_cb_t node_callback;
@@ -76,6 +110,14 @@ static void handle_find_node(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
                              const cyxwiz_dht_find_node_t *msg);
 static void handle_find_node_resp(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
                                   const uint8_t *data, size_t len);
+static void handle_store(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                         const uint8_t *data, size_t len);
+static void handle_store_resp(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                              const cyxwiz_dht_store_resp_t *msg);
+static void handle_find_value(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                              const cyxwiz_dht_find_value_t *msg);
+static void handle_find_value_resp(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                                   const uint8_t *data, size_t len);
 static void send_find_node(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *to,
                            const cyxwiz_node_id_t *target, uint32_t request_id);
 static void send_ping(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *to, uint32_t request_id);
@@ -83,10 +125,14 @@ static void add_to_bucket(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *node_id);
 static void refresh_buckets(cyxwiz_dht_t *dht);
 static void check_lookup_timeouts(cyxwiz_dht_t *dht);
 static void check_ping_timeouts(cyxwiz_dht_t *dht);
+static void check_get_timeouts(cyxwiz_dht_t *dht);
+static void check_value_expiry(cyxwiz_dht_t *dht);
 static void continue_lookup(cyxwiz_dht_t *dht, cyxwiz_dht_lookup_t *lookup);
 static bool is_node_queried(cyxwiz_dht_lookup_t *lookup, const cyxwiz_node_id_t *node_id);
 static void add_to_closest(cyxwiz_dht_lookup_t *lookup, const cyxwiz_node_id_t *node_id,
                            const cyxwiz_node_id_t *target);
+static cyxwiz_dht_value_t* find_local_value(cyxwiz_dht_t *dht, const uint8_t *key);
+static cyxwiz_dht_value_t* alloc_value_slot(cyxwiz_dht_t *dht);
 
 /* ============ Utility Functions ============ */
 
@@ -371,6 +417,12 @@ cyxwiz_error_t cyxwiz_dht_poll(
     /* Check ping timeouts */
     check_ping_timeouts(dht);
 
+    /* Check get operation timeouts */
+    check_get_timeouts(dht);
+
+    /* Check value expiry */
+    check_value_expiry(dht);
+
     /* Periodically refresh buckets */
     static uint64_t last_refresh = 0;
     if (current_time_ms - last_refresh > CYXWIZ_DHT_REFRESH_MS) {
@@ -417,6 +469,30 @@ cyxwiz_error_t cyxwiz_dht_handle_message(
         case CYXWIZ_MSG_DHT_FIND_NODE_RESP:
             if (len >= sizeof(cyxwiz_dht_find_node_resp_t)) {
                 handle_find_node_resp(dht, from, data, len);
+            }
+            break;
+
+        case CYXWIZ_MSG_DHT_STORE:
+            if (len >= sizeof(cyxwiz_dht_store_t)) {
+                handle_store(dht, from, data, len);
+            }
+            break;
+
+        case CYXWIZ_MSG_DHT_STORE_RESP:
+            if (len >= sizeof(cyxwiz_dht_store_resp_t)) {
+                handle_store_resp(dht, from, (const cyxwiz_dht_store_resp_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_DHT_FIND_VALUE:
+            if (len >= sizeof(cyxwiz_dht_find_value_t)) {
+                handle_find_value(dht, from, (const cyxwiz_dht_find_value_t *)data);
+            }
+            break;
+
+        case CYXWIZ_MSG_DHT_FIND_VALUE_RESP:
+            if (len >= sizeof(cyxwiz_dht_find_value_resp_t)) {
+                handle_find_value_resp(dht, from, data, len);
             }
             break;
 
@@ -873,4 +949,530 @@ static void add_to_closest(cyxwiz_dht_lookup_t *lookup, const cyxwiz_node_id_t *
 
     /* Keep sorted by distance */
     sort_by_distance(lookup->closest, lookup->closest_count, target);
+}
+
+/* ============ Value Storage Helpers ============ */
+
+static cyxwiz_dht_value_t* find_local_value(cyxwiz_dht_t *dht, const uint8_t *key)
+{
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_VALUES; i++) {
+        if (dht->values[i].active &&
+            memcmp(dht->values[i].key, key, CYXWIZ_NODE_ID_LEN) == 0) {
+            return &dht->values[i];
+        }
+    }
+    return NULL;
+}
+
+static cyxwiz_dht_value_t* alloc_value_slot(cyxwiz_dht_t *dht)
+{
+    /* Find empty slot */
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_VALUES; i++) {
+        if (!dht->values[i].active) {
+            return &dht->values[i];
+        }
+    }
+
+    /* Find oldest expired value */
+    cyxwiz_dht_value_t *oldest = NULL;
+    uint64_t oldest_expiry = UINT64_MAX;
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_VALUES; i++) {
+        if (dht->values[i].expires_at < oldest_expiry) {
+            oldest_expiry = dht->values[i].expires_at;
+            oldest = &dht->values[i];
+        }
+    }
+
+    /* If oldest is expired, reuse it */
+    if (oldest && oldest->expires_at <= dht->current_time) {
+        oldest->active = false;
+        dht->value_count--;
+        return oldest;
+    }
+
+    return NULL;  /* Storage full */
+}
+
+static void check_get_timeouts(cyxwiz_dht_t *dht)
+{
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_GET_OPS; i++) {
+        cyxwiz_dht_get_op_t *op = &dht->get_ops[i];
+        if (!op->active) continue;
+
+        if (dht->current_time - op->started_at > CYXWIZ_DHT_GET_TIMEOUT_MS) {
+            op->active = false;
+            if (op->callback) {
+                op->callback(op->key, false, NULL, 0, op->user_data);
+            }
+        }
+    }
+}
+
+static void check_value_expiry(cyxwiz_dht_t *dht)
+{
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_VALUES; i++) {
+        if (dht->values[i].active &&
+            dht->values[i].expires_at <= dht->current_time) {
+            dht->values[i].active = false;
+            dht->value_count--;
+        }
+    }
+}
+
+/* ============ Store/FindValue Message Handlers ============ */
+
+static void handle_store(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                         const uint8_t *data, size_t len)
+{
+    const cyxwiz_dht_store_t *msg = (const cyxwiz_dht_store_t *)data;
+
+    /* Validate message */
+    size_t min_len = sizeof(cyxwiz_dht_store_t) + msg->value_len;
+    if (len < min_len || msg->value_len > CYXWIZ_DHT_MAX_VALUE_SIZE) {
+        return;
+    }
+
+    const uint8_t *value = data + sizeof(cyxwiz_dht_store_t);
+
+    CYXWIZ_DEBUG("Received DHT STORE request, value_len=%u, ttl=%u",
+                 msg->value_len, msg->ttl_seconds);
+
+    /* Check if we already have this key */
+    cyxwiz_dht_value_t *slot = find_local_value(dht, msg->key.bytes);
+    if (slot == NULL) {
+        slot = alloc_value_slot(dht);
+    }
+
+    uint8_t success = 0;
+    if (slot != NULL) {
+        /* Store the value */
+        memcpy(slot->key, msg->key.bytes, CYXWIZ_NODE_ID_LEN);
+        memcpy(slot->value, value, msg->value_len);
+        slot->value_len = msg->value_len;
+        memcpy(&slot->publisher, &msg->publisher, sizeof(cyxwiz_node_id_t));
+        slot->expires_at = dht->current_time + (uint64_t)msg->ttl_seconds * 1000;
+        if (!slot->active) {
+            slot->active = true;
+            dht->value_count++;
+        }
+        success = 1;
+        CYXWIZ_DEBUG("Stored DHT value, count=%zu", dht->value_count);
+    }
+
+    /* Send response */
+    if (dht->router != NULL) {
+        cyxwiz_dht_store_resp_t resp;
+        resp.type = CYXWIZ_MSG_DHT_STORE_RESP;
+        resp.request_id = msg->request_id;
+        resp.success = success;
+        cyxwiz_router_send(dht->router, from, (uint8_t *)&resp, sizeof(resp));
+        dht->messages_sent++;
+    }
+}
+
+static void handle_store_resp(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                              const cyxwiz_dht_store_resp_t *msg)
+{
+    CYXWIZ_UNUSED(dht);
+    CYXWIZ_UNUSED(from);
+    CYXWIZ_DEBUG("Received DHT STORE response, success=%u", msg->success);
+    /* Currently we don't track pending stores, just log the response */
+}
+
+static void handle_find_value(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                              const cyxwiz_dht_find_value_t *msg)
+{
+    CYXWIZ_DEBUG("Received DHT FIND_VALUE request");
+
+    if (dht->router == NULL) return;
+
+    /* Check if we have this value locally */
+    cyxwiz_dht_value_t *value = find_local_value(dht, msg->key.bytes);
+
+    uint8_t response[CYXWIZ_MAX_PACKET_SIZE];
+    size_t resp_len = 0;
+
+    if (value != NULL && value->expires_at > dht->current_time) {
+        /* Found! Send value */
+        cyxwiz_dht_find_value_resp_t *resp = (cyxwiz_dht_find_value_resp_t *)response;
+        resp->type = CYXWIZ_MSG_DHT_FIND_VALUE_RESP;
+        resp->request_id = msg->request_id;
+        resp->found = 1;
+
+        /* Add TTL remaining (seconds) */
+        uint32_t ttl_remaining = (uint32_t)((value->expires_at - dht->current_time) / 1000);
+        uint8_t *ptr = response + sizeof(cyxwiz_dht_find_value_resp_t);
+        memcpy(ptr, &ttl_remaining, 4);
+        ptr += 4;
+
+        /* Add value length and value */
+        *ptr++ = (uint8_t)value->value_len;
+        memcpy(ptr, value->value, value->value_len);
+        ptr += value->value_len;
+
+        resp_len = ptr - response;
+        CYXWIZ_DEBUG("Sending FIND_VALUE response with value, len=%zu", value->value_len);
+    } else {
+        /* Not found - return closest nodes */
+        cyxwiz_dht_find_value_resp_t *resp = (cyxwiz_dht_find_value_resp_t *)response;
+        resp->type = CYXWIZ_MSG_DHT_FIND_VALUE_RESP;
+        resp->request_id = msg->request_id;
+        resp->found = 0;
+
+        /* Get closest nodes to key */
+        cyxwiz_node_id_t closest[CYXWIZ_DHT_MAX_PEERS_RESP];
+        size_t count = cyxwiz_dht_get_closest(dht, &msg->key, closest,
+                                              CYXWIZ_DHT_MAX_PEERS_RESP);
+
+        uint8_t *ptr = response + sizeof(cyxwiz_dht_find_value_resp_t);
+        *ptr++ = (uint8_t)count;
+
+        /* Add node entries */
+        for (size_t i = 0; i < count; i++) {
+            cyxwiz_dht_node_entry_t *entry = (cyxwiz_dht_node_entry_t *)ptr;
+            memcpy(&entry->id, &closest[i], sizeof(cyxwiz_node_id_t));
+            entry->latency_ms = 0;
+            entry->capabilities = 0;
+            entry->reputation = 50;
+            ptr += sizeof(cyxwiz_dht_node_entry_t);
+        }
+
+        resp_len = ptr - response;
+        CYXWIZ_DEBUG("Sending FIND_VALUE response with %zu nodes", count);
+    }
+
+    cyxwiz_router_send(dht->router, from, response, resp_len);
+    dht->messages_sent++;
+}
+
+static void handle_find_value_resp(cyxwiz_dht_t *dht, const cyxwiz_node_id_t *from,
+                                   const uint8_t *data, size_t len)
+{
+    const cyxwiz_dht_find_value_resp_t *resp = (const cyxwiz_dht_find_value_resp_t *)data;
+
+    /* Find matching get operation */
+    cyxwiz_dht_get_op_t *op = NULL;
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_GET_OPS; i++) {
+        if (dht->get_ops[i].active &&
+            dht->get_ops[i].request_id == resp->request_id) {
+            op = &dht->get_ops[i];
+            break;
+        }
+    }
+
+    if (op == NULL) return;  /* Stale response */
+
+    if (resp->found) {
+        /* Parse value */
+        const uint8_t *ptr = data + sizeof(cyxwiz_dht_find_value_resp_t);
+        if (len < sizeof(cyxwiz_dht_find_value_resp_t) + 5) return;
+
+        /* uint32_t ttl_remaining = *(uint32_t *)ptr; */
+        ptr += 4;
+        uint8_t value_len = *ptr++;
+
+        if (len < sizeof(cyxwiz_dht_find_value_resp_t) + 5 + value_len) return;
+
+        /* Found! Complete the operation */
+        op->found = true;
+        op->found_value_len = value_len;
+        memcpy(op->found_value, ptr, value_len);
+        op->active = false;
+
+        CYXWIZ_DEBUG("DHT GET found value, len=%u", value_len);
+
+        if (op->callback) {
+            op->callback(op->key, true, op->found_value, op->found_value_len, op->user_data);
+        }
+    } else {
+        /* Not found at this node - add closer nodes and continue */
+        const uint8_t *ptr = data + sizeof(cyxwiz_dht_find_value_resp_t);
+        uint8_t node_count = *ptr++;
+
+        for (uint8_t i = 0; i < node_count && i < CYXWIZ_DHT_MAX_PEERS_RESP; i++) {
+            const cyxwiz_dht_node_entry_t *entry = (const cyxwiz_dht_node_entry_t *)ptr;
+            add_to_bucket(dht, &entry->id);
+            ptr += sizeof(cyxwiz_dht_node_entry_t);
+        }
+
+        /* Mark sender as queried */
+        if (op->queried_count < CYXWIZ_DHT_K * 2) {
+            memcpy(&op->queried[op->queried_count++], from, sizeof(cyxwiz_node_id_t));
+        }
+
+        /* Send more queries to unqueried closest nodes */
+        cyxwiz_node_id_t key_as_node;
+        memcpy(&key_as_node, op->key, CYXWIZ_NODE_ID_LEN);
+
+        cyxwiz_node_id_t closest[CYXWIZ_DHT_ALPHA];
+        size_t count = cyxwiz_dht_get_closest(dht, &key_as_node, closest, CYXWIZ_DHT_ALPHA);
+
+        int queries_sent = 0;
+        for (size_t i = 0; i < count && queries_sent < CYXWIZ_DHT_ALPHA; i++) {
+            /* Check if already queried */
+            bool queried = false;
+            for (size_t j = 0; j < op->queried_count; j++) {
+                if (cyxwiz_node_id_cmp(&op->queried[j], &closest[i]) == 0) {
+                    queried = true;
+                    break;
+                }
+            }
+
+            if (!queried) {
+                cyxwiz_dht_find_value_t msg;
+                msg.type = CYXWIZ_MSG_DHT_FIND_VALUE;
+                msg.request_id = op->request_id;
+                memcpy(&msg.key, op->key, CYXWIZ_NODE_ID_LEN);
+                cyxwiz_router_send(dht->router, &closest[i], (uint8_t *)&msg, sizeof(msg));
+                dht->messages_sent++;
+                queries_sent++;
+
+                if (op->queried_count < CYXWIZ_DHT_K * 2) {
+                    memcpy(&op->queried[op->queried_count++], &closest[i], sizeof(cyxwiz_node_id_t));
+                }
+            }
+        }
+
+        /* If no more nodes to query, operation failed */
+        if (queries_sent == 0) {
+            op->active = false;
+            if (op->callback) {
+                op->callback(op->key, false, NULL, 0, op->user_data);
+            }
+        }
+    }
+}
+
+/* ============ Simple Key-Value API Implementation ============ */
+
+cyxwiz_error_t cyxwiz_dht_put(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    const uint8_t *value,
+    size_t value_len,
+    uint32_t ttl_seconds)
+{
+    if (dht == NULL || key == NULL || value == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    if (value_len > CYXWIZ_DHT_MAX_VALUE_SIZE) {
+        return CYXWIZ_ERR_BUFFER_TOO_SMALL;
+    }
+
+    if (ttl_seconds > 86400) {
+        ttl_seconds = 86400;  /* Cap at 24 hours */
+    }
+
+    if (dht->router == NULL) {
+        return CYXWIZ_ERR_NOT_INITIALIZED;
+    }
+
+    /* Store locally first */
+    cyxwiz_dht_value_t *slot = find_local_value(dht, key);
+    if (slot == NULL) {
+        slot = alloc_value_slot(dht);
+    }
+    if (slot != NULL) {
+        memcpy(slot->key, key, CYXWIZ_NODE_ID_LEN);
+        memcpy(slot->value, value, value_len);
+        slot->value_len = value_len;
+        memcpy(&slot->publisher, &dht->local_id, sizeof(cyxwiz_node_id_t));
+        slot->expires_at = dht->current_time + (uint64_t)ttl_seconds * 1000;
+        if (!slot->active) {
+            slot->active = true;
+            dht->value_count++;
+        }
+    }
+
+    /* Find K closest nodes to key and send STORE to each */
+    cyxwiz_node_id_t key_as_node;
+    memcpy(&key_as_node, key, CYXWIZ_NODE_ID_LEN);
+
+    cyxwiz_node_id_t closest[CYXWIZ_DHT_VALUE_REPLICATION];
+    size_t count = cyxwiz_dht_get_closest(dht, &key_as_node, closest,
+                                          CYXWIZ_DHT_VALUE_REPLICATION);
+
+    /* Build STORE message */
+    uint8_t msg_buf[CYXWIZ_MAX_PACKET_SIZE];
+    cyxwiz_dht_store_t *msg = (cyxwiz_dht_store_t *)msg_buf;
+    msg->type = CYXWIZ_MSG_DHT_STORE;
+    msg->request_id = dht->next_request_id++;
+    memcpy(&msg->key, key, CYXWIZ_NODE_ID_LEN);
+    memcpy(&msg->publisher, &dht->local_id, sizeof(cyxwiz_node_id_t));
+    msg->ttl_seconds = ttl_seconds;
+    msg->value_len = (uint8_t)value_len;
+    memcpy(msg_buf + sizeof(cyxwiz_dht_store_t), value, value_len);
+
+    size_t msg_len = sizeof(cyxwiz_dht_store_t) + value_len;
+
+    for (size_t i = 0; i < count; i++) {
+        cyxwiz_router_send(dht->router, &closest[i], msg_buf, msg_len);
+        dht->messages_sent++;
+    }
+
+    CYXWIZ_DEBUG("DHT PUT: sent to %zu nodes, value_len=%zu, ttl=%u",
+                 count, value_len, ttl_seconds);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_dht_get(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    cyxwiz_dht_get_cb_t callback,
+    void *user_data)
+{
+    if (dht == NULL || key == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Check local storage first */
+    cyxwiz_dht_value_t *local = find_local_value(dht, key);
+    if (local != NULL && local->expires_at > dht->current_time) {
+        if (callback) {
+            callback(key, true, local->value, local->value_len, user_data);
+        }
+        return CYXWIZ_OK;
+    }
+
+    if (dht->router == NULL) {
+        if (callback) {
+            callback(key, false, NULL, 0, user_data);
+        }
+        return CYXWIZ_OK;
+    }
+
+    /* Find free get operation slot */
+    cyxwiz_dht_get_op_t *op = NULL;
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_GET_OPS; i++) {
+        if (!dht->get_ops[i].active) {
+            op = &dht->get_ops[i];
+            break;
+        }
+    }
+
+    if (op == NULL) {
+        return CYXWIZ_ERR_QUEUE_FULL;
+    }
+
+    /* Initialize get operation */
+    memset(op, 0, sizeof(*op));
+    memcpy(op->key, key, CYXWIZ_NODE_ID_LEN);
+    op->request_id = dht->next_request_id++;
+    op->started_at = dht->current_time;
+    op->callback = callback;
+    op->user_data = user_data;
+    op->active = true;
+
+    /* Send FIND_VALUE to closest nodes */
+    cyxwiz_node_id_t key_as_node;
+    memcpy(&key_as_node, key, CYXWIZ_NODE_ID_LEN);
+
+    cyxwiz_node_id_t closest[CYXWIZ_DHT_ALPHA];
+    size_t count = cyxwiz_dht_get_closest(dht, &key_as_node, closest, CYXWIZ_DHT_ALPHA);
+
+    if (count == 0) {
+        op->active = false;
+        if (callback) {
+            callback(key, false, NULL, 0, user_data);
+        }
+        return CYXWIZ_OK;
+    }
+
+    cyxwiz_dht_find_value_t msg;
+    msg.type = CYXWIZ_MSG_DHT_FIND_VALUE;
+    msg.request_id = op->request_id;
+    memcpy(&msg.key, key, CYXWIZ_NODE_ID_LEN);
+
+    for (size_t i = 0; i < count; i++) {
+        cyxwiz_router_send(dht->router, &closest[i], (uint8_t *)&msg, sizeof(msg));
+        dht->messages_sent++;
+
+        if (op->queried_count < CYXWIZ_DHT_K * 2) {
+            memcpy(&op->queried[op->queried_count++], &closest[i], sizeof(cyxwiz_node_id_t));
+        }
+    }
+
+    CYXWIZ_DEBUG("DHT GET: sent to %zu nodes", count);
+
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_dht_delete(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key)
+{
+    if (dht == NULL || key == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Delete locally */
+    cyxwiz_dht_value_t *local = find_local_value(dht, key);
+    if (local != NULL) {
+        local->active = false;
+        dht->value_count--;
+    }
+
+    /* Note: DHT-wide delete would require a DELETE message type */
+    /* For now, values just expire naturally based on TTL */
+
+    return CYXWIZ_OK;
+}
+
+bool cyxwiz_dht_has_local(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key)
+{
+    if (dht == NULL || key == NULL) {
+        return false;
+    }
+
+    cyxwiz_dht_value_t *value = find_local_value(dht, key);
+    return value != NULL && value->expires_at > dht->current_time;
+}
+
+cyxwiz_error_t cyxwiz_dht_get_local(
+    cyxwiz_dht_t *dht,
+    const uint8_t *key,
+    uint8_t *value_out,
+    size_t value_size,
+    size_t *value_len)
+{
+    if (dht == NULL || key == NULL || value_out == NULL || value_len == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    cyxwiz_dht_value_t *value = find_local_value(dht, key);
+    if (value == NULL || value->expires_at <= dht->current_time) {
+        return CYXWIZ_ERR_STORAGE_NOT_FOUND;
+    }
+
+    if (value_size < value->value_len) {
+        return CYXWIZ_ERR_BUFFER_TOO_SMALL;
+    }
+
+    memcpy(value_out, value->value, value->value_len);
+    *value_len = value->value_len;
+
+    return CYXWIZ_OK;
+}
+
+size_t cyxwiz_dht_local_count(const cyxwiz_dht_t *dht)
+{
+    if (dht == NULL) return 0;
+    return dht->value_count;
+}
+
+size_t cyxwiz_dht_local_bytes(const cyxwiz_dht_t *dht)
+{
+    if (dht == NULL) return 0;
+
+    size_t total = 0;
+    for (size_t i = 0; i < CYXWIZ_DHT_MAX_VALUES; i++) {
+        if (dht->values[i].active) {
+            total += dht->values[i].value_len;
+        }
+    }
+    return total;
 }

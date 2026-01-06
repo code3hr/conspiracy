@@ -302,6 +302,8 @@ static void load_bootstrap_servers(cyxwiz_udp_state_t *state)
     /* Fallback to hardcoded defaults if none configured */
     if (state->bootstrap_count == 0) {
         CYXWIZ_WARN("No bootstrap servers configured (set CYXWIZ_BOOTSTRAP env var)");
+    } else {
+        CYXWIZ_INFO("Loaded %zu bootstrap server(s)", state->bootstrap_count);
     }
 }
 
@@ -560,7 +562,7 @@ static cyxwiz_error_t bootstrap_register(cyxwiz_transport_t *transport,
     }
 
     state->last_bootstrap_register = get_time_ms();
-    CYXWIZ_DEBUG("Sent register to %zu bootstrap servers", state->bootstrap_count);
+    CYXWIZ_INFO("Bootstrap: Sent register to %zu server(s)", state->bootstrap_count);
     return CYXWIZ_OK;
 }
 

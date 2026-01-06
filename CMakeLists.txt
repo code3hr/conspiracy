@@ -221,6 +221,11 @@ if(CYXWIZ_TRANSPORT_UDP)
     if(WIN32)
         target_link_libraries(cyxwiz-bootstrap PRIVATE ws2_32)
     endif()
+    # Combined bootstrap + relay server for CyxChat
+    add_executable(cyxchat-server tools/cyxchat-server.c)
+    if(WIN32)
+        target_link_libraries(cyxchat-server PRIVATE ws2_32)
+    endif()
 endif()
 
 # Tests

@@ -1115,8 +1115,11 @@ cyxwiz_error_t cyxwiz_onion_send_stream(
     }
 
     size_t max_payload = cyxwiz_onion_max_payload(circuit->hop_count);
+    CYXWIZ_DEBUG("cyxwiz_onion_send_stream: len=%zu, max_payload=%zu, hop_count=%u",
+                 len, max_payload, circuit->hop_count);
     if (len > max_payload) {
-        CYXWIZ_ERROR("Payload too large for circuit: %zu > %zu", len, max_payload);
+        CYXWIZ_ERROR("Payload too large for circuit: %zu > %zu (hop_count=%u)",
+                     len, max_payload, circuit->hop_count);
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
@@ -1180,6 +1183,10 @@ cyxwiz_error_t cyxwiz_onion_send_stream(
     circuit->messages_sent++;
     if (send_err != CYXWIZ_OK) {
         circuit->messages_failed++;
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(&circuit->hops[0], hex_id);
+        CYXWIZ_ERROR("cyxwiz_onion_send_stream: router_send failed to %.16s..., err=%d (%s)",
+                     hex_id, send_err, cyxwiz_strerror(send_err));
     }
 
     return send_err;
@@ -2026,7 +2033,14 @@ cyxwiz_error_t cyxwiz_onion_send_to(
     }
 
     /* Send via the circuit */
-    return cyxwiz_onion_send(ctx, circuit, data, len);
+    cyxwiz_error_t send_err = cyxwiz_onion_send(ctx, circuit, data, len);
+    if (send_err != CYXWIZ_OK) {
+        char hex_id[65];
+        cyxwiz_node_id_to_hex(destination, hex_id);
+        CYXWIZ_ERROR("cyxwiz_onion_send_to: send failed to %.16s... via circuit %u, err=%d (%s)",
+                     hex_id, circuit->circuit_id, send_err, cyxwiz_strerror(send_err));
+    }
+    return send_err;
 #endif
 }
 
