@@ -49,6 +49,9 @@ struct cyxwiz_onion_ctx {
     uint64_t last_cover_traffic_ms;
     uint64_t next_cover_traffic_ms;   /* Jittered next cover time */
 
+    /* User-preferred hop count (0 = auto) */
+    uint8_t preferred_hop_count;
+
     /* Circuit prebuilding state */
     uint64_t last_prebuild_ms;
     uint64_t next_prebuild_ms;        /* Jittered next prebuild time */
@@ -1751,15 +1754,32 @@ static size_t select_random_relays(
 }
 
 /*
- * Calculate desired relay count based on network trust level
- * High trust (avg rep > 70): 0 relays (direct)
- * Medium trust (40-70): 1 relay
- * Low trust (< 40): 2 relays (max privacy)
+ * Calculate desired relay count based on user preference or network trust
+ *
+ * If user has set preferred_hop_count:
+ * - hop_count = 1 means 0 relays (direct)
+ * - hop_count = 2 means 1 relay
+ * - hop_count = N means (N-1) relays
+ *
+ * If auto (preferred_hop_count = 0), use network trust:
+ * - High trust (avg rep > 70): 0 relays (direct)
+ * - Medium trust (40-70): 1 relay
+ * - Low trust (< 40): 2 relays (max privacy)
  */
 static size_t calculate_relay_count(
     cyxwiz_onion_ctx_t *ctx,
     const cyxwiz_node_id_t *destination)
 {
+    /* Check for user preference first */
+    if (ctx->preferred_hop_count > 0) {
+        /* User wants specific hop count: relays = hops - 1 (destination is last hop) */
+        size_t relays = (size_t)(ctx->preferred_hop_count - 1);
+        CYXWIZ_DEBUG("Using user-preferred hop count %u (%zu relays)",
+                     ctx->preferred_hop_count, relays);
+        return relays;
+    }
+
+    /* Auto mode: calculate based on network trust */
     cyxwiz_peer_table_t *peer_table = cyxwiz_router_get_peer_table(ctx->router);
     if (peer_table == NULL) {
         return 1;  /* Default: 1 relay */
@@ -2339,6 +2359,28 @@ bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx)
         return false;
     }
     return ctx->cover_traffic_enabled;
+}
+
+void cyxwiz_onion_set_hop_count(cyxwiz_onion_ctx_t *ctx, uint8_t hop_count)
+{
+    if (ctx == NULL) {
+        return;
+    }
+    /* Clamp to valid range: 0 (auto) or 1-8 */
+    if (hop_count > CYXWIZ_MAX_ONION_HOPS) {
+        hop_count = CYXWIZ_MAX_ONION_HOPS;
+    }
+    ctx->preferred_hop_count = hop_count;
+    CYXWIZ_INFO("Set preferred hop count to %u%s",
+                hop_count, hop_count == 0 ? " (auto)" : "");
+}
+
+uint8_t cyxwiz_onion_get_hop_count(const cyxwiz_onion_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return 0;
+    }
+    return ctx->preferred_hop_count;
 }
 
 /*

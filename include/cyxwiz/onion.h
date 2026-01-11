@@ -656,6 +656,25 @@ void cyxwiz_onion_enable_cover_traffic(
  */
 bool cyxwiz_onion_cover_traffic_enabled(const cyxwiz_onion_ctx_t *ctx);
 
+/*
+ * Set preferred hop count for circuit building
+ *
+ * @param ctx       Onion context
+ * @param hop_count Preferred number of hops (1-8), 0 for auto
+ *
+ * When set to non-zero, this overrides the automatic relay selection
+ * based on network trust. The actual hop count will be:
+ * - hop_count = 1: Direct to destination (no relay)
+ * - hop_count = 2: 1 relay + destination
+ * - hop_count = N: (N-1) relays + destination
+ */
+void cyxwiz_onion_set_hop_count(cyxwiz_onion_ctx_t *ctx, uint8_t hop_count);
+
+/*
+ * Get current preferred hop count (0 = auto)
+ */
+uint8_t cyxwiz_onion_get_hop_count(const cyxwiz_onion_ctx_t *ctx);
+
 /* ============ Hidden Services ============ */
 
 /* Hidden service constants */
