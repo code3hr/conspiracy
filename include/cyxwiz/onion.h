@@ -63,24 +63,25 @@
 
 /*
  * Maximum payload per hop count (with ephemeral keys and stream_id)
+ * For UDP transport with 1400-byte MTU (not LoRa's 250 bytes)
  * Header: type(1) + circuit_id(4) + stream_id(2) + ephemeral(32) = 39 bytes
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
  * Plus next_hop (32) for non-final layers
  * Final layer: zero_hop (32) + payload
  *
- * 1-hop: 250 - 7(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 139 bytes
- * 2-hop: 139 - 32(eph) - 40(enc) - 32(next_hop) = 35 bytes
- * 3-hop: would be negative, so we limit to 2 hops with ephemeral keys
+ * 1-hop: 1400 - 7(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 1289 bytes
+ * 2-hop: 1289 - 32(eph) - 40(enc) - 32(next_hop) = 1185 bytes
+ * 3-hop: 1185 - 72(per-hop) - 32(next_hop) = 1081 bytes
  */
-#define CYXWIZ_ONION_PAYLOAD_1HOP 139   /* 1-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_2HOP 35    /* 2-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_3HOP 0     /* 3-hop not supported with ephemeral */
+#define CYXWIZ_ONION_PAYLOAD_1HOP 1289   /* 1-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_2HOP 1185   /* 2-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_3HOP 1081   /* 3-hop onion payload */
 
 /* Onion message header size: type (1) + circuit_id (4) + stream_id (2) + ephemeral (32) = 39 bytes */
 #define CYXWIZ_ONION_HEADER_SIZE 39
 
 /* Maximum encrypted payload in onion packet */
-#define CYXWIZ_ONION_MAX_ENCRYPTED (CYXWIZ_MAX_PACKET_SIZE - CYXWIZ_ONION_HEADER_SIZE)
+#define CYXWIZ_ONION_MAX_ENCRYPTED (1400 - CYXWIZ_ONION_HEADER_SIZE)
 
 /* ============ Onion Data Message ============ */
 

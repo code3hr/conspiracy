@@ -55,6 +55,9 @@ typedef int socket_t;
 #define CYXWIZ_PUNCH_INTERVAL_MS 50
 #define CYXWIZ_BOOTSTRAP_REGISTER_INTERVAL_MS 60000
 
+/* UDP-specific MTU (much larger than LoRa's 250 bytes) */
+#define CYXWIZ_UDP_MAX_PACKET_SIZE 1400
+
 /* STUN magic cookie (RFC 5389) */
 #define STUN_MAGIC_COOKIE 0x2112A442
 
@@ -140,7 +143,7 @@ typedef struct {
     size_t pending_count;
 
     /* Receive buffer */
-    uint8_t recv_buf[CYXWIZ_MAX_PACKET_SIZE + 64];
+    uint8_t recv_buf[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
 
     /* STUN transaction tracking */
     uint8_t stun_transaction_id[12];
@@ -1063,7 +1066,7 @@ static cyxwiz_error_t send_data_to_peer(cyxwiz_transport_t *transport,
 {
     /* Build data packet */
     size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
-    uint8_t msg[CYXWIZ_MAX_PACKET_SIZE + 64];
+    uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
 
     cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
     pkt->type = CYXWIZ_UDP_DATA;
@@ -1085,7 +1088,7 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
     }
 
     /* Check size */
-    if (len + CYXWIZ_UDP_DATA_HDR_SIZE > CYXWIZ_MAX_PACKET_SIZE) {
+    if (len + CYXWIZ_UDP_DATA_HDR_SIZE > CYXWIZ_UDP_MAX_PACKET_SIZE) {
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
@@ -1143,7 +1146,7 @@ static size_t udp_max_packet_size(cyxwiz_transport_t *transport)
 {
     CYXWIZ_UNUSED(transport);
     /* Account for UDP_DATA header */
-    return CYXWIZ_MAX_PACKET_SIZE - CYXWIZ_UDP_DATA_HDR_SIZE;
+    return CYXWIZ_UDP_MAX_PACKET_SIZE - CYXWIZ_UDP_DATA_HDR_SIZE;
 }
 
 static cyxwiz_error_t udp_poll(cyxwiz_transport_t *transport, uint32_t timeout_ms)

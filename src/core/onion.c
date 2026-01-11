@@ -21,6 +21,8 @@
 
 #include <string.h>
 #include <stdio.h>
+/* UDP packet size (larger than LoRa's 250 bytes) */
+#define CYXWIZ_ONION_UDP_PACKET_SIZE 1400
 
 /* Onion context structure */
 struct cyxwiz_onion_ctx {
@@ -1152,7 +1154,7 @@ cyxwiz_error_t cyxwiz_onion_send_stream(
      * The ephemeral_pub for the first hop is included in the header so the
      * first relay can derive the decryption key via ECDH.
      */
-    uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t packet[CYXWIZ_ONION_UDP_PACKET_SIZE];
     size_t packet_len = 0;
 
     packet[0] = CYXWIZ_MSG_ONION_DATA;
@@ -1497,7 +1499,7 @@ cyxwiz_error_t cyxwiz_onion_handle_message(
          * Build new packet with the next_ephemeral in the header
          * and the inner data as the encrypted payload.
          */
-        uint8_t forward_packet[CYXWIZ_MAX_PACKET_SIZE];
+        uint8_t forward_packet[CYXWIZ_ONION_UDP_PACKET_SIZE];
         size_t forward_len = 0;
 
         forward_packet[0] = CYXWIZ_MSG_ONION_DATA;
@@ -2951,7 +2953,7 @@ static void handle_rendezvous_data(
     }
 
     /* Forward to the other side */
-    uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t packet[CYXWIZ_ONION_UDP_PACKET_SIZE];
     packet[0] = CYXWIZ_MSG_SERVICE_DATA;
     memcpy(packet + 1, payload, payload_len);
 
@@ -3225,11 +3227,11 @@ cyxwiz_error_t cyxwiz_rendezvous_send(
     }
 
     /* Build RENDEZVOUS_DATA packet */
-    if (len + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 1 > CYXWIZ_MAX_PACKET_SIZE) {
+    if (len + CYXWIZ_RENDEZVOUS_COOKIE_SIZE + 1 > CYXWIZ_ONION_UDP_PACKET_SIZE) {
         return CYXWIZ_ERR_PACKET_TOO_LARGE;
     }
 
-    uint8_t packet[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t packet[CYXWIZ_ONION_UDP_PACKET_SIZE];
     packet[0] = CYXWIZ_MSG_RENDEZVOUS_DATA;
     memcpy(packet + 1, conn->rendezvous_cookie, CYXWIZ_RENDEZVOUS_COOKIE_SIZE);
     memcpy(packet + 1 + CYXWIZ_RENDEZVOUS_COOKIE_SIZE, data, len);

@@ -526,7 +526,8 @@ cyxwiz_error_t cyxwiz_router_send(
     cyxwiz_node_id_t broadcast_id;
     memset(&broadcast_id, 0xFF, sizeof(cyxwiz_node_id_t));
     if (cyxwiz_node_id_cmp(destination, &broadcast_id) == 0) {
-        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+        size_t transport_mtu = router->transport->ops->max_packet_size(router->transport);
+        if (len > transport_mtu) {
             return CYXWIZ_ERR_PACKET_TOO_LARGE;
         }
         /* Broadcast directly via transport */
@@ -546,7 +547,8 @@ cyxwiz_error_t cyxwiz_router_send(
     /* Check if destination is a direct peer */
     if (is_direct_peer(router, destination)) {
         /* Send directly (no routing needed) - uses full transport MTU */
-        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+        size_t transport_mtu = router->transport->ops->max_packet_size(router->transport);
+        if (len > transport_mtu) {
             return CYXWIZ_ERR_PACKET_TOO_LARGE;
         }
         cyxwiz_error_t err = router->transport->ops->send(
@@ -567,7 +569,8 @@ cyxwiz_error_t cyxwiz_router_send(
      * the transport layer handle the error (e.g., if there's UDP hole punch info).
      */
     if (len > 0 && data[0] == CYXWIZ_MSG_ONION_DATA) {
-        if (len > CYXWIZ_MAX_PACKET_SIZE) {
+        size_t transport_mtu = router->transport->ops->max_packet_size(router->transport);
+        if (len > transport_mtu) {
             return CYXWIZ_ERR_PACKET_TOO_LARGE;
         }
         char hex_id[65];
