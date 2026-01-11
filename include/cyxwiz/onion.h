@@ -19,7 +19,7 @@
 #endif
 
 /* Onion routing constants */
-#define CYXWIZ_MAX_ONION_HOPS 3         /* Max hops (due to encryption overhead) */
+#define CYXWIZ_MAX_ONION_HOPS 8         /* Max hops for UDP (was 3 for LoRa) */
 #define CYXWIZ_ONION_OVERHEAD 40        /* XChaCha20-Poly1305 per layer */
 #define CYXWIZ_CIRCUIT_ID_SIZE 4        /* Circuit identifier size */
 #define CYXWIZ_MAX_CIRCUITS 16          /* Max active circuits */
@@ -66,16 +66,26 @@
  * For UDP transport with 1400-byte MTU (not LoRa's 250 bytes)
  * Header: type(1) + circuit_id(4) + stream_id(2) + ephemeral(32) = 39 bytes
  * Each layer adds: encryption overhead (40) + ephemeral key (32) = 72 bytes
- * Plus next_hop (32) for non-final layers
+ * Plus next_hop (32) for non-final layers = 104 bytes per hop
  * Final layer: zero_hop (32) + payload
  *
  * 1-hop: 1400 - 7(hdr) - 32(eph) - 40(enc) - 32(zero_hop) = 1289 bytes
- * 2-hop: 1289 - 32(eph) - 40(enc) - 32(next_hop) = 1185 bytes
- * 3-hop: 1185 - 72(per-hop) - 32(next_hop) = 1081 bytes
+ * 2-hop: 1289 - 104 = 1185 bytes
+ * 3-hop: 1185 - 104 = 1081 bytes
+ * 4-hop: 1081 - 104 = 977 bytes
+ * 5-hop: 977 - 104 = 873 bytes
+ * 6-hop: 873 - 104 = 769 bytes
+ * 7-hop: 769 - 104 = 665 bytes
+ * 8-hop: 665 - 104 = 561 bytes
  */
-#define CYXWIZ_ONION_PAYLOAD_1HOP 1289   /* 1-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_2HOP 1185   /* 2-hop onion payload */
-#define CYXWIZ_ONION_PAYLOAD_3HOP 1081   /* 3-hop onion payload */
+#define CYXWIZ_ONION_PAYLOAD_1HOP 1289   /* 1-hop: ~1.3KB payload */
+#define CYXWIZ_ONION_PAYLOAD_2HOP 1185   /* 2-hop: ~1.2KB payload */
+#define CYXWIZ_ONION_PAYLOAD_3HOP 1081   /* 3-hop: ~1KB payload */
+#define CYXWIZ_ONION_PAYLOAD_4HOP 977    /* 4-hop: ~977B payload */
+#define CYXWIZ_ONION_PAYLOAD_5HOP 873    /* 5-hop: ~873B payload */
+#define CYXWIZ_ONION_PAYLOAD_6HOP 769    /* 6-hop: ~769B payload */
+#define CYXWIZ_ONION_PAYLOAD_7HOP 665    /* 7-hop: ~665B payload */
+#define CYXWIZ_ONION_PAYLOAD_8HOP 561    /* 8-hop: ~561B payload */
 
 /* Onion message header size: type (1) + circuit_id (4) + stream_id (2) + ephemeral (32) = 39 bytes */
 #define CYXWIZ_ONION_HEADER_SIZE 39
