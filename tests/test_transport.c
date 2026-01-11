@@ -70,18 +70,18 @@ static int test_transport_type_name(void)
 {
     const char *name;
 
-    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_WIFI_DIRECT);
-    if (strcmp(name, "WiFi Direct") != 0) {
+    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_UDP);
+    if (strcmp(name, "UDP/Internet") != 0) {
         return 0;
     }
 
-    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_BLUETOOTH);
-    if (strcmp(name, "Bluetooth") != 0) {
+    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_UDP);
+    if (strcmp(name, "UDP/Internet") != 0) {
         return 0;
     }
 
-    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_LORA);
-    if (strcmp(name, "LoRa") != 0) {
+    name = cyxwiz_transport_type_name(CYXWIZ_TRANSPORT_UDP);
+    if (strcmp(name, "UDP/Internet") != 0) {
         return 0;
     }
 
@@ -106,14 +106,13 @@ static int test_strerror(void)
     return 1;
 }
 
-#ifdef CYXWIZ_HAS_WIFI
-/* Test WiFi transport creation */
-static int test_wifi_transport_create(void)
+/* Test UDP transport creation */
+static int test_udp_transport_create(void)
 {
     cyxwiz_transport_t *transport = NULL;
     cyxwiz_error_t err;
 
-    err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     if (err == CYXWIZ_ERR_TRANSPORT) {
         /* Transport not available in this environment (e.g., CI) */
         return -1; /* Skip */
@@ -126,7 +125,7 @@ static int test_wifi_transport_create(void)
         return 0;
     }
 
-    if (transport->type != CYXWIZ_TRANSPORT_WIFI_DIRECT) {
+    if (transport->type != CYXWIZ_TRANSPORT_UDP) {
         cyxwiz_transport_destroy(transport);
         return 0;
     }
@@ -141,7 +140,6 @@ static int test_wifi_transport_create(void)
     cyxwiz_transport_destroy(transport);
     return 1;
 }
-#endif
 
 int main(void)
 {
@@ -155,9 +153,7 @@ int main(void)
     TEST(transport_type_name);
     TEST(strerror);
 
-#ifdef CYXWIZ_HAS_WIFI
-    TEST(wifi_transport_create);
-#endif
+    TEST(udp_transport_create);
 
     printf("\n======================\n");
     printf("Results: %d/%d passed\n\n", tests_passed, tests_run);

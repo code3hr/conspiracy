@@ -62,7 +62,7 @@ static int test_peer_table_add(void)
     cyxwiz_node_id_random(&id);
 
     /* Add peer */
-    err = cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    err = cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_UDP, -50);
     if (err != CYXWIZ_OK) {
         cyxwiz_peer_table_destroy(table);
         return 0;
@@ -75,7 +75,7 @@ static int test_peer_table_add(void)
     }
 
     /* Add same peer again (should update, not add new) */
-    err = cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -40);
+    err = cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_UDP, -40);
     if (err != CYXWIZ_OK) {
         cyxwiz_peer_table_destroy(table);
         return 0;
@@ -103,7 +103,7 @@ static int test_peer_table_find(void)
     cyxwiz_node_id_random(&id1);
     cyxwiz_node_id_random(&id2);
 
-    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_UDP, -50);
 
     /* Find existing peer */
     peer = cyxwiz_peer_table_find(table, &id1);
@@ -140,8 +140,8 @@ static int test_peer_table_remove(void)
     cyxwiz_node_id_random(&id1);
     cyxwiz_node_id_random(&id2);
 
-    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
-    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_BLUETOOTH, -60);
+    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_UDP, -50);
+    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_UDP, -60);
 
     if (cyxwiz_peer_table_count(table) != 2) {
         cyxwiz_peer_table_destroy(table);
@@ -186,7 +186,7 @@ static int test_peer_table_set_state(void)
     cyxwiz_peer_table_create(&table);
     cyxwiz_node_id_random(&id);
 
-    cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_UDP, -50);
 
     /* Initial state should be DISCOVERED */
     peer = cyxwiz_peer_table_find(table, &id);
@@ -292,9 +292,9 @@ static int test_peer_table_connected_count(void)
     cyxwiz_node_id_random(&id2);
     cyxwiz_node_id_random(&id3);
 
-    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
-    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_BLUETOOTH, -60);
-    cyxwiz_peer_table_add(table, &id3, CYXWIZ_TRANSPORT_LORA, -70);
+    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_UDP, -50);
+    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_UDP, -60);
+    cyxwiz_peer_table_add(table, &id3, CYXWIZ_TRANSPORT_UDP, -70);
 
     /* Initially all DISCOVERED, none connected */
     if (cyxwiz_peer_table_connected_count(table) != 0) {
@@ -337,8 +337,8 @@ static int test_peer_table_iterate(void)
     cyxwiz_node_id_random(&id1);
     cyxwiz_node_id_random(&id2);
 
-    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
-    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_BLUETOOTH, -60);
+    cyxwiz_peer_table_add(table, &id1, CYXWIZ_TRANSPORT_UDP, -50);
+    cyxwiz_peer_table_add(table, &id2, CYXWIZ_TRANSPORT_UDP, -60);
 
     iteration_count = 0;
     cyxwiz_peer_table_iterate(table, count_peers, NULL);
@@ -362,7 +362,7 @@ static int test_peer_init_zeroed(void)
     cyxwiz_peer_table_create(&table);
     cyxwiz_node_id_random(&id);
 
-    cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(table, &id, CYXWIZ_TRANSPORT_UDP, -50);
 
     peer = cyxwiz_peer_table_find(table, &id);
     if (peer == NULL) {

@@ -10,28 +10,11 @@
 #include <string.h>
 
 /* Forward declarations for transport drivers */
-#ifdef CYXWIZ_HAS_WIFI
-extern const cyxwiz_transport_ops_t cyxwiz_wifi_direct_ops;
-#endif
-
-#ifdef CYXWIZ_HAS_BLUETOOTH
-extern const cyxwiz_transport_ops_t cyxwiz_bluetooth_ops;
-#endif
-
-#ifdef CYXWIZ_HAS_LORA
-extern const cyxwiz_transport_ops_t cyxwiz_lora_ops;
-#endif
-
-#ifdef CYXWIZ_HAS_UDP
 extern const cyxwiz_transport_ops_t cyxwiz_udp_ops;
-#endif
 
 const char *cyxwiz_transport_type_name(cyxwiz_transport_type_t type)
 {
     switch (type) {
-        case CYXWIZ_TRANSPORT_WIFI_DIRECT: return "WiFi Direct";
-        case CYXWIZ_TRANSPORT_BLUETOOTH:   return "Bluetooth";
-        case CYXWIZ_TRANSPORT_LORA:        return "LoRa";
         case CYXWIZ_TRANSPORT_UDP:         return "UDP/Internet";
         default:                           return "Unknown";
     }
@@ -48,26 +31,9 @@ cyxwiz_error_t cyxwiz_transport_create(
     const cyxwiz_transport_ops_t *ops = NULL;
 
     switch (type) {
-#ifdef CYXWIZ_HAS_WIFI
-        case CYXWIZ_TRANSPORT_WIFI_DIRECT:
-            ops = &cyxwiz_wifi_direct_ops;
-            break;
-#endif
-#ifdef CYXWIZ_HAS_BLUETOOTH
-        case CYXWIZ_TRANSPORT_BLUETOOTH:
-            ops = &cyxwiz_bluetooth_ops;
-            break;
-#endif
-#ifdef CYXWIZ_HAS_LORA
-        case CYXWIZ_TRANSPORT_LORA:
-            ops = &cyxwiz_lora_ops;
-            break;
-#endif
-#ifdef CYXWIZ_HAS_UDP
         case CYXWIZ_TRANSPORT_UDP:
             ops = &cyxwiz_udp_ops;
             break;
-#endif
         default:
             CYXWIZ_ERROR("Transport type %d not supported", type);
             return CYXWIZ_ERR_INVALID;
@@ -182,9 +148,7 @@ const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type)
 }
 
 /* Internal: Get NAT type from UDP driver state */
-#ifdef CYXWIZ_HAS_UDP
 extern cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data);
-#endif
 
 cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
 {
@@ -192,12 +156,9 @@ cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
         return CYXWIZ_NAT_UNKNOWN;
     }
 
-#ifdef CYXWIZ_HAS_UDP
     if (transport->type == CYXWIZ_TRANSPORT_UDP && transport->driver_data != NULL) {
         return cyxwiz_udp_get_nat_type(transport->driver_data);
     }
-#endif
 
-    /* NAT type only applies to UDP transport */
     return CYXWIZ_NAT_UNKNOWN;
 }

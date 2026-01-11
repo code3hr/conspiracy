@@ -2,8 +2,7 @@
  * CyxWiz Protocol - Transport Abstraction Layer
  *
  * Defines the interface that all transport drivers must implement.
- * This allows the protocol layer to work over WiFi Direct, Bluetooth, LoRa,
- * or any future transport without modification.
+ * UDP is the only supported transport (WiFi Direct, Bluetooth, LoRa removed).
  */
 
 #ifndef CYXWIZ_TRANSPORT_H
@@ -11,12 +10,9 @@
 
 #include "types.h"
 
-/* Transport types */
+/* Transport types (UDP only) */
 typedef enum {
-    CYXWIZ_TRANSPORT_WIFI_DIRECT,
-    CYXWIZ_TRANSPORT_BLUETOOTH,
-    CYXWIZ_TRANSPORT_LORA,
-    CYXWIZ_TRANSPORT_UDP           /* Internet P2P via UDP */
+    CYXWIZ_TRANSPORT_UDP = 0       /* Internet/LAN P2P via UDP */
 } cyxwiz_transport_type_t;
 
 /* NAT types (detected via STUN) */

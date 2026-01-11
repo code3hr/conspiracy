@@ -18,7 +18,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libsodium-dev libbluetooth-dev
+        sudo apt-get install -y libsodium-dev
 
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
@@ -46,8 +46,6 @@ jobs:
           -DCMAKE_PREFIX_PATH=$HOMEBREW_PREFIX \
           -DCMAKE_INCLUDE_PATH=$HOMEBREW_PREFIX/include \
           -DCMAKE_LIBRARY_PATH=$HOMEBREW_PREFIX/lib \
-          -DCYXWIZ_TRANSPORT_BLUETOOTH=OFF \
-          -DCYXWIZ_TRANSPORT_LORA=OFF
 
     - name: Build
       run: cmake --build build --config ${{env.BUILD_TYPE}}
@@ -87,7 +85,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libsodium-dev libbluetooth-dev
+        sudo apt-get install -y libsodium-dev
 
     - name: Configure CMake with sanitizers
       run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCYXWIZ_ENABLE_SANITIZERS=ON
@@ -111,7 +109,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libsodium-dev libbluetooth-dev clang-tidy
+        sudo apt-get install -y libsodium-dev clang-tidy
 
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON

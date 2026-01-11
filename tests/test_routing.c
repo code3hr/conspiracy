@@ -26,7 +26,7 @@ static int check_transport_available(void)
 {
     if (transport_available == -1) {
         cyxwiz_transport_t *t = NULL;
-        cyxwiz_error_t err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &t);
+        cyxwiz_error_t err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &t);
         if (err == CYXWIZ_OK && t != NULL) {
             cyxwiz_transport_destroy(t);
             transport_available = 1;
@@ -73,7 +73,7 @@ static int test_router_create_destroy(void)
     }
 
     /* Create transport */
-    err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     if (err != CYXWIZ_OK) {
         cyxwiz_peer_table_destroy(peer_table);
         return 0;
@@ -130,7 +130,7 @@ static int test_router_start_stop(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
 
@@ -187,7 +187,7 @@ static int test_has_route_direct_peer(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&peer_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -202,7 +202,7 @@ static int test_has_route_direct_peer(void)
     }
 
     /* Add peer to table */
-    cyxwiz_peer_table_add(peer_table, &peer_id, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &peer_id, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &peer_id, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Now should have route (direct peer) */
@@ -303,7 +303,7 @@ static int test_router_poll(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
     cyxwiz_router_start(router);
@@ -345,7 +345,7 @@ static int test_send_to_self(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
     cyxwiz_router_start(router);
@@ -377,7 +377,7 @@ static int test_invalidate_route(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&dest_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -532,7 +532,7 @@ static int test_anon_discovery_pending(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&dest_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -578,7 +578,7 @@ static int test_anon_send_requires_onion_ctx(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&dest_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -613,7 +613,7 @@ static int test_has_anonymous_route(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&dest_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -676,7 +676,7 @@ static int test_payload_size_limit(void)
 
     if (!check_transport_available()) return -1;
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&dest_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);
@@ -727,7 +727,7 @@ static int test_route_reply_bounds(void)
     if (!check_transport_available()) return -1;
 
     cyxwiz_peer_table_create(&peer_table);
-    cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &transport);
+    cyxwiz_transport_create(CYXWIZ_TRANSPORT_UDP, &transport);
     cyxwiz_node_id_random(&local_id);
     cyxwiz_node_id_random(&from_id);
     cyxwiz_router_create(&router, peer_table, transport, &local_id);

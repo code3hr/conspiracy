@@ -138,7 +138,7 @@ static cyxwiz_transport_t *create_mock_transport(void)
     if (transport == NULL) {
         return NULL;
     }
-    transport->type = CYXWIZ_TRANSPORT_WIFI_DIRECT;
+    transport->type = CYXWIZ_TRANSPORT_UDP;
     transport->ops = &mock_ops;
     transport->driver_data = NULL;
     return transport;
@@ -217,9 +217,9 @@ static int test_route_req_forwarding(void)
     cyxwiz_router_start(router);
 
     /* Add A and C as connected peers of B */
-    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_a, CYXWIZ_PEER_STATE_CONNECTED);
-    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_c, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REQ from A looking for C */
@@ -307,7 +307,7 @@ static int test_route_reply_at_destination(void)
     cyxwiz_router_start(router);
 
     /* Add B as connected peer */
-    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_b, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REQ from A (via B) looking for C */
@@ -387,9 +387,9 @@ static int test_route_reply_forwarding(void)
     cyxwiz_router_start(router);
 
     /* Add A and C as connected peers */
-    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_a, CYXWIZ_PEER_STATE_CONNECTED);
-    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_c, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REPLY from C going to A, via B */
@@ -458,9 +458,9 @@ static int test_data_forwarding(void)
     cyxwiz_router_start(router);
 
     /* Add A and C as connected peers */
-    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_a, CYXWIZ_PEER_STATE_CONNECTED);
-    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_c, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build routed data from A to C via B */
@@ -559,7 +559,7 @@ static int test_data_delivery(void)
     cyxwiz_router_set_callback(router, delivery_callback, NULL);
 
     /* Add B as connected peer */
-    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_b, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build routed data from A to C via B (already at C) */
@@ -641,9 +641,9 @@ static int test_request_deduplication(void)
     cyxwiz_router_start(router);
 
     /* Add peers */
-    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_a, CYXWIZ_PEER_STATE_CONNECTED);
-    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_c, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_c, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REQ */
@@ -698,7 +698,7 @@ static int test_ttl_expiry(void)
     cyxwiz_router_start(router);
 
     /* Add peers */
-    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_a, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_a, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REQ with TTL=0 */
@@ -748,7 +748,7 @@ static int test_route_error(void)
     cyxwiz_router_start(router);
 
     /* Add B as peer */
-    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_b, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_b, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Simulate route discovery: A receives ROUTE_REPLY for C via B */
@@ -816,7 +816,7 @@ static int test_max_hops_limit(void)
     /* Add a peer */
     cyxwiz_node_id_t id_peer;
     make_node_id(&id_peer, 0x22);
-    cyxwiz_peer_table_add(peer_table, &id_peer, CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+    cyxwiz_peer_table_add(peer_table, &id_peer, CYXWIZ_TRANSPORT_UDP, -50);
     cyxwiz_peer_table_set_state(peer_table, &id_peer, CYXWIZ_PEER_STATE_CONNECTED);
 
     /* Build ROUTE_REQ with max hops already reached */

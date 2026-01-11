@@ -118,7 +118,7 @@ static int init_nodes(void)
         printf("  Node %d ID: %.16s...\n", i, hex_id);
 
         /* Initialize per-node transport with local_id */
-        g_transports[i].type = CYXWIZ_TRANSPORT_WIFI_DIRECT;
+        g_transports[i].type = CYXWIZ_TRANSPORT_UDP;
         g_transports[i].ops = &mock_ops;
         memcpy(&g_transports[i].local_id, &g_nodes[i].id, sizeof(cyxwiz_node_id_t));
 
@@ -166,7 +166,7 @@ static int connect_nodes(void)
 
             /* Add as peer using the correct API */
             err = cyxwiz_peer_table_add(g_nodes[i].peers, &g_nodes[j].id,
-                                        CYXWIZ_TRANSPORT_WIFI_DIRECT, -50);
+                                        CYXWIZ_TRANSPORT_UDP, -50);
             if (err != CYXWIZ_OK) {
                 printf("  Failed to add peer %d to node %d (err=%d)\n", j, i, err);
                 return 0;

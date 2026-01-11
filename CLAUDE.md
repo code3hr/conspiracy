@@ -17,8 +17,8 @@ Core philosophy: "Own Nothing. Access Everything. Leave No Trace."
 Key technical decisions:
 - **MPC (Multi-Party Computation)** for encryption - compute on encrypted data, keys distributed across nodes
 - **Complete mesh network replacement** - not an overlay on internet, direct device-to-device
-- **Multi-transport**: WiFi Direct, Bluetooth Mesh, LoRa (all supported, protocol-agnostic)
-- **LoRa-constrained design**: 250-byte max packet size (if it works on LoRa, it works everywhere)
+- **UDP transport**: Internet/LAN P2P via UDP with NAT traversal
+- **Lightweight design**: Optimized for efficient packet sizes
 
 ## Build Commands
 
@@ -99,11 +99,6 @@ src/
   transport/          Transport drivers
     transport.c       Transport manager (create/destroy)
     udp.c             UDP/Internet with NAT traversal (STUN)
-    wifi_direct.c     WiFi Direct (Linux wpa_supplicant)
-    wifi_direct_win.cpp  WiFi Direct Windows wrapper
-    bluetooth.c       Bluetooth (Linux BlueZ L2CAP)
-    bluetooth_win.cpp Bluetooth Windows wrapper (RFCOMM)
-    lora.c            LoRa (Serial AT + Linux SPI for SX127x)
   crypto/             SPDZ-based MPC crypto
     crypto.c          Context management
     primitives.c      libsodium wrappers (encrypt, hash, random)
@@ -125,7 +120,7 @@ All transports implement `cyxwiz_transport_ops_t`:
 - `init` / `shutdown`
 - `send` / `poll`
 - `discover` / `stop_discover`
-- `max_packet_size` - critical for LoRa compatibility
+- `max_packet_size`
 
 Protocol layer calls these without knowing underlying transport.
 

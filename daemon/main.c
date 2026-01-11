@@ -1272,7 +1272,6 @@ int main(int argc, char *argv[])
     /* Variables for cleanup - must be declared before first goto */
     cyxwiz_crypto_ctx_t *crypto_ctx = NULL;
     cyxwiz_peer_table_t *peer_table = NULL;
-    cyxwiz_transport_t *wifi_transport = NULL;
     cyxwiz_transport_t *udp_transport = NULL;
 
     /* Initialize crypto subsystem */
@@ -1370,20 +1369,6 @@ int main(int argc, char *argv[])
     }
 #endif
 
-#ifdef CYXWIZ_HAS_WIFI
-    /* Fall back to WiFi Direct for local mesh */
-    if (primary_transport == NULL) {
-        err = cyxwiz_transport_create(CYXWIZ_TRANSPORT_WIFI_DIRECT, &wifi_transport);
-        if (err != CYXWIZ_OK) {
-            CYXWIZ_ERROR("Failed to create WiFi transport: %s", cyxwiz_strerror(err));
-        } else {
-            cyxwiz_transport_set_local_id(wifi_transport, &local_id);
-            cyxwiz_transport_set_peer_callback(wifi_transport, on_peer_discovered, NULL);
-            cyxwiz_transport_set_recv_callback(wifi_transport, on_data_received, NULL);
-            primary_transport = wifi_transport;
-        }
-    }
-#endif
 
     /* Create discovery context */
     if (primary_transport != NULL) {
@@ -1655,9 +1640,6 @@ int main(int argc, char *argv[])
         if (udp_transport != NULL) {
             udp_transport->ops->poll(udp_transport, 50);
         }
-        if (wifi_transport != NULL) {
-            wifi_transport->ops->poll(wifi_transport, 50);
-        }
 
         /* Periodic key refresh for forward secrecy */
 #ifdef CYXWIZ_HAS_CRYPTO
@@ -1772,9 +1754,6 @@ cleanup:
 
     if (udp_transport != NULL) {
         cyxwiz_transport_destroy(udp_transport);
-    }
-    if (wifi_transport != NULL) {
-        cyxwiz_transport_destroy(wifi_transport);
     }
 
     /* Save and destroy peer table */
