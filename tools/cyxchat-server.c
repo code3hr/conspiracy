@@ -46,7 +46,7 @@ typedef int socket_t;
 #define DEFAULT_PORT 7777
 #define MAX_PEERS 256
 #define NODE_ID_LEN 32
-#define PEER_TIMEOUT_SEC 120
+#define PEER_TIMEOUT_SEC 300  /* 5 minutes */
 #define MAX_PEERS_PER_LIST 10
 #define MAX_RELAY_DATA 1400
 
@@ -55,6 +55,7 @@ typedef int socket_t;
 #define CYXWIZ_UDP_REGISTER_ACK     0xF1
 #define CYXWIZ_UDP_PEER_LIST        0xF2
 #define CYXWIZ_UDP_CONNECT_REQ      0xF3
+#define CYXWIZ_UDP_RELAY_PKT        0xF8    /* Relay any packet to peer */
 
 /* Relay protocol message types (0xE0-0xE5) */
 #define CYXCHAT_RELAY_CONNECT       0xE0
@@ -84,12 +85,15 @@ typedef struct {
     int active;
 } peer_t;
 
-/* Protocol structures */
+/* Protocol structures - packed for network transmission */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
+#define PACKED
+#else
+#define PACKED __attribute__((packed))
 #endif
 
-typedef struct {
+typedef struct PACKED {
     uint8_t type;
     node_id_t node_id;
     uint16_t local_port;
@@ -97,25 +101,25 @@ typedef struct {
 
 typedef struct {
     uint8_t type;
-} register_ack_t;
+} PACKED register_ack_t;
 
 typedef struct {
     uint8_t type;
     uint8_t peer_count;
-} peer_list_header_t;
+} PACKED peer_list_header_t;
 
 typedef struct {
     node_id_t id;
     uint32_t ip;
     uint16_t port;
-} peer_entry_t;
+} PACKED peer_entry_t;
 
 typedef struct {
     uint8_t type;
     node_id_t requester_id;
     uint32_t requester_ip;
     uint16_t requester_port;
-} connect_req_t;
+} PACKED connect_req_t;
 
 /* Relay messages */
 typedef struct {
@@ -464,6 +468,47 @@ static void handle_relay_keepalive(const struct sockaddr_in *from,
            (const struct sockaddr *)from, sizeof(*from));
 }
 
+
+/* Handle relay packet (forward any packet to target peer) */
+static void handle_relay_packet(const struct sockaddr_in *from,
+                                const uint8_t *data, size_t len)
+{
+    /* Format: [0xF4][to_id:32][data_len:2][data...] */
+    if (len < 1 + NODE_ID_LEN + 2) {
+        return;
+    }
+
+    const node_id_t *to_id = (const node_id_t *)(data + 1);
+    uint16_t data_len;
+    memcpy(&data_len, data + 1 + NODE_ID_LEN, 2);
+    data_len = ntohs(data_len);
+
+    if (len < 1 + NODE_ID_LEN + 2 + data_len) {
+        return;
+    }
+
+    /* Find target peer */
+    peer_t *target = find_peer(to_id);
+    if (target == NULL) {
+        char hex_id[17];
+        node_id_to_hex(to_id, hex_id);
+        printf("Relay packet: target %s... not found\n", hex_id);
+        return;
+    }
+
+    /* Forward the data portion to target peer */
+    const uint8_t *payload = data + 1 + NODE_ID_LEN + 2;
+    send_to_peer(target, payload, data_len);
+
+    g_bytes_relayed += data_len;
+    g_messages_relayed++;
+
+    char hex_id[17];
+    node_id_to_hex(to_id, hex_id);
+    printf("Relayed %u bytes to %s...\n", data_len, hex_id);
+    fflush(stdout);
+}
+
 /* Process received packet */
 static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, size_t len)
 {
@@ -481,6 +526,10 @@ static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, s
 
         case CYXWIZ_UDP_CONNECT_REQ:
             handle_connect_request(from, data, len);
+            break;
+
+        case CYXWIZ_UDP_RELAY_PKT:
+            handle_relay_packet(from, data, len);
             break;
 
         /* Relay protocol */

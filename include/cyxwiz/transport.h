@@ -142,4 +142,7 @@ cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport);
 /* Get NAT type name string */
 const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type);
 
+/* Check if connected to bootstrap server (received ACK) */
+bool cyxwiz_transport_is_bootstrap_connected(cyxwiz_transport_t *transport);
+
 #endif /* CYXWIZ_TRANSPORT_H */

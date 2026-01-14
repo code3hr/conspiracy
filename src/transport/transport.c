@@ -149,6 +149,8 @@ const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type)
 
 /* Internal: Get NAT type from UDP driver state */
 extern cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data);
+/* Internal: Check if bootstrap ACK received from UDP driver state */
+extern bool cyxwiz_udp_is_bootstrap_connected(void *driver_data);
 
 cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
 {
@@ -161,4 +163,17 @@ cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
     }
 
     return CYXWIZ_NAT_UNKNOWN;
+}
+
+bool cyxwiz_transport_is_bootstrap_connected(cyxwiz_transport_t *transport)
+{
+    if (transport == NULL) {
+        return false;
+    }
+
+    if (transport->type == CYXWIZ_TRANSPORT_UDP && transport->driver_data != NULL) {
+        return cyxwiz_udp_is_bootstrap_connected(transport->driver_data);
+    }
+
+    return false;
 }

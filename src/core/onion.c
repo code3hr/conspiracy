@@ -2022,6 +2022,16 @@ cyxwiz_error_t cyxwiz_onion_send_to(
         return CYXWIZ_ERR_INVALID;
     }
 
+    /* Debug: log destination for file messages */
+    /* File messages: 0x14-0x16, 0x40-0x45, 0x60-0x61 */
+    if (len > 0 && ((data[0] >= 0x14 && data[0] <= 0x16) ||
+                    (data[0] >= 0x40 && data[0] <= 0x45) ||
+                    (data[0] >= 0x60 && data[0] <= 0x61))) {
+        char dest_hex[65];
+        cyxwiz_node_id_to_hex(destination, dest_hex);
+        CYXWIZ_INFO("cyxwiz_onion_send_to: FILE msg type=0x%02x dest=%s", data[0], dest_hex);
+    }
+
     /* Find existing circuit to destination */
     cyxwiz_circuit_t *circuit = cyxwiz_onion_find_circuit_to(ctx, destination);
 

@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -70,6 +71,7 @@ typedef int socket_t;
 #define CYXWIZ_UDP_PUNCH_ACK        0xF5    /* Hole punch acknowledgement */
 #define CYXWIZ_UDP_DATA             0xF6    /* Application data wrapper */
 #define CYXWIZ_UDP_KEEPALIVE        0xF7    /* Keep connection alive */
+#define CYXWIZ_UDP_RELAY_PKT        0xF8    /* Relay packet via bootstrap */
 
 /* Peer endpoint (IP:port) */
 typedef struct {
@@ -94,6 +96,8 @@ typedef struct {
     uint64_t request_time;
     uint8_t attempts;
     bool active;
+    bool direct_failed;      /* Direct send didn't work, use relay */
+    uint64_t last_relay;     /* Last relay attempt time (rate limiting) */
 } cyxwiz_pending_t;
 
 /* STUN header - packed for network */
@@ -148,6 +152,9 @@ typedef struct {
     /* STUN transaction tracking */
     uint8_t stun_transaction_id[12];
     bool stun_pending;
+
+    /* Bootstrap status */
+    bool bootstrap_ack_received;
 } cyxwiz_udp_state_t;
 
 /* Protocol message structures - packed for network transmission */
@@ -589,7 +596,7 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
     const cyxwiz_udp_peer_entry_t *entries =
         (const cyxwiz_udp_peer_entry_t *)(data + sizeof(cyxwiz_udp_peer_list_header_t));
 
-    CYXWIZ_DEBUG("Received peer list with %d peers", hdr->peer_count);
+    CYXWIZ_INFO("Received peer list with %d peers from bootstrap", hdr->peer_count);
 
     for (uint8_t i = 0; i < hdr->peer_count; i++) {
         /* Skip self */
@@ -618,12 +625,25 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
                 state->pending[j].request_time = get_time_ms();
                 state->pending[j].attempts = 0;
                 state->pending[j].active = true;
+                state->pending[j].direct_failed = false;
+                state->pending[j].last_relay = 0;
                 state->pending_count++;
                 found = true;
 
                 char ip_str[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &ep.ip, ip_str, sizeof(ip_str));
-                CYXWIZ_DEBUG("Added pending connection to %s:%d", ip_str, ntohs(ep.port));
+                CYXWIZ_INFO("Added pending connection to %s:%d", ip_str, ntohs(ep.port));
+
+                /* Notify discovery callback to trigger key exchange ANNOUNCE */
+                if (transport->on_peer) {
+                    cyxwiz_peer_info_t info;
+                    memset(&info, 0, sizeof(info));
+                    info.id = entries[i].id;
+                    info.rssi = 0;
+                    info.via = transport->type;
+                    transport->on_peer(transport, &info, transport->peer_user_data);
+                    CYXWIZ_INFO("Triggered on_peer callback for bootstrap peer");
+                }
                 break;
             }
         }
@@ -841,9 +861,12 @@ static void handle_received_packet(cyxwiz_transport_t *transport,
         }
     }
 
+    CYXWIZ_INFO("Received UDP packet type 0x%02X, len=%zu", type, len);
+
     switch (type) {
         case CYXWIZ_UDP_REGISTER_ACK:
-            CYXWIZ_DEBUG("Received register ACK from bootstrap");
+            CYXWIZ_INFO("Received register ACK from bootstrap");
+            state->bootstrap_ack_received = true;
             break;
 
         case CYXWIZ_UDP_PEER_LIST:
@@ -1076,6 +1099,35 @@ static cyxwiz_error_t send_data_to_peer(cyxwiz_transport_t *transport,
     return send_to_endpoint(state, &peer->public_addr, msg, msg_len);
 }
 
+/* Send packet via bootstrap relay */
+static cyxwiz_error_t send_via_relay(cyxwiz_udp_state_t *state,
+                                     const cyxwiz_node_id_t *to,
+                                     const uint8_t *data, size_t len)
+{
+    if (state->bootstrap_count == 0) {
+        return CYXWIZ_ERR_NO_ROUTE;
+    }
+
+    /* Build relay packet: [0xF8][to_id:32][len:2][data...] */
+    uint8_t relay_buf[CYXWIZ_UDP_MAX_PACKET_SIZE];
+    size_t relay_len = 1 + sizeof(cyxwiz_node_id_t) + 2 + len;
+
+    if (relay_len > sizeof(relay_buf)) {
+        return CYXWIZ_ERR_PACKET_TOO_LARGE;
+    }
+
+    relay_buf[0] = CYXWIZ_UDP_RELAY_PKT;
+    memcpy(&relay_buf[1], to, sizeof(cyxwiz_node_id_t));
+    uint16_t net_len = htons((uint16_t)len);
+    memcpy(&relay_buf[1 + sizeof(cyxwiz_node_id_t)], &net_len, 2);
+    memcpy(&relay_buf[1 + sizeof(cyxwiz_node_id_t) + 2], data, len);
+
+    /* Send to first bootstrap server */
+    CYXWIZ_INFO("Sending %zu bytes via relay to bootstrap", len);
+    return send_to_endpoint(state, &state->bootstrap_servers[0],
+                           relay_buf, relay_len);
+}
+
 static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
                                const cyxwiz_node_id_t *to,
                                const uint8_t *data,
@@ -1116,11 +1168,66 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
 
     /* Unicast: Find peer endpoint */
     cyxwiz_udp_peer_t *peer = find_peer(state, to);
-    if (peer == NULL || !peer->connected) {
-        return CYXWIZ_ERR_PEER_NOT_FOUND;
+    if (peer != NULL && peer->connected) {
+        /* Send direct to connected peer */
+        cyxwiz_error_t err = send_data_to_peer(transport, state, peer, data, len);
+
+        /* Also send via relay as backup (handles NAT hairpinning) */
+        if (state->bootstrap_count > 0) {
+            /* Build data packet for relay */
+            size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
+            uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
+            cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
+            pkt->type = CYXWIZ_UDP_DATA;
+            memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
+            memcpy(pkt->data, data, len);
+            send_via_relay(state, to, msg, msg_len);
+        }
+        return err;
     }
 
-    return send_data_to_peer(transport, state, peer, data, len);
+    /* Peer not connected - check pending connections and send directly */
+    CYXWIZ_INFO("Looking for peer in %zu pending connections", state->pending_count);
+    for (size_t i = 0; i < CYXWIZ_MAX_PENDING; i++) {
+        if (state->pending[i].active) {
+            char hex_pending[17], hex_to[17];
+            for (int j = 0; j < 8; j++) {
+                snprintf(hex_pending + j*2, 3, "%02x", state->pending[i].peer_id.bytes[j]);
+                snprintf(hex_to + j*2, 3, "%02x", to->bytes[j]);
+            }
+            CYXWIZ_INFO("Pending[%zu]: %s, looking for: %s", i, hex_pending, hex_to);
+        }
+        if (state->pending[i].active &&
+            memcmp(&state->pending[i].peer_id, to, sizeof(cyxwiz_node_id_t)) == 0) {
+            /* Build data packet */
+            size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
+            uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
+
+            cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
+            pkt->type = CYXWIZ_UDP_DATA;
+            memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
+            memcpy(pkt->data, data, len);
+
+            /* Send via direct endpoint */
+            CYXWIZ_INFO("Sending to pending peer via direct endpoint");
+            cyxwiz_error_t err = send_to_endpoint(state, &state->pending[i].addr, msg, msg_len);
+
+            /* Also send via relay as backup (parallel approach) */
+            if (state->bootstrap_count > 0) {
+                uint64_t now = get_time_ms();
+                /* Rate limit: relay at most once per second per pending peer */
+                if (now - state->pending[i].last_relay > 1000) {
+                    CYXWIZ_INFO("Also sending via relay as backup");
+                    send_via_relay(state, to, msg, msg_len);
+                    state->pending[i].last_relay = now;
+                }
+            }
+
+            return err;
+        }
+    }
+
+    return CYXWIZ_ERR_PEER_NOT_FOUND;
 }
 
 static cyxwiz_error_t udp_discover(cyxwiz_transport_t *transport)
@@ -1195,6 +1302,10 @@ static cyxwiz_error_t udp_poll(cyxwiz_transport_t *transport, uint32_t timeout_m
                 .ip = from_addr.sin_addr.s_addr,
                 .port = from_addr.sin_port
             };
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &from_addr.sin_addr, ip_str, sizeof(ip_str));
+            CYXWIZ_INFO("Received %zd bytes from %s:%d (first byte: 0x%02X)",
+                       len, ip_str, ntohs(from_addr.sin_port), state->recv_buf[0]);
             handle_received_packet(transport, state, &from,
                                   state->recv_buf, (size_t)len);
         }
@@ -1228,4 +1339,14 @@ cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data)
         return CYXWIZ_NAT_UNKNOWN;
     }
     return state->nat_type;
+}
+
+/* Check if bootstrap ACK has been received */
+bool cyxwiz_udp_is_bootstrap_connected(void *driver_data)
+{
+    cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
+    if (state == NULL) {
+        return false;
+    }
+    return state->bootstrap_ack_received;
 }
