@@ -97,7 +97,7 @@ static int test_wrap_unwrap_1hop(void)
     uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE];
     cyxwiz_crypto_random(ephemeral_pub, CYXWIZ_EPHEMERAL_SIZE);
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     /* Wrap */
@@ -120,7 +120,7 @@ static int test_wrap_unwrap_1hop(void)
     /* Unwrap */
     cyxwiz_node_id_t next_hop;
     uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE];
-    uint8_t inner[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t inner[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t inner_len;
 
     err = cyxwiz_onion_unwrap(
@@ -169,7 +169,7 @@ static int test_wrap_unwrap_2hop(void)
     cyxwiz_crypto_random(ephemeral_pubs[0], CYXWIZ_EPHEMERAL_SIZE);
     cyxwiz_crypto_random(ephemeral_pubs[1], CYXWIZ_EPHEMERAL_SIZE);
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     /* Wrap with 2 hops */
@@ -186,7 +186,7 @@ static int test_wrap_unwrap_2hop(void)
     /* Unwrap first layer (at hop 1) */
     cyxwiz_node_id_t next_hop;
     uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE];
-    uint8_t layer1[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t layer1[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t layer1_len;
 
     err = cyxwiz_onion_unwrap(
@@ -205,7 +205,7 @@ static int test_wrap_unwrap_2hop(void)
     }
 
     /* Unwrap second layer (at hop 2) */
-    uint8_t inner[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t inner[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t inner_len;
 
     err = cyxwiz_onion_unwrap(
@@ -273,7 +273,7 @@ static int test_wrap_unwrap_3hop(void)
         cyxwiz_crypto_random(ephemeral_pubs[1], CYXWIZ_EPHEMERAL_SIZE);
         cyxwiz_crypto_random(ephemeral_pubs[2], CYXWIZ_EPHEMERAL_SIZE);
 
-        uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+        uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
         size_t onion_len;
 
         cyxwiz_error_t err = cyxwiz_onion_wrap(
@@ -307,7 +307,7 @@ static int test_tamper_detection(void)
     uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE];
     cyxwiz_crypto_random(ephemeral_pub, CYXWIZ_EPHEMERAL_SIZE);
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     cyxwiz_error_t err = cyxwiz_onion_wrap(
@@ -326,7 +326,7 @@ static int test_tamper_detection(void)
     /* Unwrap should fail */
     cyxwiz_node_id_t next_hop;
     uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE];
-    uint8_t inner[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t inner[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t inner_len;
 
     err = cyxwiz_onion_unwrap(
@@ -357,7 +357,7 @@ static int test_wrong_key(void)
     uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE];
     cyxwiz_crypto_random(ephemeral_pub, CYXWIZ_EPHEMERAL_SIZE);
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     /* Wrap with key1 */
@@ -374,7 +374,7 @@ static int test_wrong_key(void)
     /* Unwrap with key2 should fail */
     cyxwiz_node_id_t next_hop;
     uint8_t next_ephemeral[CYXWIZ_EPHEMERAL_SIZE];
-    uint8_t inner[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t inner[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t inner_len;
 
     err = cyxwiz_onion_unwrap(
@@ -450,8 +450,8 @@ static int test_node_id_zero(void)
 /* Test payload too large error */
 static int test_payload_too_large(void)
 {
-    /* Create payload larger than max for 1-hop (141 bytes with ephemeral keys) */
-    uint8_t payload[200];
+    /* Create payload larger than max for 1-hop (1289 bytes for UDP transport) */
+    uint8_t payload[1400];
     memset(payload, 'A', sizeof(payload));
 
     cyxwiz_node_id_t hop;
@@ -463,7 +463,7 @@ static int test_payload_too_large(void)
     uint8_t ephemeral_pub[CYXWIZ_EPHEMERAL_SIZE];
     cyxwiz_crypto_random(ephemeral_pub, CYXWIZ_EPHEMERAL_SIZE);
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     cyxwiz_error_t err = cyxwiz_onion_wrap(
@@ -482,17 +482,17 @@ static int test_invalid_hop_count(void)
     uint8_t payload[] = "Test";
     size_t payload_len = sizeof(payload) - 1;
 
-    cyxwiz_node_id_t hops[4];
-    uint8_t keys[4][CYXWIZ_KEY_SIZE];
-    uint8_t ephemeral_pubs[4][CYXWIZ_EPHEMERAL_SIZE];
+    cyxwiz_node_id_t hops[9];
+    uint8_t keys[9][CYXWIZ_KEY_SIZE];
+    uint8_t ephemeral_pubs[9][CYXWIZ_EPHEMERAL_SIZE];
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 9; i++) {
         random_node_id(&hops[i]);
         cyxwiz_crypto_random_key(keys[i]);
         cyxwiz_crypto_random(ephemeral_pubs[i], CYXWIZ_EPHEMERAL_SIZE);
     }
 
-    uint8_t onion[CYXWIZ_MAX_PACKET_SIZE];
+    uint8_t onion[CYXWIZ_ONION_MAX_ENCRYPTED];
     size_t onion_len;
 
     /* 0 hops should fail */
@@ -506,11 +506,11 @@ static int test_invalid_hop_count(void)
         return 0;
     }
 
-    /* 4 hops (> MAX) should fail */
+    /* 9 hops (> MAX=8) should fail */
     err = cyxwiz_onion_wrap(
         payload, payload_len,
         hops, (const uint8_t (*)[CYXWIZ_KEY_SIZE])keys,
-        (const uint8_t (*)[CYXWIZ_EPHEMERAL_SIZE])ephemeral_pubs, 4,
+        (const uint8_t (*)[CYXWIZ_EPHEMERAL_SIZE])ephemeral_pubs, 9,
         onion, &onion_len
     );
     if (err == CYXWIZ_OK) {

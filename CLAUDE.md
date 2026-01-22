@@ -628,12 +628,12 @@ echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 
 ## Transport Drivers
 
-### WiFi Direct (`wifi_direct.c`)
-- Linux: wpa_supplicant control interface (`/var/run/wpa_supplicant`)
-- Windows: WinRT wrapper (`wifi_direct_win.cpp`)
-- P2P group formation, UDP data socket on port 19850
+### UDP (\)
+- NAT traversal via STUN (Google, Cloudflare servers)
+- UDP hole punching for peer-to-peer
+- Bootstrap server for peer discovery
 
-### Bluetooth (`bluetooth.c`)
+## Bluetooth (`bluetooth.c`)
 - Linux: BlueZ L2CAP sockets
 - Windows: RFCOMM via Winsock (`bluetooth_win.cpp`)
 - Device discovery, connection management
@@ -651,11 +651,7 @@ echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 - UDP hole punching for peer-to-peer
 - Bootstrap server for peer discovery
 
-## LoRa for IoT Security
-
-CyxWiz over LoRa solves critical IoT security vulnerabilities by eliminating centralized infrastructure.
-
-### Traditional LoRaWAN vs CyxWiz
+## Traditional LoRaWAN vs CyxWiz
 
 | Problem | Traditional LoRaWAN | CyxWiz + LoRa |
 |---------|---------------------|---------------|
@@ -716,9 +712,7 @@ Emergency devices ◀──LoRa mesh──▶ Responders
 Works without cell towers or internet
 ```
 
-## Using CyxWiz on LoRa Devices
-
-### Supported Hardware
+## Supported Hardware
 
 | Type | Modules | Interface |
 |------|---------|-----------|
