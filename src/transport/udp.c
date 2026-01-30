@@ -610,6 +610,23 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
             continue;
         }
 
+        /* Check if already pending (avoid duplicate entries from repeated 0xF2) */
+        bool already_pending = false;
+        for (size_t j = 0; j < CYXWIZ_MAX_PENDING; j++) {
+            if (state->pending[j].active &&
+                memcmp(&state->pending[j].peer_id, &entries[i].id,
+                       sizeof(cyxwiz_node_id_t)) == 0) {
+                /* Update address in case it changed */
+                state->pending[j].addr.ip = entries[i].ip;
+                state->pending[j].addr.port = entries[i].port;
+                already_pending = true;
+                break;
+            }
+        }
+        if (already_pending) {
+            continue;
+        }
+
         /* Add as pending connection */
         cyxwiz_endpoint_t ep = {
             .ip = entries[i].ip,
@@ -1290,14 +1307,19 @@ static cyxwiz_error_t udp_poll(cyxwiz_transport_t *transport, uint32_t timeout_m
     int ready = select((int)(state->socket_fd + 1), &read_fds, NULL, NULL, &tv);
 
     if (ready > 0 && FD_ISSET(state->socket_fd, &read_fds)) {
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
+        /* Drain all available packets (e.g. 0xF1 + 0xF2 arrive back-to-back) */
+        for (int pkt_idx = 0; pkt_idx < 16; pkt_idx++) {
+            struct sockaddr_in from_addr;
+            socklen_t from_len = sizeof(from_addr);
 
-        ssize_t len = recvfrom(state->socket_fd, (char *)state->recv_buf,
-                               sizeof(state->recv_buf), 0,
-                               (struct sockaddr *)&from_addr, &from_len);
+            ssize_t len = recvfrom(state->socket_fd, (char *)state->recv_buf,
+                                   sizeof(state->recv_buf), 0,
+                                   (struct sockaddr *)&from_addr, &from_len);
 
-        if (len > 0) {
+            if (len <= 0) {
+                break;  /* No more packets */
+            }
+
             cyxwiz_endpoint_t from = {
                 .ip = from_addr.sin_addr.s_addr,
                 .port = from_addr.sin_port
