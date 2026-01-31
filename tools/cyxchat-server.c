@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <time.h>
 #include <stdint.h>
+#include <sodium.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -64,6 +65,18 @@ typedef int socket_t;
 #define CYXCHAT_RELAY_DATA          0xE3
 #define CYXCHAT_RELAY_KEEPALIVE     0xE4
 #define CYXCHAT_RELAY_ERROR         0xE5
+
+/* Server registry message types (0xF5-0xFA) */
+#define CYXCHAT_MSG_SERVER_HEALTH_PING      0xA0
+#define CYXCHAT_MSG_SERVER_HEALTH_PONG      0xA1
+#define CYXCHAT_MSG_SERVER_CHALLENGE        0xA2
+#define CYXCHAT_MSG_SERVER_CHALLENGE_RESP   0xA3
+
+#define SERVER_KEY_FILE     "server_key.dat"
+#define SERVER_PUBKEY_SIZE  32
+#define SERVER_SECKEY_SIZE  64
+#define SERVER_SIG_SIZE     64
+#define SERVER_NONCE_SIZE   32
 
 /* Node ID */
 typedef struct {
@@ -154,6 +167,11 @@ static socket_t g_socket = SOCKET_INVALID;
 /* Stats */
 static uint64_t g_bytes_relayed = 0;
 static uint64_t g_messages_relayed = 0;
+
+/* Server Ed25519 identity */
+static uint8_t g_server_pubkey[SERVER_PUBKEY_SIZE];
+static uint8_t g_server_seckey[SERVER_SECKEY_SIZE];
+static int g_has_identity = 0;
 
 static void signal_handler(int sig)
 {
@@ -469,6 +487,124 @@ static void handle_relay_keepalive(const struct sockaddr_in *from,
 }
 
 
+/* ============================================================
+ * Server Identity (Ed25519)
+ * ============================================================ */
+
+/* Convert bytes to hex string */
+static void bytes_to_hex(const uint8_t *bytes, size_t len, char *out)
+{
+    const char *hex = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2] = hex[(bytes[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[bytes[i] & 0x0F];
+    }
+    out[len * 2] = '\0';
+}
+
+/* Load or generate Ed25519 keypair */
+static int init_server_identity(void)
+{
+    FILE *f = fopen(SERVER_KEY_FILE, "rb");
+    if (f) {
+        /* Load existing keypair */
+        size_t r1 = fread(g_server_pubkey, 1, SERVER_PUBKEY_SIZE, f);
+        size_t r2 = fread(g_server_seckey, 1, SERVER_SECKEY_SIZE, f);
+        fclose(f);
+
+        if (r1 == SERVER_PUBKEY_SIZE && r2 == SERVER_SECKEY_SIZE) {
+            g_has_identity = 1;
+            char hex[65];
+            bytes_to_hex(g_server_pubkey, SERVER_PUBKEY_SIZE, hex);
+            printf("Loaded server identity from %s\n", SERVER_KEY_FILE);
+            printf("Server pubkey: %s\n", hex);
+            return 1;
+        }
+        printf("Warning: corrupt key file, regenerating\n");
+    }
+
+    /* Generate new keypair */
+    if (crypto_sign_ed25519_keypair(g_server_pubkey, g_server_seckey) != 0) {
+        fprintf(stderr, "Failed to generate Ed25519 keypair\n");
+        return 0;
+    }
+
+    /* Save to file */
+    f = fopen(SERVER_KEY_FILE, "wb");
+    if (f) {
+        fwrite(g_server_pubkey, 1, SERVER_PUBKEY_SIZE, f);
+        fwrite(g_server_seckey, 1, SERVER_SECKEY_SIZE, f);
+        fclose(f);
+    } else {
+        fprintf(stderr, "Warning: could not save key to %s\n", SERVER_KEY_FILE);
+    }
+
+    g_has_identity = 1;
+    char hex[65];
+    bytes_to_hex(g_server_pubkey, SERVER_PUBKEY_SIZE, hex);
+    printf("Generated new server identity\n");
+    printf("Server pubkey: %s\n", hex);
+    printf("  (Add this to client seed list for verification)\n");
+    return 1;
+}
+
+/* ============================================================
+ * Health Ping/Pong Handler
+ * ============================================================ */
+
+static void handle_health_ping(const struct sockaddr_in *from,
+                                const uint8_t *data, size_t len)
+{
+    /* Health ping: [type:1][timestamp:8] = 9 bytes */
+    if (len < 9) return;
+
+    /* Reply with pong (same format, different type) */
+    uint8_t pong[9];
+    pong[0] = CYXCHAT_MSG_SERVER_HEALTH_PONG;
+    memcpy(pong + 1, data + 1, 8);  /* Echo timestamp */
+
+    sendto(g_socket, (const char *)pong, 9, 0,
+           (const struct sockaddr *)from, sizeof(*from));
+}
+
+/* ============================================================
+ * Challenge/Response Handler
+ * ============================================================ */
+
+static void handle_challenge(const struct sockaddr_in *from,
+                              const uint8_t *data, size_t len)
+{
+    /* Challenge: [type:1][nonce:32] = 33 bytes */
+    if (len < 33) return;
+    if (!g_has_identity) return;
+
+    const uint8_t *nonce = data + 1;
+
+    /* Sign the nonce with our Ed25519 secret key */
+    uint8_t signature[SERVER_SIG_SIZE];
+    if (crypto_sign_ed25519_detached(signature, NULL, nonce, SERVER_NONCE_SIZE,
+                                      g_server_seckey) != 0) {
+        fprintf(stderr, "Failed to sign challenge\n");
+        return;
+    }
+
+    /* Build response: [type:1][nonce:32][pubkey:32][signature:64] = 129 bytes */
+    uint8_t resp[129];
+    resp[0] = CYXCHAT_MSG_SERVER_CHALLENGE_RESP;
+    memcpy(resp + 1, nonce, SERVER_NONCE_SIZE);
+    memcpy(resp + 1 + SERVER_NONCE_SIZE, g_server_pubkey, SERVER_PUBKEY_SIZE);
+    memcpy(resp + 1 + SERVER_NONCE_SIZE + SERVER_PUBKEY_SIZE, signature, SERVER_SIG_SIZE);
+
+    sendto(g_socket, (const char *)resp, sizeof(resp), 0,
+           (const struct sockaddr *)from, sizeof(*from));
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &from->sin_addr, ip_str, sizeof(ip_str));
+    printf("Responded to verification challenge from %s:%d\n",
+           ip_str, ntohs(from->sin_port));
+    fflush(stdout);
+}
+
 /* Handle relay packet (forward any packet to target peer) */
 static void handle_relay_packet(const struct sockaddr_in *from,
                                 const uint8_t *data, size_t len)
@@ -549,9 +685,22 @@ static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, s
             /* Just ignore - peer will timeout */
             break;
 
-        default:
-            /* Unknown - ignore */
+        /* Server registry protocol */
+        case CYXCHAT_MSG_SERVER_HEALTH_PING:
+            handle_health_ping(from, data, len);
             break;
+
+        case CYXCHAT_MSG_SERVER_CHALLENGE:
+            handle_challenge(from, data, len);
+            break;
+
+        default: {
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &from->sin_addr, ip_str, sizeof(ip_str));
+            printf("Unknown packet type 0x%02X (%zu bytes) from %s:%d\n",
+                   type, len, ip_str, ntohs(from->sin_port));
+            break;
+        }
     }
 }
 
@@ -567,9 +716,22 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* Initialize libsodium */
+    if (sodium_init() < 0) {
+        fprintf(stderr, "Failed to initialize libsodium\n");
+        return 1;
+    }
+
     printf("\n");
     printf("CyxChat Server (Bootstrap + Relay)\n");
     printf("===================================\n");
+    printf("\n");
+
+    /* Load or generate server Ed25519 identity */
+    if (!init_server_identity()) {
+        fprintf(stderr, "Failed to initialize server identity\n");
+        return 1;
+    }
     printf("\n");
 
 #ifdef _WIN32

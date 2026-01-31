@@ -911,7 +911,19 @@ static void handle_received_packet(cyxwiz_transport_t *transport,
             break;
 
         default:
-            CYXWIZ_DEBUG("Unknown UDP transport message type: 0x%02X", type);
+            /* Forward unrecognized types (server registry, relay, etc.)
+             * to application callback so higher layers can handle them */
+            if (transport->on_recv) {
+                cyxwiz_node_id_t from_id;
+                memset(&from_id, 0, sizeof(from_id));
+                memcpy(from_id.bytes, &from->ip, 4);
+                memcpy(from_id.bytes + 4, &from->port, 2);
+                from_id.bytes[6] = 0xFF;
+                transport->on_recv(transport, &from_id, data, len,
+                                  transport->recv_user_data);
+            } else {
+                CYXWIZ_DEBUG("Unknown UDP transport message type: 0x%02X", type);
+            }
             break;
     }
 }
@@ -1181,6 +1193,14 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
 
         CYXWIZ_DEBUG("Broadcast to %zu peers", sent_count);
         return (sent_count > 0) ? CYXWIZ_OK : last_err;
+    }
+
+    /* Check for server/relay direct address (bytes[6] == 0xFF marker) */
+    if (to->bytes[6] == 0xFF) {
+        cyxwiz_endpoint_t ep;
+        memcpy(&ep.ip, &to->bytes[0], 4);
+        memcpy(&ep.port, &to->bytes[4], 2);
+        return send_to_endpoint(state, &ep, data, len);
     }
 
     /* Unicast: Find peer endpoint */
