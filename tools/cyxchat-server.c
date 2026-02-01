@@ -694,13 +694,11 @@ static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, s
             handle_challenge(from, data, len);
             break;
 
-        default: {
-            char ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &from->sin_addr, ip_str, sizeof(ip_str));
-            printf("Unknown packet type 0x%02X (%zu bytes) from %s:%d\n",
-                   type, len, ip_str, ntohs(from->sin_port));
+        default:
+            /* 0xF6 (UDP_DATA) and 0xF7 (KEEPALIVE) are transport-layer
+             * packets that clients send before hole punch completes.
+             * Safe to ignore — data is delivered via relay (0xE3). */
             break;
-        }
     }
 }
 
