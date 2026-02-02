@@ -360,7 +360,12 @@ static void handle_connect_request(const struct sockaddr_in *from,
 
     peer_t *target = find_peer(target_id);
     if (target == NULL) {
-        printf("Connect request for unknown peer\n");
+        char from_hex[17], tgt_hex[17];
+        for (int j = 0; j < 8; j++) {
+            snprintf(from_hex + j*2, 3, "%02x", msg->requester_id.bytes[j]);
+            snprintf(tgt_hex + j*2, 3, "%02x", target_id->bytes[j]);
+        }
+        printf("Connect request from %s... for unknown peer %s...\n", from_hex, tgt_hex);
         return;
     }
 
