@@ -187,11 +187,21 @@ typedef struct {
     /* Followed by peer entries */
 } cyxwiz_udp_peer_list_header_t;
 
-typedef struct __attribute__((packed)) {
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+{
     cyxwiz_node_id_t id;
     uint32_t ip;
     uint16_t port;
 } cyxwiz_udp_peer_entry_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
 
 typedef struct {
     uint8_t type;
