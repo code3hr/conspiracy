@@ -1232,8 +1232,22 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
     /* Unicast: Find peer endpoint */
     cyxwiz_udp_peer_t *peer = find_peer(state, to);
     if (peer != NULL && peer->connected) {
-        /* Send direct to connected peer - no relay backup needed */
-        return send_data_to_peer(transport, state, peer, data, len);
+        /* Send direct to connected peer */
+        cyxwiz_error_t err = send_data_to_peer(transport, state, peer, data, len);
+
+        /* Also send via relay as backup — direct path may not actually work
+         * (NAT hairpinning, asymmetric NAT, stale connection state).
+         * Receiver deduplicates via msg_id. */
+        if (state->bootstrap_count > 0) {
+            size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
+            uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
+            cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
+            pkt->type = CYXWIZ_UDP_DATA;
+            memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
+            memcpy(pkt->data, data, len);
+            send_via_relay(state, to, msg, msg_len);
+        }
+        return err;
     }
 
     /* Peer not connected - check pending connections and send directly */
