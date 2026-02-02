@@ -661,6 +661,24 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
                 inet_ntop(AF_INET, &ep.ip, ip_str, sizeof(ip_str));
                 CYXWIZ_INFO("Added pending connection to %s:%d", ip_str, ntohs(ep.port));
 
+                /* Send connect request (0xF3) via bootstrap to coordinate hole punch.
+                 * Format: [connect_req_t][target_node_id] */
+                if (state->bootstrap_count > 0) {
+                    uint8_t req_buf[sizeof(cyxwiz_udp_connect_req_t) + sizeof(cyxwiz_node_id_t)];
+                    cyxwiz_udp_connect_req_t *req = (cyxwiz_udp_connect_req_t *)req_buf;
+                    req->type = CYXWIZ_UDP_CONNECT_REQ;
+                    memcpy(&req->requester_id, &transport->local_id, sizeof(cyxwiz_node_id_t));
+                    req->requester_ip = ep.ip;
+                    req->requester_port = ep.port;
+                    /* Append target node ID after the connect request */
+                    memcpy(req_buf + sizeof(cyxwiz_udp_connect_req_t),
+                           &entries[i].id, sizeof(cyxwiz_node_id_t));
+                    send_to_endpoint(state, &state->bootstrap_servers[0],
+                                     req_buf, sizeof(req_buf));
+                    CYXWIZ_INFO("Sent connect request (0xF3) to bootstrap for %s:%d",
+                               ip_str, ntohs(ep.port));
+                }
+
                 /* Notify discovery callback to trigger key exchange ANNOUNCE */
                 if (transport->on_peer) {
                     cyxwiz_peer_info_t info;
