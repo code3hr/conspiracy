@@ -203,12 +203,22 @@ __attribute__((packed))
 #pragma pack(pop)
 #endif
 
-typedef struct {
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif
+typedef struct
+#ifdef __GNUC__
+__attribute__((packed))
+#endif
+{
     uint8_t type;
     cyxwiz_node_id_t requester_id;
     uint32_t requester_ip;
     uint16_t requester_port;
 } cyxwiz_udp_connect_req_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
 
 typedef struct {
     uint8_t type;
@@ -1234,21 +1244,8 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
     /* Unicast: Find peer endpoint */
     cyxwiz_udp_peer_t *peer = find_peer(state, to);
     if (peer != NULL && peer->connected) {
-        /* Send direct to connected peer */
-        cyxwiz_error_t err = send_data_to_peer(transport, state, peer, data, len);
-
-        /* Also send via relay as backup (handles NAT hairpinning) */
-        if (state->bootstrap_count > 0) {
-            /* Build data packet for relay */
-            size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
-            uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
-            cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
-            pkt->type = CYXWIZ_UDP_DATA;
-            memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
-            memcpy(pkt->data, data, len);
-            send_via_relay(state, to, msg, msg_len);
-        }
-        return err;
+        /* Send direct to connected peer - no relay backup needed */
+        return send_data_to_peer(transport, state, peer, data, len);
     }
 
     /* Peer not connected - check pending connections and send directly */
