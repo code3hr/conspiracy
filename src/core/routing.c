@@ -8,6 +8,7 @@
  */
 
 #include "cyxwiz/routing.h"
+#include "cyxwiz/transport.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 #include "cyxwiz/onion.h"
@@ -853,6 +854,15 @@ cyxwiz_peer_table_t *cyxwiz_router_get_peer_table(cyxwiz_router_t *router)
         return NULL;
     }
     return router->peer_table;
+}
+
+int cyxwiz_router_is_peer_direct(cyxwiz_router_t *router,
+                                  const cyxwiz_node_id_t *peer_id)
+{
+    if (router == NULL || peer_id == NULL || router->transport == NULL) {
+        return 0;
+    }
+    return cyxwiz_transport_is_peer_direct(router->transport, peer_id) ? 1 : 0;
 }
 
 /* ============ Internal Functions ============ */

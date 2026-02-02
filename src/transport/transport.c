@@ -151,6 +151,8 @@ const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type)
 extern cyxwiz_nat_type_t cyxwiz_udp_get_nat_type(void *driver_data);
 /* Internal: Check if bootstrap ACK received from UDP driver state */
 extern bool cyxwiz_udp_is_bootstrap_connected(void *driver_data);
+/* Internal: Check if peer has direct UDP connection */
+extern bool cyxwiz_udp_is_peer_direct(void *driver_data, const cyxwiz_node_id_t *peer_id);
 
 cyxwiz_nat_type_t cyxwiz_transport_get_nat_type(cyxwiz_transport_t *transport)
 {
@@ -173,6 +175,20 @@ bool cyxwiz_transport_is_bootstrap_connected(cyxwiz_transport_t *transport)
 
     if (transport->type == CYXWIZ_TRANSPORT_UDP && transport->driver_data != NULL) {
         return cyxwiz_udp_is_bootstrap_connected(transport->driver_data);
+    }
+
+    return false;
+}
+
+bool cyxwiz_transport_is_peer_direct(cyxwiz_transport_t *transport,
+                                      const cyxwiz_node_id_t *peer_id)
+{
+    if (transport == NULL || peer_id == NULL) {
+        return false;
+    }
+
+    if (transport->type == CYXWIZ_TRANSPORT_UDP && transport->driver_data != NULL) {
+        return cyxwiz_udp_is_peer_direct(transport->driver_data, peer_id);
     }
 
     return false;

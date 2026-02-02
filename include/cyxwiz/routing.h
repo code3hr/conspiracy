@@ -598,4 +598,11 @@ size_t cyxwiz_router_pending_count(const cyxwiz_router_t *router);
  */
 cyxwiz_peer_table_t *cyxwiz_router_get_peer_table(cyxwiz_router_t *router);
 
+/*
+ * Check if a peer has a direct transport connection (not relay-only).
+ * Returns 1 if peer is directly connected via UDP, 0 otherwise.
+ */
+int cyxwiz_router_is_peer_direct(cyxwiz_router_t *router,
+                                  const cyxwiz_node_id_t *peer_id);
+
 #endif /* CYXWIZ_ROUTING_H */

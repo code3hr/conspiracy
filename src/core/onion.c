@@ -12,6 +12,7 @@
 #endif
 
 #include "cyxwiz/onion.h"
+#include "cyxwiz/routing.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
 
@@ -1770,7 +1771,16 @@ static size_t calculate_relay_count(
     cyxwiz_onion_ctx_t *ctx,
     const cyxwiz_node_id_t *destination)
 {
-    /* Check for user preference first */
+    /* If destination is relay-only (no direct UDP connection), force 1 hop.
+     * Multi-hop onion routing requires intermediate hops to forward packets
+     * directly. Relay-only peers can't do this — the circuit breaks. */
+    if (ctx->router != NULL &&
+        !cyxwiz_router_is_peer_direct(ctx->router, destination)) {
+        CYXWIZ_DEBUG("Destination is relay-only, forcing 1 hop (0 relays)");
+        return 0;
+    }
+
+    /* Check for user preference */
     if (ctx->preferred_hop_count > 0) {
         /* User wants specific hop count: relays = hops - 1 (destination is last hop) */
         size_t relays = (size_t)(ctx->preferred_hop_count - 1);

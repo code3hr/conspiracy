@@ -145,4 +145,11 @@ const char *cyxwiz_nat_type_name(cyxwiz_nat_type_t type);
 /* Check if connected to bootstrap server (received ACK) */
 bool cyxwiz_transport_is_bootstrap_connected(cyxwiz_transport_t *transport);
 
+/*
+ * Check if a peer has a direct UDP connection (not relay-only).
+ * Returns true if the peer is in the UDP connected peers table.
+ */
+bool cyxwiz_transport_is_peer_direct(cyxwiz_transport_t *transport,
+                                      const cyxwiz_node_id_t *peer_id);
+
 #endif /* CYXWIZ_TRANSPORT_H */

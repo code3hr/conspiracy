@@ -1431,3 +1431,14 @@ bool cyxwiz_udp_is_bootstrap_connected(void *driver_data)
     }
     return state->bootstrap_ack_received;
 }
+
+/* Check if a peer has a direct UDP connection (not relay-only) */
+bool cyxwiz_udp_is_peer_direct(void *driver_data, const cyxwiz_node_id_t *peer_id)
+{
+    cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
+    if (state == NULL || peer_id == NULL) {
+        return false;
+    }
+    cyxwiz_udp_peer_t *peer = find_peer(state, peer_id);
+    return (peer != NULL && peer->connected);
+}
