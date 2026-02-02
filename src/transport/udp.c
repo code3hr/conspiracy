@@ -157,12 +157,20 @@ typedef struct {
     bool bootstrap_ack_received;
 } cyxwiz_udp_state_t;
 
-/* Protocol message structures - packed for network transmission */
+/* Protocol message structures - ALL packed for network wire format.
+ * Without packing, compiler alignment padding causes sizeof() mismatches
+ * between platforms, silently dropping packets in size checks. */
 #ifdef _MSC_VER
 #pragma pack(push, 1)
 #endif
 
-typedef struct {
+#ifdef __GNUC__
+#define PACKED_ATTR __attribute__((packed))
+#else
+#define PACKED_ATTR
+#endif
+
+typedef struct PACKED_ATTR {
     uint8_t type;
     cyxwiz_node_id_t from;
     uint8_t data[1];  /* Flexible array workaround for MSVC */
@@ -171,62 +179,42 @@ typedef struct {
 /* Header size without the data array */
 #define CYXWIZ_UDP_DATA_HDR_SIZE (1 + sizeof(cyxwiz_node_id_t))
 
-typedef struct {
+typedef struct PACKED_ATTR {
     uint8_t type;
     cyxwiz_node_id_t node_id;
     uint16_t local_port;
 } cyxwiz_udp_register_t;
 
-typedef struct {
+typedef struct PACKED_ATTR {
     uint8_t type;
 } cyxwiz_udp_register_ack_t;
 
-typedef struct {
+typedef struct PACKED_ATTR {
     uint8_t type;
     uint8_t peer_count;
     /* Followed by peer entries */
 } cyxwiz_udp_peer_list_header_t;
 
-#ifdef _MSC_VER
-#pragma pack(push, 1)
-#endif
-typedef struct
-#ifdef __GNUC__
-__attribute__((packed))
-#endif
-{
+typedef struct PACKED_ATTR {
     cyxwiz_node_id_t id;
     uint32_t ip;
     uint16_t port;
 } cyxwiz_udp_peer_entry_t;
-#ifdef _MSC_VER
-#pragma pack(pop)
-#endif
 
-#ifdef _MSC_VER
-#pragma pack(push, 1)
-#endif
-typedef struct
-#ifdef __GNUC__
-__attribute__((packed))
-#endif
-{
+typedef struct PACKED_ATTR {
     uint8_t type;
     cyxwiz_node_id_t requester_id;
     uint32_t requester_ip;
     uint16_t requester_port;
 } cyxwiz_udp_connect_req_t;
-#ifdef _MSC_VER
-#pragma pack(pop)
-#endif
 
-typedef struct {
+typedef struct PACKED_ATTR {
     uint8_t type;
     cyxwiz_node_id_t sender_id;
     uint32_t punch_id;
 } cyxwiz_udp_punch_t;
 
-typedef struct {
+typedef struct PACKED_ATTR {
     uint8_t type;
     cyxwiz_node_id_t sender_id;
 } cyxwiz_udp_keepalive_t;
