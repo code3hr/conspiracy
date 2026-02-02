@@ -54,6 +54,7 @@ typedef int socket_t;
 #define CYXWIZ_STUN_TIMEOUT_MS 3000
 #define CYXWIZ_PUNCH_ATTEMPTS 5
 #define CYXWIZ_PUNCH_INTERVAL_MS 50
+#define CYXWIZ_PUNCH_RETRY_MAX 3
 #define CYXWIZ_BOOTSTRAP_REGISTER_INTERVAL_MS 60000
 
 /* UDP-specific MTU (much larger than LoRa's 250 bytes) */
@@ -87,6 +88,10 @@ typedef struct {
     uint64_t last_keepalive_sent;
     bool connected;
     bool active;
+    /* Punch retry state (for relay-only peers) */
+    uint8_t punch_retry_count;     /* 0-3, resets on reconnect */
+    uint64_t last_punch_retry;     /* timestamp of last retry round */
+    bool punch_given_up;           /* true after 3 failed retries */
 } cyxwiz_udp_peer_t;
 
 /* Pending connection request */
@@ -348,6 +353,12 @@ static cyxwiz_udp_peer_t *add_or_update_peer(cyxwiz_udp_state_t *state,
         peer->public_addr = *addr;
         peer->last_seen = get_time_ms();
         peer->connected = connected;
+        if (connected) {
+            /* P2P established — reset punch retry state */
+            peer->punch_retry_count = 0;
+            peer->last_punch_retry = 0;
+            peer->punch_given_up = false;
+        }
         return peer;
     }
 
@@ -360,6 +371,9 @@ static cyxwiz_udp_peer_t *add_or_update_peer(cyxwiz_udp_state_t *state,
             state->peers[i].last_keepalive_sent = 0;
             state->peers[i].connected = connected;
             state->peers[i].active = true;
+            state->peers[i].punch_retry_count = 0;
+            state->peers[i].last_punch_retry = 0;
+            state->peers[i].punch_given_up = false;
             state->peer_count++;
             return &state->peers[i];
         }
@@ -614,8 +628,33 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
 
         /* Check if we already know this peer */
         cyxwiz_udp_peer_t *existing = find_peer(state, &entries[i].id);
-        if (existing != NULL && existing->connected) {
-            continue;
+        if (existing != NULL) {
+            if (existing->connected) {
+                continue;  /* Already P2P — skip */
+            }
+            if (existing->punch_given_up) {
+                continue;  /* Exhausted retries — skip */
+            }
+            /* Relay-only peer: check if enough time elapsed for next retry */
+            static const uint64_t backoff_ms[] = {60000, 300000, 900000};
+            uint8_t idx = existing->punch_retry_count;
+            if (idx >= CYXWIZ_PUNCH_RETRY_MAX) {
+                existing->punch_given_up = true;
+                continue;
+            }
+            uint64_t now_ms = get_time_ms();
+            if (existing->last_punch_retry > 0 &&
+                now_ms - existing->last_punch_retry < backoff_ms[idx]) {
+                continue;  /* Not time yet */
+            }
+            /* Time for retry — re-add to pending */
+            CYXWIZ_INFO("Punch retry %d/%d for relay-only peer",
+                       idx + 1, CYXWIZ_PUNCH_RETRY_MAX);
+            existing->punch_retry_count++;
+            existing->last_punch_retry = now_ms;
+            existing->public_addr.ip = entries[i].ip;
+            existing->public_addr.port = entries[i].port;
+            /* Fall through to pending logic below */
         }
 
         /* Check if already pending (avoid duplicate entries from repeated 0xF2) */
@@ -969,11 +1008,13 @@ static void process_pending_connections(cyxwiz_transport_t *transport,
         uint64_t elapsed = now - state->pending[i].request_time;
         if (elapsed > (uint64_t)(state->pending[i].attempts * CYXWIZ_PUNCH_INTERVAL_MS * 10)) {
             if (state->pending[i].attempts >= CYXWIZ_PUNCH_ATTEMPTS) {
-                /* Give up */
+                /* Punch failed — promote to relay-only peer for future retry */
                 char ip_str[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &state->pending[i].addr.ip, ip_str, sizeof(ip_str));
-                CYXWIZ_DEBUG("Giving up on punch to %s:%d",
+                CYXWIZ_DEBUG("Punch failed to %s:%d, promoting to relay-only peer",
                             ip_str, ntohs(state->pending[i].addr.port));
+                add_or_update_peer(state, &state->pending[i].peer_id,
+                                   &state->pending[i].addr, false);
                 state->pending[i].active = false;
                 state->pending_count--;
                 continue;
@@ -1009,6 +1050,9 @@ static void send_keepalives(cyxwiz_transport_t *transport,
             inet_ntop(AF_INET, &state->peers[i].public_addr.ip, ip_str, sizeof(ip_str));
             CYXWIZ_DEBUG("Peer %s:%d timed out",
                         ip_str, ntohs(state->peers[i].public_addr.port));
+            /* Reset punch retry so fresh attempt happens if peer reappears */
+            state->peers[i].punch_retry_count = 0;
+            state->peers[i].punch_given_up = false;
             state->peers[i].active = false;
             state->peer_count--;
             continue;
