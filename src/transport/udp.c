@@ -187,7 +187,7 @@ typedef struct {
     /* Followed by peer entries */
 } cyxwiz_udp_peer_list_header_t;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     cyxwiz_node_id_t id;
     uint32_t ip;
     uint16_t port;
@@ -1262,6 +1262,18 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
 
             return err;
         }
+    }
+
+    /* Last resort: send via relay even without pending entry */
+    if (state->bootstrap_count > 0) {
+        size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
+        uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
+        cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
+        pkt->type = CYXWIZ_UDP_DATA;
+        memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
+        memcpy(pkt->data, data, len);
+        CYXWIZ_INFO("Sending via relay as last resort (no direct or pending path)");
+        return send_via_relay(state, to, msg, msg_len);
     }
 
     return CYXWIZ_ERR_PEER_NOT_FOUND;
