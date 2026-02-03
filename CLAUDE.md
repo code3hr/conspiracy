@@ -650,6 +650,9 @@ echo -e "/status\n/peers\n/quit" | ./cyxwizd --batch
 - NAT traversal via STUN (Google, Cloudflare servers)
 - UDP hole punching for peer-to-peer
 - Bootstrap server for peer discovery
+- Relay fallback when hole punch fails (automatic, transparent)
+- Hole punch retry with exponential backoff (60s, 5min, 15min) — max 3 retries per peer
+- Offline message queue (72h TTL, 1MB/user) — messages delivered when peer comes online
 
 ## Traditional LoRaWAN vs CyxWiz
 

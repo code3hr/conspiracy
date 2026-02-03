@@ -516,6 +516,13 @@ static void handle_stun_response(cyxwiz_udp_state_t *state,
     /* Parse attributes looking for XOR-MAPPED-ADDRESS (0x0020) */
     const uint8_t *attrs = data + sizeof(stun_header_t);
     size_t attrs_len = ntohs(hdr->length);
+
+    /* Validate attrs_len against actual received data */
+    size_t max_attrs_len = len - sizeof(stun_header_t);
+    if (attrs_len > max_attrs_len) {
+        attrs_len = max_attrs_len;  /* Clamp to actual data */
+    }
+
     size_t offset = 0;
 
     while (offset + 4 <= attrs_len) {
@@ -608,6 +615,15 @@ static void handle_peer_list(cyxwiz_transport_t *transport,
     }
 
     const cyxwiz_udp_peer_list_header_t *hdr = (const cyxwiz_udp_peer_list_header_t *)data;
+
+    /* Validate peer_count against max possible in packet */
+    size_t max_peers = (CYXWIZ_UDP_MAX_PACKET_SIZE - sizeof(cyxwiz_udp_peer_list_header_t))
+                       / sizeof(cyxwiz_udp_peer_entry_t);
+    if (hdr->peer_count > max_peers) {
+        CYXWIZ_WARN("Invalid peer_count %d exceeds max %zu", hdr->peer_count, max_peers);
+        return;
+    }
+
     size_t expected_len = sizeof(cyxwiz_udp_peer_list_header_t) +
                           hdr->peer_count * sizeof(cyxwiz_udp_peer_entry_t);
 

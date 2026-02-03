@@ -336,12 +336,15 @@ static void queue_message(const node_id_t *to_id,
     time_t now = time(NULL);
     uint16_t len_net = htons(len);
 
-    fwrite(from_id->bytes, NODE_ID_LEN, 1, f);
-    fwrite(&len_net, sizeof(len_net), 1, f);
-    fwrite(&now, sizeof(now), 1, f);
-
-    /* Write payload */
-    fwrite(data, len, 1, f);
+    /* Check all fwrite return values */
+    if (fwrite(from_id->bytes, NODE_ID_LEN, 1, f) != 1 ||
+        fwrite(&len_net, sizeof(len_net), 1, f) != 1 ||
+        fwrite(&now, sizeof(now), 1, f) != 1 ||
+        fwrite(data, len, 1, f) != 1) {
+        printf("Failed to write queue entry (disk full?)\n");
+        fclose(f);
+        return;
+    }
     fclose(f);
 
     char hex_short[17];
@@ -431,6 +434,21 @@ static void deliver_queued_messages(const node_id_t *peer_id,
 }
 
 /* Cleanup expired queue files */
+/* Validate queue filename: must be 64 hex chars + ".queue" */
+static int is_valid_queue_filename(const char *name)
+{
+    size_t len = strlen(name);
+    if (len != 70) return 0;  /* 64 hex + 6 for ".queue" */
+    if (strcmp(name + 64, ".queue") != 0) return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void cleanup_expired_queues(void)
 {
 #ifndef _WIN32
@@ -442,6 +460,11 @@ static void cleanup_expired_queues(void)
 
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
+
+        /* Validate filename to prevent path traversal */
+        if (!is_valid_queue_filename(entry->d_name)) {
+            continue;
+        }
 
         char path[256];
         snprintf(path, sizeof(path), "%s/%s", QUEUE_DIR, entry->d_name);
@@ -821,6 +844,12 @@ static void handle_relay_packet(const struct sockaddr_in *from,
     uint16_t data_len;
     memcpy(&data_len, data + 1 + NODE_ID_LEN, 2);
     data_len = ntohs(data_len);
+
+    /* Validate data_len against max allowed */
+    if (data_len > MAX_RELAY_DATA) {
+        printf("Relay packet data_len %u exceeds max %d\n", data_len, MAX_RELAY_DATA);
+        return;
+    }
 
     if (len < 1 + NODE_ID_LEN + 2 + data_len) {
         return;
