@@ -34,10 +34,12 @@ typedef SOCKET socket_t;
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 typedef int socket_t;
 #define SOCKET_INVALID (-1)
 #define close_socket close
@@ -50,6 +52,12 @@ typedef int socket_t;
 #define PEER_TIMEOUT_SEC 300  /* 5 minutes */
 #define MAX_PEERS_PER_LIST 10
 #define MAX_RELAY_DATA 1400
+
+/* Offline message queue configuration */
+#define QUEUE_DIR "/var/lib/cyxchat/queue"
+#define QUEUE_TTL_SEC (72 * 3600)        /* 72 hours */
+#define QUEUE_MAX_SIZE (1 * 1024 * 1024) /* 1 MB per peer */
+#define QUEUE_MSG_HEADER_SIZE 42         /* 32 + 2 + 8 */
 
 /* Bootstrap protocol message types (0xF0-0xF3) */
 #define CYXWIZ_UDP_REGISTER         0xF0
@@ -192,6 +200,18 @@ static peer_t *find_peer(const node_id_t *id)
     return NULL;
 }
 
+static peer_t *find_peer_by_addr(const struct sockaddr_in *addr)
+{
+    for (size_t i = 0; i < MAX_PEERS; i++) {
+        if (g_peers[i].active &&
+            g_peers[i].addr.ip == addr->sin_addr.s_addr &&
+            g_peers[i].addr.port == addr->sin_port) {
+            return &g_peers[i];
+        }
+    }
+    return NULL;
+}
+
 /* Add or update peer */
 static peer_t *add_or_update_peer(const node_id_t *id, const endpoint_t *addr)
 {
@@ -262,6 +282,181 @@ static void node_id_to_hex(const node_id_t *id, char *out)
         out[i * 2 + 1] = hex[id->bytes[i] & 0x0F];
     }
     out[16] = '\0';
+}
+
+/* Convert full node ID to hex string (64 chars + null) */
+static void node_id_to_hex_full(const node_id_t *id, char *out)
+{
+    const char *hex = "0123456789abcdef";
+    for (int i = 0; i < NODE_ID_LEN; i++) {
+        out[i * 2] = hex[(id->bytes[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[id->bytes[i] & 0x0F];
+    }
+    out[NODE_ID_LEN * 2] = '\0';
+}
+
+/* ============ Offline Message Queue ============ */
+
+/* Initialize queue directory */
+static void init_queue_dir(void)
+{
+#ifndef _WIN32
+    mkdir(QUEUE_DIR, 0755);
+#endif
+}
+
+/* Queue a message for an offline peer */
+static void queue_message(const node_id_t *to_id,
+                          const node_id_t *from_id,
+                          const uint8_t *data, uint16_t len)
+{
+#ifndef _WIN32
+    char hex[65];
+    node_id_to_hex_full(to_id, hex);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.queue", QUEUE_DIR, hex);
+
+    /* Check file size limit */
+    struct stat st;
+    if (stat(path, &st) == 0 && (size_t)(st.st_size + len + QUEUE_MSG_HEADER_SIZE) > QUEUE_MAX_SIZE) {
+        char hex_short[17];
+        node_id_to_hex(to_id, hex_short);
+        printf("Queue full for peer %s..., dropping message\n", hex_short);
+        return;
+    }
+
+    FILE *f = fopen(path, "ab");
+    if (!f) {
+        printf("Failed to open queue file: %s\n", path);
+        return;
+    }
+
+    /* Write header: from_id(32) + len(2) + timestamp(8) */
+    time_t now = time(NULL);
+    uint16_t len_net = htons(len);
+
+    fwrite(from_id->bytes, NODE_ID_LEN, 1, f);
+    fwrite(&len_net, sizeof(len_net), 1, f);
+    fwrite(&now, sizeof(now), 1, f);
+
+    /* Write payload */
+    fwrite(data, len, 1, f);
+    fclose(f);
+
+    char hex_short[17];
+    node_id_to_hex(to_id, hex_short);
+    printf("Queued %d bytes for offline peer %s...\n", len, hex_short);
+#else
+    (void)to_id; (void)from_id; (void)data; (void)len;
+#endif
+}
+
+/* Deliver queued messages to a peer that just came online */
+static void deliver_queued_messages(const node_id_t *peer_id,
+                                     const endpoint_t *addr)
+{
+#ifndef _WIN32
+    char hex[65];
+    node_id_to_hex_full(peer_id, hex);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.queue", QUEUE_DIR, hex);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return;  /* No queue */
+
+    time_t now = time(NULL);
+    int delivered = 0, expired = 0;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = addr->ip;
+    dest.sin_port = addr->port;
+
+    while (!feof(f)) {
+        /* Read header */
+        node_id_t from_id;
+        uint16_t len_net;
+        time_t queued_at;
+
+        if (fread(&from_id, NODE_ID_LEN, 1, f) != 1) break;
+        if (fread(&len_net, sizeof(len_net), 1, f) != 1) break;
+        if (fread(&queued_at, sizeof(queued_at), 1, f) != 1) break;
+
+        uint16_t len = ntohs(len_net);
+        if (len > MAX_RELAY_DATA) {
+            /* Corrupted entry, abort */
+            break;
+        }
+
+        uint8_t *data = malloc(len);
+        if (!data) break;
+
+        if (fread(data, len, 1, f) != 1) {
+            free(data);
+            break;
+        }
+
+        /* Check TTL */
+        if (now - queued_at > QUEUE_TTL_SEC) {
+            expired++;
+            free(data);
+            continue;
+        }
+
+        /* Deliver */
+        sendto(g_socket, (char *)data, len, 0,
+               (struct sockaddr *)&dest, sizeof(dest));
+
+        delivered++;
+        free(data);
+    }
+
+    fclose(f);
+
+    /* Delete queue file after delivery */
+    unlink(path);
+
+    if (delivered > 0 || expired > 0) {
+        char hex_short[17];
+        node_id_to_hex(peer_id, hex_short);
+        printf("Delivered %d queued messages to %s... (%d expired)\n",
+               delivered, hex_short, expired);
+    }
+#else
+    (void)peer_id; (void)addr;
+#endif
+}
+
+/* Cleanup expired queue files */
+static void cleanup_expired_queues(void)
+{
+#ifndef _WIN32
+    DIR *dir = opendir(QUEUE_DIR);
+    if (!dir) return;
+
+    time_t now = time(NULL);
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", QUEUE_DIR, entry->d_name);
+
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            /* Delete if file older than TTL */
+            if (now - st.st_mtime > QUEUE_TTL_SEC) {
+                unlink(path);
+                printf("Expired queue file: %s\n", entry->d_name);
+            }
+        }
+    }
+    closedir(dir);
+#endif
 }
 
 /* Send to peer */
@@ -345,6 +540,9 @@ static void handle_register(const struct sockaddr_in *from, const uint8_t *data,
         printf("Sent %zu peers to %s:%d\n", entry_count, ip_str, ntohs(addr.port));
         fflush(stdout);
     }
+
+    /* Deliver any queued messages for this peer */
+    deliver_queued_messages(&msg->node_id, &addr);
 }
 
 /* Handle connection request relay */
@@ -630,15 +828,22 @@ static void handle_relay_packet(const struct sockaddr_in *from,
 
     /* Find target peer */
     peer_t *target = find_peer(to_id);
+    const uint8_t *payload = data + 1 + NODE_ID_LEN + 2;
+
     if (target == NULL) {
-        char hex_id[17];
-        node_id_to_hex(to_id, hex_id);
-        printf("Relay packet: target %s... not found\n", hex_id);
+        /* Target offline — queue for later delivery */
+        peer_t *sender = find_peer_by_addr(from);
+        node_id_t from_id;
+        if (sender != NULL) {
+            memcpy(&from_id, &sender->id, sizeof(node_id_t));
+        } else {
+            memset(&from_id, 0, sizeof(node_id_t));
+        }
+        queue_message(to_id, &from_id, payload, data_len);
         return;
     }
 
     /* Forward the data portion to target peer */
-    const uint8_t *payload = data + 1 + NODE_ID_LEN + 2;
     send_to_peer(target, payload, data_len);
 
     g_bytes_relayed += data_len;
@@ -784,9 +989,13 @@ int main(int argc, char *argv[])
     /* Initialize peer table */
     memset(g_peers, 0, sizeof(g_peers));
 
+    /* Initialize offline message queue directory */
+    init_queue_dir();
+
     /* Main loop */
     uint8_t buf[2048];
     time_t last_cleanup = time(NULL);
+    time_t last_queue_cleanup = time(NULL);
 
     while (g_running) {
         /* Use select for timeout */
@@ -815,6 +1024,12 @@ int main(int argc, char *argv[])
         if (now - last_cleanup > 30) {
             cleanup_expired_peers();
             last_cleanup = now;
+        }
+
+        /* Hourly queue cleanup */
+        if (now - last_queue_cleanup > 3600) {
+            cleanup_expired_queues();
+            last_queue_cleanup = now;
         }
     }
 
