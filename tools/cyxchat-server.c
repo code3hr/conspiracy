@@ -25,11 +25,17 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <direct.h>    /* _mkdir */
+#include <io.h>        /* _access, _unlink */
+#include <sys/stat.h>  /* _stat */
 #pragma comment(lib, "ws2_32.lib")
 typedef int socklen_t;
 typedef SOCKET socket_t;
 #define SOCKET_INVALID INVALID_SOCKET
 #define close_socket closesocket
+#define mkdir(path, mode) _mkdir(path)
+#define stat _stat
+#define unlink _unlink
 #else
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -50,12 +56,16 @@ typedef int socket_t;
 #define DEFAULT_PORT 7777
 #define MAX_PEERS 256
 #define NODE_ID_LEN 32
-#define PEER_TIMEOUT_SEC 300  /* 5 minutes */
+#define PEER_TIMEOUT_SEC 60  /* 1 minute */
 #define MAX_PEERS_PER_LIST 10
 #define MAX_RELAY_DATA 1400
 
 /* Offline message queue configuration */
+#ifdef _WIN32
+#define QUEUE_DIR "cyxchat_queue"  /* Relative to current directory on Windows */
+#else
 #define QUEUE_DIR "/var/lib/cyxchat/queue"
+#endif
 #define QUEUE_TTL_SEC (72 * 3600)        /* 72 hours */
 #define QUEUE_MAX_SIZE (1 * 1024 * 1024) /* 1 MB per peer */
 #define QUEUE_MSG_HEADER_SIZE 42         /* 32 + 2 + 8 */
@@ -69,7 +79,7 @@ typedef int socket_t;
 #define CYXWIZ_UDP_RELAY_ACK        0xF9    /* Client ACK for relayed packet */
 
 /* Reliable delivery configuration */
-#define DELIVERY_ACK_TIMEOUT_MS     2000    /* 2 seconds to wait for ACK */
+#define DELIVERY_ACK_TIMEOUT_MS     10000   /* 10 seconds to wait for ACK */
 #define MAX_DELIVERY_FAILURES       3       /* Failures before marking peer offline */
 #define MAX_PENDING_DELIVERIES      256     /* Max concurrent pending deliveries */
 
@@ -434,26 +444,40 @@ static void process_pending_deliveries(void)
             /* Timeout - no ACK received */
             char hex_id[17];
             node_id_to_hex(&pd->to_id, hex_id);
-            printf("Delivery timeout for %s... - queuing message\n", hex_id);
 
-            /* Increment failure count for peer */
             peer_t *peer = find_peer(&pd->to_id);
-            if (peer) {
+            if (peer && peer->active) {
+                /* Peer registered but not responding - track failures */
                 peer->delivery_failures++;
                 if (peer->delivery_failures >= MAX_DELIVERY_FAILURES) {
-                    printf("Peer %s... marked offline after %d failures\n",
+                    /* Too many failures - mark offline */
+                    printf("Peer %s... offline after %d failures\n",
                            hex_id, peer->delivery_failures);
                     peer->active = 0;
                     if (g_peer_count > 0) g_peer_count--;
+
+                    /* Queue ALL pending messages for this peer */
+                    int queued = 0;
+                    for (size_t j = 0; j < MAX_PENDING_DELIVERIES; j++) {
+                        pending_delivery_t *pj = &g_pending[j];
+                        if (pj->active && memcmp(&pj->to_id, &pd->to_id, sizeof(node_id_t)) == 0) {
+                            queue_message(&pj->to_id, &pj->from_id, pj->data, pj->data_len);
+                            g_messages_queued_on_timeout++;
+                            remove_pending(pj);
+                            queued++;
+                        }
+                    }
+                    printf("Queued %d pending messages for %s...\n", queued, hex_id);
+                    continue;  /* Already handled, skip to next */
                 }
+                remove_pending(pd);
+            } else {
+                /* Peer not registered - queue immediately */
+                printf("Timeout for %s... (not registered) - queuing\n", hex_id);
+                queue_message(&pd->to_id, &pd->from_id, pd->data, pd->data_len);
+                g_messages_queued_on_timeout++;
+                remove_pending(pd);
             }
-
-            /* Queue the message for later delivery */
-            queue_message(&pd->to_id, &pd->from_id, pd->data, pd->data_len);
-            g_messages_queued_on_timeout++;
-
-            /* Remove from pending */
-            remove_pending(pd);
         }
     }
 }
@@ -463,9 +487,7 @@ static void process_pending_deliveries(void)
 /* Initialize queue directory */
 static void init_queue_dir(void)
 {
-#ifndef _WIN32
-    mkdir(QUEUE_DIR, 0755);
-#endif
+    mkdir(QUEUE_DIR, 0755);  /* On Windows, mode is ignored by _mkdir */
 }
 
 /* Queue a message for an offline peer */
@@ -473,7 +495,6 @@ static void queue_message(const node_id_t *to_id,
                           const node_id_t *from_id,
                           const uint8_t *data, uint16_t len)
 {
-#ifndef _WIN32
     char hex[65];
     node_id_to_hex_full(to_id, hex);
 
@@ -515,16 +536,12 @@ static void queue_message(const node_id_t *to_id,
     node_id_to_hex(from_id, from_hex);
     printf("Queued %d bytes for offline peer %s... (from %s...)\n",
            len, to_hex, from_hex);
-#else
-    (void)to_id; (void)from_id; (void)data; (void)len;
-#endif
 }
 
 /* Deliver queued messages to a peer that just came online */
 static void deliver_queued_messages(const node_id_t *peer_id,
                                      const endpoint_t *addr)
 {
-#ifndef _WIN32
     char hex[65];
     node_id_to_hex_full(peer_id, hex);
 
@@ -593,9 +610,6 @@ static void deliver_queued_messages(const node_id_t *peer_id,
         printf("Delivered %d queued messages to %s... (%d expired)\n",
                delivered, hex_short, expired);
     }
-#else
-    (void)peer_id; (void)addr;
-#endif
 }
 
 /* Cleanup expired queue files */
@@ -616,11 +630,44 @@ static int is_valid_queue_filename(const char *name)
 
 static void cleanup_expired_queues(void)
 {
-#ifndef _WIN32
+    time_t now = time(NULL);
+
+#ifdef _WIN32
+    /* Windows: Use FindFirstFile/FindNextFile */
+    char search_path[256];
+    snprintf(search_path, sizeof(search_path), "%s\\*.queue", QUEUE_DIR);
+
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA(search_path, &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+
+        /* Validate filename to prevent path traversal */
+        if (!is_valid_queue_filename(ffd.cFileName)) {
+            continue;
+        }
+
+        char path[256];
+        snprintf(path, sizeof(path), "%s\\%s", QUEUE_DIR, ffd.cFileName);
+
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            /* Delete if file older than TTL */
+            if (now - st.st_mtime > QUEUE_TTL_SEC) {
+                unlink(path);
+                printf("Expired queue file: %s\n", ffd.cFileName);
+            }
+        }
+    } while (FindNextFileA(hFind, &ffd) != 0);
+
+    FindClose(hFind);
+#else
+    /* POSIX: Use opendir/readdir */
     DIR *dir = opendir(QUEUE_DIR);
     if (!dir) return;
 
-    time_t now = time(NULL);
     struct dirent *entry;
 
     while ((entry = readdir(dir)) != NULL) {
@@ -755,7 +802,6 @@ static void handle_register(const struct sockaddr_in *from, const uint8_t *data,
     }
 
     /* Schedule delayed delivery of queued messages (allow key exchange to complete first) */
-#ifndef _WIN32
     if (peer != NULL) {
         char queue_path[256];
         char hex[65];
@@ -770,9 +816,6 @@ static void handle_register(const struct sockaddr_in *from, const uint8_t *data,
             fflush(stdout);
         }
     }
-#else
-    (void)peer;  /* Queue not supported on Windows yet */
-#endif
 }
 
 /* Handle connection request relay */
@@ -1155,33 +1198,22 @@ static void handle_relay_packet(const struct sockaddr_in *from,
     /* Find target peer */
     peer_t *target = find_peer(to_id);
 
-    if (target == NULL) {
-        /* Target definitely offline — queue immediately */
+    char hex_id[17];
+    node_id_to_hex(to_id, hex_id);
+
+    if (target == NULL || !target->active) {
+        /* Target offline — queue immediately */
         queue_message(to_id, &from_id, payload, data_len);
         return;
     }
 
-    /* Target is registered, but might have disconnected since */
-    /* Compute message hash for tracking */
-    uint8_t msg_hash[16];
-    compute_msg_hash(payload, data_len, to_id, msg_hash);
-
-    /* Add to pending deliveries for ACK tracking */
-    int slot = add_pending_delivery(to_id, &from_id, payload, data_len, msg_hash);
-    if (slot < 0) {
-        /* Pending queue full - send directly and hope for the best */
-        printf("Warning: pending queue full, sending without ACK tracking\n");
-    }
-
-    /* Forward the data portion to target peer */
+    /* Target is online — relay instantly (no ACK overhead) */
     send_to_peer(target, payload, data_len);
 
     g_bytes_relayed += data_len;
     g_messages_relayed++;
 
-    char hex_id[17];
-    node_id_to_hex(to_id, hex_id);
-    printf("Relayed %u bytes to %s... (pending ACK)\n", data_len, hex_id);
+    printf("Relayed %u bytes to %s...\n", data_len, hex_id);
     fflush(stdout);
 }
 
@@ -1363,8 +1395,8 @@ int main(int argc, char *argv[])
         /* Process scheduled queue deliveries */
         process_scheduled_deliveries();
 
-        /* Process pending deliveries - check for ACK timeouts */
-        process_pending_deliveries();
+        /* Note: Pending delivery tracking removed for simplicity.
+         * Relay is now instant - queue only when peer not registered. */
 
         /* Hourly queue cleanup */
         if (now - last_queue_cleanup > 3600) {
