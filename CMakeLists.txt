@@ -17,6 +17,7 @@ option(CYXWIZ_BUILD_FUZZ "Build fuzz testing targets (requires clang)" OFF)
 option(CYXWIZ_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
 # UDP is the only transport (WiFi Direct, Bluetooth, LoRa removed)
 option(CYXWIZ_HAS_CRYPTO "Enable crypto module (requires libsodium)" ON)
+option(CYXWIZ_ENABLE_UPNP "Enable UPnP/NAT-PMP port mapping" ON)
 
 # Sanitizers (ASan + UBSan)
 if(CYXWIZ_ENABLE_SANITIZERS)
@@ -58,6 +59,8 @@ if(CYXWIZ_HAS_CRYPTO)
     if(NOT SODIUM_FOUND)
         find_path(SODIUM_INCLUDE_DIR sodium.h
             PATHS
+                "${CMAKE_SOURCE_DIR}/libsodium/libsodium/include"
+                "${CMAKE_SOURCE_DIR}/libsodium/include"
                 "$ENV{SODIUM_ROOT}/include"
                 "$ENV{PROGRAMFILES}/libsodium/include"
                 "C:/libsodium/include"
@@ -66,6 +69,9 @@ if(CYXWIZ_HAS_CRYPTO)
         find_library(SODIUM_LIBRARY
             NAMES sodium libsodium
             PATHS
+                "${CMAKE_SOURCE_DIR}/libsodium/libsodium/x64/Release/v143/static"
+                "${CMAKE_SOURCE_DIR}/libsodium/libsodium/x64/Debug/v143/static"
+                "${CMAKE_SOURCE_DIR}/libsodium/x64/Release/v143/static"
                 "$ENV{SODIUM_ROOT}/lib"
                 "$ENV{PROGRAMFILES}/libsodium/lib"
                 "C:/libsodium/lib"
@@ -86,6 +92,67 @@ if(CYXWIZ_HAS_CRYPTO)
     endif()
 endif()
 
+# Find miniupnpc (UPnP/NAT-PMP support)
+if(CYXWIZ_ENABLE_UPNP)
+    # Try vcpkg first
+    find_package(miniupnpc QUIET CONFIG)
+    if(miniupnpc_FOUND)
+        set(UPNP_FOUND TRUE)
+        set(UPNP_TARGET miniupnpc::miniupnpc)
+        message(STATUS "Found miniupnpc via vcpkg")
+    endif()
+
+    # Try pkg-config (Linux/macOS)
+    if(NOT UPNP_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(MINIUPNPC QUIET miniupnpc)
+            if(MINIUPNPC_FOUND)
+                set(UPNP_FOUND TRUE)
+                set(UPNP_INCLUDE_DIRS ${MINIUPNPC_INCLUDE_DIRS})
+                set(UPNP_LIBRARIES ${MINIUPNPC_LIBRARIES})
+                if(MINIUPNPC_LIBRARY_DIRS)
+                    link_directories(${MINIUPNPC_LIBRARY_DIRS})
+                endif()
+                message(STATUS "Found miniupnpc via pkg-config")
+            endif()
+        endif()
+    endif()
+
+    # Manual fallback
+    if(NOT UPNP_FOUND)
+        find_path(UPNP_INCLUDE_DIR miniupnpc/miniupnpc.h
+            PATHS
+                "$ENV{MINIUPNPC_ROOT}/include"
+                "C:/vcpkg/installed/x64-windows/include"
+                "/usr/local/include"
+                "/usr/include"
+        )
+        find_library(UPNP_LIBRARY
+            NAMES miniupnpc
+            PATHS
+                "$ENV{MINIUPNPC_ROOT}/lib"
+                "C:/vcpkg/installed/x64-windows/lib"
+                "/usr/local/lib"
+                "/usr/lib"
+        )
+        if(UPNP_INCLUDE_DIR AND UPNP_LIBRARY)
+            set(UPNP_FOUND TRUE)
+            set(UPNP_INCLUDE_DIRS ${UPNP_INCLUDE_DIR})
+            set(UPNP_LIBRARIES ${UPNP_LIBRARY})
+            message(STATUS "Found miniupnpc: ${UPNP_LIBRARY}")
+        endif()
+    endif()
+
+    if(NOT UPNP_FOUND)
+        message(WARNING "miniupnpc not found, disabling UPnP/NAT-PMP support")
+        set(CYXWIZ_ENABLE_UPNP OFF)
+    else()
+        add_compile_definitions(CYXWIZ_HAS_UPNP=1)
+        message(STATUS "UPnP/NAT-PMP support enabled")
+    endif()
+endif()
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
@@ -102,6 +169,11 @@ add_compile_definitions(CYXWIZ_HAS_UDP=1)
 if(WIN32)
     # Link Winsock on Windows
     list(APPEND CYXWIZ_PLATFORM_LIBS ws2_32)
+endif()
+
+# UPnP/NAT-PMP support
+if(CYXWIZ_ENABLE_UPNP)
+    list(APPEND CYXWIZ_SOURCES src/transport/upnp.c)
 endif()
 
 # Pluggable transports (traffic obfuscation)
@@ -168,6 +240,18 @@ if(CYXWIZ_PLATFORM_LIBS)
     target_link_libraries(cyxwiz PUBLIC ${CYXWIZ_PLATFORM_LIBS})
 endif()
 
+# Link miniupnpc if UPnP is enabled
+if(CYXWIZ_ENABLE_UPNP)
+    if(UPNP_INCLUDE_DIRS)
+        target_include_directories(cyxwiz PUBLIC ${UPNP_INCLUDE_DIRS})
+    endif()
+    if(UPNP_TARGET)
+        target_link_libraries(cyxwiz PUBLIC ${UPNP_TARGET})
+    elseif(UPNP_LIBRARIES)
+        target_link_libraries(cyxwiz PUBLIC ${UPNP_LIBRARIES})
+    endif()
+endif()
+
 # Daemon executable
 add_executable(cyxwizd daemon/main.c)
 target_link_libraries(cyxwizd PRIVATE cyxwiz)
@@ -179,6 +263,15 @@ if(WIN32)
 endif()
 # Combined bootstrap + relay server for CyxChat
 add_executable(cyxchat-server tools/cyxchat-server.c)
+if(CYXWIZ_HAS_CRYPTO)
+    if(SODIUM_INCLUDE_DIRS)
+        target_include_directories(cyxchat-server PRIVATE ${SODIUM_INCLUDE_DIRS})
+    endif()
+    target_link_libraries(cyxchat-server PRIVATE ${SODIUM_TARGET})
+    if(WIN32)
+        target_compile_definitions(cyxchat-server PRIVATE SODIUM_STATIC=1)
+    endif()
+endif()
 if(WIN32)
     target_link_libraries(cyxchat-server PRIVATE ws2_32)
 endif()

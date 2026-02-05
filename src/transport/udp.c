@@ -14,6 +14,7 @@
 #include "cyxwiz/transport.h"
 #include "cyxwiz/memory.h"
 #include "cyxwiz/log.h"
+#include "cyxwiz/upnp.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -160,6 +161,13 @@ typedef struct {
 
     /* Bootstrap status */
     bool bootstrap_ack_received;
+
+#ifdef CYXWIZ_HAS_UPNP
+    /* UPnP/NAT-PMP state */
+    cyxwiz_upnp_state_t *upnp;
+    bool upnp_attempted;
+    bool upnp_success;
+#endif
 } cyxwiz_udp_state_t;
 
 /* Protocol message structures - ALL packed for network wire format.
@@ -1159,6 +1167,23 @@ static cyxwiz_error_t udp_init(cyxwiz_transport_t *transport)
     /* Start STUN discovery */
     stun_send_request(state);
 
+#ifdef CYXWIZ_HAS_UPNP
+    /* Try UPnP/NAT-PMP port mapping */
+    state->upnp_attempted = true;
+    if (cyxwiz_upnp_create(&state->upnp) == CYXWIZ_OK) {
+        if (cyxwiz_upnp_discover(state->upnp) == CYXWIZ_OK) {
+            if (cyxwiz_upnp_add_mapping(state->upnp, state->local_port, 0,
+                                        CYXWIZ_UPNP_DEFAULT_LEASE_SEC) == CYXWIZ_OK) {
+                state->upnp_success = true;
+                CYXWIZ_INFO("UPnP: Port mapping established for port %d", state->local_port);
+            }
+        }
+    }
+    if (!state->upnp_success) {
+        CYXWIZ_INFO("UPnP: Not available, falling back to hole punching");
+    }
+#endif
+
     return CYXWIZ_OK;
 }
 
@@ -1168,6 +1193,14 @@ static cyxwiz_error_t udp_shutdown(cyxwiz_transport_t *transport)
     if (state == NULL) {
         return CYXWIZ_OK;
     }
+
+#ifdef CYXWIZ_HAS_UPNP
+    /* Remove UPnP port mapping and cleanup */
+    if (state->upnp) {
+        cyxwiz_upnp_destroy(state->upnp);
+        state->upnp = NULL;
+    }
+#endif
 
     if (state->socket_fd != SOCKET_INVALID) {
         close_socket(state->socket_fd);
@@ -1292,22 +1325,8 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
     /* Unicast: Find peer endpoint */
     cyxwiz_udp_peer_t *peer = find_peer(state, to);
     if (peer != NULL && peer->connected) {
-        /* Send direct to connected peer */
-        cyxwiz_error_t err = send_data_to_peer(transport, state, peer, data, len);
-
-        /* Also send via relay as backup — direct path may not actually work
-         * (NAT hairpinning, asymmetric NAT, stale connection state).
-         * Receiver deduplicates via msg_id. */
-        if (state->bootstrap_count > 0) {
-            size_t msg_len = CYXWIZ_UDP_DATA_HDR_SIZE + len;
-            uint8_t msg[CYXWIZ_UDP_MAX_PACKET_SIZE + 64];
-            cyxwiz_udp_data_t *pkt = (cyxwiz_udp_data_t *)msg;
-            pkt->type = CYXWIZ_UDP_DATA;
-            memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
-            memcpy(pkt->data, data, len);
-            send_via_relay(state, to, msg, msg_len);
-        }
-        return err;
+        /* Send direct to connected peer - P2P path established */
+        return send_data_to_peer(transport, state, peer, data, len);
     }
 
     /* Peer not connected - check pending connections and send directly */
@@ -1332,22 +1351,9 @@ static cyxwiz_error_t udp_send(cyxwiz_transport_t *transport,
             memcpy(&pkt->from, &transport->local_id, sizeof(cyxwiz_node_id_t));
             memcpy(pkt->data, data, len);
 
-            /* Send via direct endpoint */
+            /* Send via direct endpoint only - hole punch in progress */
             CYXWIZ_INFO("Sending to pending peer via direct endpoint");
-            cyxwiz_error_t err = send_to_endpoint(state, &state->pending[i].addr, msg, msg_len);
-
-            /* Also send via relay as backup (parallel approach) */
-            if (state->bootstrap_count > 0) {
-                uint64_t now = get_time_ms();
-                /* Rate limit: relay at most once per second per pending peer */
-                if (now - state->pending[i].last_relay > 1000) {
-                    CYXWIZ_INFO("Also sending via relay as backup");
-                    send_via_relay(state, to, msg, msg_len);
-                    state->pending[i].last_relay = now;
-                }
-            }
-
-            return err;
+            return send_to_endpoint(state, &state->pending[i].addr, msg, msg_len);
         }
     }
 
@@ -1413,6 +1419,19 @@ static cyxwiz_error_t udp_poll(cyxwiz_transport_t *transport, uint32_t timeout_m
     if (now - state->last_bootstrap_register > CYXWIZ_BOOTSTRAP_REGISTER_INTERVAL_MS) {
         bootstrap_register(transport, state);
     }
+
+#ifdef CYXWIZ_HAS_UPNP
+    /* Renew UPnP lease if needed (5 minutes before expiry) */
+    if (state->upnp_success && state->upnp) {
+        if (cyxwiz_upnp_needs_renewal(state->upnp, now, 0)) {
+            CYXWIZ_INFO("UPnP: Renewing port mapping lease");
+            if (cyxwiz_upnp_renew(state->upnp) != CYXWIZ_OK) {
+                CYXWIZ_WARN("UPnP: Lease renewal failed");
+                state->upnp_success = false;
+            }
+        }
+    }
+#endif
 
     /* Use select() for timeout */
     fd_set read_fds;
@@ -1502,3 +1521,36 @@ bool cyxwiz_udp_is_peer_direct(void *driver_data, const cyxwiz_node_id_t *peer_i
     cyxwiz_udp_peer_t *peer = find_peer(state, peer_id);
     return (peer != NULL && peer->connected);
 }
+
+#ifdef CYXWIZ_HAS_UPNP
+/* Get UPnP status from UDP transport */
+cyxwiz_error_t cyxwiz_udp_get_upnp_status(void *driver_data, cyxwiz_upnp_status_t *status)
+{
+    cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
+    if (state == NULL || status == NULL) {
+        return CYXWIZ_ERR_NULL;
+    }
+
+    memset(status, 0, sizeof(*status));
+
+    if (!state->upnp_attempted) {
+        return CYXWIZ_OK;  /* UPnP not attempted yet */
+    }
+
+    if (state->upnp) {
+        return cyxwiz_upnp_get_status(state->upnp, status);
+    }
+
+    return CYXWIZ_OK;
+}
+
+/* Check if UPnP port mapping is active */
+bool cyxwiz_udp_is_upnp_active(void *driver_data)
+{
+    cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
+    if (state == NULL) {
+        return false;
+    }
+    return state->upnp_success;
+}
+#endif
