@@ -142,19 +142,25 @@ cyxwiz_error_t cyxwiz_upnp_discover(cyxwiz_upnp_state_t *state) {
 
     state->discovered = true;
 
-    /* Get external IP address */
-    ret = UPNP_GetExternalIPAddress(
-        state->urls.controlURL,
-        state->data.first.servicetype,
-        state->wan_addr
-    );
+    /* Detect if this is NAT-PMP (ret == 3 indicates NAT-PMP) */
+    state->is_natpmp = (ret == 3);
 
-    if (ret != UPNPCOMMAND_SUCCESS) {
-        CYXWIZ_WARN("UPnP: Failed to get external IP (error %d)", ret);
-        /* Continue anyway - mapping might still work */
+    /* Get external IP address if not already populated by UPNP_GetValidIGD */
+    if (state->wan_addr[0] == '\0') {
+        ret = UPNP_GetExternalIPAddress(
+            state->urls.controlURL,
+            state->data.first.servicetype,
+            state->wan_addr
+        );
+
+        if (ret != UPNPCOMMAND_SUCCESS) {
+            CYXWIZ_WARN("UPnP: Failed to get external IP (error %d)", ret);
+            /* Continue anyway - mapping might still work */
+        }
     }
 
-    CYXWIZ_INFO("UPnP: Found IGD, LAN=%s, WAN=%s",
+    CYXWIZ_INFO("UPnP: Found %s gateway, LAN=%s, WAN=%s",
+                state->is_natpmp ? "NAT-PMP" : "IGD",
                 state->lan_addr, state->wan_addr);
 
     return CYXWIZ_OK;
