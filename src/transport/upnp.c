@@ -4,13 +4,25 @@
  */
 
 #include "cyxwiz/upnp.h"
+#include "cyxwiz/types.h"
 #include "cyxwiz/log.h"
 
 #ifdef CYXWIZ_HAS_UPNP
 
+/* Suppress zero-length array warning from miniupnpc headers */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4200)
+#endif
+
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
 #include <miniupnpc/upnperrors.h>
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -18,8 +30,12 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+/* Use safe string copy on Windows */
+#define SAFE_STRCPY(dst, src, n) strncpy_s((dst), (n), (src), _TRUNCATE)
 #else
 #include <sys/time.h>
+/* Use standard strncpy on other platforms */
+#define SAFE_STRCPY(dst, src, n) do { strncpy((dst), (src), (n) - 1); (dst)[(n) - 1] = '\0'; } while(0)
 #endif
 
 /* Internal state structure */
@@ -50,12 +66,12 @@ static uint64_t get_time_ms(void) {
 
 cyxwiz_error_t cyxwiz_upnp_create(cyxwiz_upnp_state_t **state) {
     if (!state) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     cyxwiz_upnp_state_t *s = calloc(1, sizeof(cyxwiz_upnp_state_t));
     if (!s) {
-        return CYXWIZ_ERR_MEMORY;
+        return CYXWIZ_ERR_NOMEM;
     }
 
     *state = s;
@@ -82,7 +98,7 @@ void cyxwiz_upnp_destroy(cyxwiz_upnp_state_t *state) {
 
 cyxwiz_error_t cyxwiz_upnp_discover(cyxwiz_upnp_state_t *state) {
     if (!state) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     int error = 0;
@@ -103,23 +119,25 @@ cyxwiz_error_t cyxwiz_upnp_discover(cyxwiz_upnp_state_t *state) {
 
     if (!devlist) {
         CYXWIZ_WARN("UPnP: No devices found (error %d)", error);
-        return CYXWIZ_ERR_NOT_FOUND;
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
     }
 
-    /* Find a valid IGD */
+    /* Find a valid IGD (miniupnpc 2.x API with WAN address output) */
     int ret = UPNP_GetValidIGD(
         devlist,
         &state->urls,
         &state->data,
         state->lan_addr,
-        sizeof(state->lan_addr)
+        sizeof(state->lan_addr),
+        state->wan_addr,
+        sizeof(state->wan_addr)
     );
 
     freeUPNPDevlist(devlist);
 
     if (ret == 0) {
         CYXWIZ_WARN("UPnP: No valid IGD found");
-        return CYXWIZ_ERR_NOT_FOUND;
+        return CYXWIZ_ERR_PEER_NOT_FOUND;
     }
 
     state->discovered = true;
@@ -149,7 +167,7 @@ cyxwiz_error_t cyxwiz_upnp_add_mapping(
     uint32_t lease_seconds
 ) {
     if (!state) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     if (!state->discovered) {
@@ -193,7 +211,7 @@ cyxwiz_error_t cyxwiz_upnp_add_mapping(
     if (ret != UPNPCOMMAND_SUCCESS) {
         CYXWIZ_WARN("UPnP: Failed to add port mapping (error %d: %s)",
                     ret, strupnperror(ret));
-        return CYXWIZ_ERR_NETWORK;
+        return CYXWIZ_ERR_TRANSPORT;
     }
 
     state->internal_port = internal_port;
@@ -209,7 +227,7 @@ cyxwiz_error_t cyxwiz_upnp_add_mapping(
 
 cyxwiz_error_t cyxwiz_upnp_remove_mapping(cyxwiz_upnp_state_t *state) {
     if (!state) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     if (!state->mapping_active) {
@@ -264,7 +282,7 @@ bool cyxwiz_upnp_needs_renewal(
 
 cyxwiz_error_t cyxwiz_upnp_renew(cyxwiz_upnp_state_t *state) {
     if (!state) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     if (!state->mapping_active) {
@@ -288,7 +306,7 @@ cyxwiz_error_t cyxwiz_upnp_get_status(
     cyxwiz_upnp_status_t *status
 ) {
     if (!state || !status) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     memset(status, 0, sizeof(*status));
@@ -298,8 +316,8 @@ cyxwiz_error_t cyxwiz_upnp_get_status(
     status->is_natpmp = state->is_natpmp;
 
     if (state->discovered) {
-        strncpy(status->lan_addr, state->lan_addr, sizeof(status->lan_addr) - 1);
-        strncpy(status->wan_addr, state->wan_addr, sizeof(status->wan_addr) - 1);
+        SAFE_STRCPY(status->lan_addr, state->lan_addr, sizeof(status->lan_addr));
+        SAFE_STRCPY(status->wan_addr, state->wan_addr, sizeof(status->wan_addr));
     }
 
     if (state->mapping_active) {
@@ -318,15 +336,14 @@ cyxwiz_error_t cyxwiz_upnp_get_external_ip(
     size_t addr_len
 ) {
     if (!state || !addr || addr_len == 0) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     if (!state->discovered) {
         return CYXWIZ_ERR_INVALID;
     }
 
-    strncpy(addr, state->wan_addr, addr_len - 1);
-    addr[addr_len - 1] = '\0';
+    SAFE_STRCPY(addr, state->wan_addr, addr_len);
 
     return CYXWIZ_OK;
 }

@@ -125,6 +125,8 @@ if(CYXWIZ_ENABLE_UPNP)
             PATHS
                 "$ENV{MINIUPNPC_ROOT}/include"
                 "C:/vcpkg/installed/x64-windows/include"
+                "${CMAKE_SOURCE_DIR}/cyxchat/vcpkg/packages/miniupnpc_x64-windows/include"
+                "${CMAKE_SOURCE_DIR}/cyxchat/vcpkg/installed/x64-windows/include"
                 "/usr/local/include"
                 "/usr/include"
         )
@@ -133,6 +135,8 @@ if(CYXWIZ_ENABLE_UPNP)
             PATHS
                 "$ENV{MINIUPNPC_ROOT}/lib"
                 "C:/vcpkg/installed/x64-windows/lib"
+                "${CMAKE_SOURCE_DIR}/cyxchat/vcpkg/packages/miniupnpc_x64-windows/lib"
+                "${CMAKE_SOURCE_DIR}/cyxchat/vcpkg/installed/x64-windows/lib"
                 "/usr/local/lib"
                 "/usr/lib"
         )

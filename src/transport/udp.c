@@ -1528,7 +1528,7 @@ cyxwiz_error_t cyxwiz_udp_get_upnp_status(void *driver_data, cyxwiz_upnp_status_
 {
     cyxwiz_udp_state_t *state = (cyxwiz_udp_state_t *)driver_data;
     if (state == NULL || status == NULL) {
-        return CYXWIZ_ERR_NULL;
+        return CYXWIZ_ERR_INVALID;
     }
 
     memset(status, 0, sizeof(*status));
