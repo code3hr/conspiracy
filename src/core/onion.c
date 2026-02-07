@@ -489,6 +489,62 @@ cyxwiz_error_t cyxwiz_onion_get_pubkey(
     return CYXWIZ_OK;
 }
 
+cyxwiz_error_t cyxwiz_onion_get_secret(
+    cyxwiz_onion_ctx_t *ctx,
+    uint8_t *secret_out)
+{
+    if (ctx == NULL || secret_out == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+    memcpy(secret_out, ctx->secret_key, CYXWIZ_KEY_SIZE);
+    return CYXWIZ_OK;
+}
+
+cyxwiz_error_t cyxwiz_onion_set_keypair(
+    cyxwiz_onion_ctx_t *ctx,
+    const uint8_t *secret_key)
+{
+#ifndef CYXWIZ_HAS_CRYPTO
+    CYXWIZ_UNUSED(ctx);
+    CYXWIZ_UNUSED(secret_key);
+    return CYXWIZ_ERR_NOT_INITIALIZED;
+#else
+    if (ctx == NULL || secret_key == NULL) {
+        return CYXWIZ_ERR_INVALID;
+    }
+
+    /* Copy the secret key */
+    memcpy(ctx->secret_key, secret_key, CYXWIZ_KEY_SIZE);
+
+    /* Derive the public key from the secret key */
+    crypto_scalarmult_base(ctx->public_key, ctx->secret_key);
+
+    /* Clear existing peer keys since they were computed with the old keypair */
+    for (size_t i = 0; i < ctx->peer_key_count; i++) {
+        cyxwiz_secure_zero(ctx->peer_keys[i].shared_secret,
+                          sizeof(ctx->peer_keys[i].shared_secret));
+        ctx->peer_keys[i].valid = false;
+    }
+    ctx->peer_key_count = 0;
+
+    /* Clear existing circuits */
+    for (size_t i = 0; i < CYXWIZ_MAX_CIRCUITS; i++) {
+        if (ctx->circuits[i].active) {
+            cyxwiz_secure_zero(ctx->circuits[i].keys,
+                              sizeof(ctx->circuits[i].keys));
+            cyxwiz_secure_zero(ctx->circuits[i].ephemeral_pubs,
+                              sizeof(ctx->circuits[i].ephemeral_pubs));
+            ctx->circuits[i].active = false;
+        }
+    }
+    ctx->circuit_count = 0;
+
+    CYXWIZ_INFO("Restored X25519 keypair from storage - peer keys and circuits cleared");
+
+    return CYXWIZ_OK;
+#endif
+}
+
 cyxwiz_error_t cyxwiz_onion_add_peer_key(
     cyxwiz_onion_ctx_t *ctx,
     const cyxwiz_node_id_t *peer_id,

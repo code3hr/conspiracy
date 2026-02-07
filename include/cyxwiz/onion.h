@@ -307,6 +307,39 @@ cyxwiz_error_t cyxwiz_onion_get_pubkey(
 );
 
 /*
+ * Get this node's X25519 secret key for persistence
+ *
+ * Allows saving the key to storage so it can be restored on restart.
+ * This enables decryption of queued messages received while offline.
+ *
+ * WARNING: The secret key must be stored securely (encrypted storage).
+ *
+ * @param ctx           Onion context
+ * @param secret_out    Output buffer for secret key (32 bytes)
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_get_secret(
+    cyxwiz_onion_ctx_t *ctx,
+    uint8_t *secret_out
+);
+
+/*
+ * Set this node's X25519 keypair from a saved secret key
+ *
+ * Used to restore a previously saved keypair on restart.
+ * Derives the public key from the secret key.
+ * Clears any existing peer keys and circuits.
+ *
+ * @param ctx           Onion context
+ * @param secret_key    The secret key (32 bytes)
+ * @return              CYXWIZ_OK on success
+ */
+cyxwiz_error_t cyxwiz_onion_set_keypair(
+    cyxwiz_onion_ctx_t *ctx,
+    const uint8_t *secret_key
+);
+
+/*
  * Add a peer's public key (from ANNOUNCE message)
  * Computes and stores shared secret via X25519 DH
  */
