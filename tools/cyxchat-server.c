@@ -56,7 +56,7 @@ typedef int socket_t;
 #define DEFAULT_PORT 7777
 #define MAX_PEERS 256
 #define NODE_ID_LEN 32
-#define PEER_TIMEOUT_SEC 60  /* 1 minute */
+#define PEER_TIMEOUT_SEC 5   /* 5 seconds */
 #define MAX_PEERS_PER_LIST 10
 #define MAX_RELAY_DATA 1400
 
@@ -91,11 +91,15 @@ typedef int socket_t;
 #define CYXCHAT_RELAY_KEEPALIVE     0xE4
 #define CYXCHAT_RELAY_ERROR         0xE5
 
-/* Server registry message types (0xF5-0xFA) */
+/* Server registry message types (0xA0-0xA3) */
 #define CYXCHAT_MSG_SERVER_HEALTH_PING      0xA0
 #define CYXCHAT_MSG_SERVER_HEALTH_PONG      0xA1
 #define CYXCHAT_MSG_SERVER_CHALLENGE        0xA2
 #define CYXCHAT_MSG_SERVER_CHALLENGE_RESP   0xA3
+
+/* Presence query message types (0xB0-0xB1) */
+#define CYXCHAT_PRESENCE_QUERY              0xB0    /* Query if peer is online */
+#define CYXCHAT_PRESENCE_RESPONSE           0xB1    /* Response: online/offline */
 
 #define SERVER_KEY_FILE     "server_key.dat"
 #define SERVER_PUBKEY_SIZE  32
@@ -197,6 +201,20 @@ typedef struct {
     uint16_t data_len;
     /* data follows */
 } relay_data_header_t;
+
+/* Presence query: client asks if peer is online */
+typedef struct {
+    uint8_t type;           /* CYXCHAT_PRESENCE_QUERY */
+    node_id_t requester_id; /* Who is asking */
+    node_id_t peer_id;      /* Who to check */
+} PACKED presence_query_t;
+
+/* Presence response: server tells if peer is online */
+typedef struct {
+    uint8_t type;           /* CYXCHAT_PRESENCE_RESPONSE */
+    node_id_t peer_id;      /* The peer queried */
+    uint8_t online;         /* 1 = online, 0 = offline */
+} PACKED presence_response_t;
 
 #ifdef _MSC_VER
 #pragma pack(pop)
@@ -1217,6 +1235,34 @@ static void handle_relay_packet(const struct sockaddr_in *from,
     fflush(stdout);
 }
 
+/* Handle presence query - check if peer is online */
+static void handle_presence_query(const struct sockaddr_in *from, const uint8_t *data, size_t len)
+{
+    if (len < sizeof(presence_query_t)) {
+        return;
+    }
+
+    const presence_query_t *query = (const presence_query_t *)data;
+
+    char hex_id[17];
+    node_id_to_hex(&query->peer_id, hex_id);
+
+    /* Check if peer is registered and active */
+    peer_t *peer = find_peer(&query->peer_id);
+    uint8_t online = (peer != NULL && peer->active) ? 1 : 0;
+
+    /* Send response */
+    presence_response_t resp;
+    resp.type = CYXCHAT_PRESENCE_RESPONSE;
+    memcpy(&resp.peer_id, &query->peer_id, sizeof(node_id_t));
+    resp.online = online;
+
+    sendto(g_socket, (const char *)&resp, sizeof(resp), 0,
+           (const struct sockaddr *)from, sizeof(*from));
+
+    printf("Presence query: %s... = %s\n", hex_id, online ? "online" : "offline"); fflush(stdout);
+}
+
 /* Process received packet */
 static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, size_t len)
 {
@@ -1268,6 +1314,11 @@ static void handle_packet(const struct sockaddr_in *from, const uint8_t *data, s
 
         case CYXCHAT_MSG_SERVER_CHALLENGE:
             handle_challenge(from, data, len);
+            break;
+
+        /* Presence protocol */
+        case CYXCHAT_PRESENCE_QUERY:
+            handle_presence_query(from, data, len);
             break;
 
         default:
