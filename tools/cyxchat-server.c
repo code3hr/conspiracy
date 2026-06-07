@@ -56,7 +56,7 @@ typedef int socket_t;
 #define DEFAULT_PORT 7777
 #define MAX_PEERS 256
 #define NODE_ID_LEN 32
-#define PEER_TIMEOUT_SEC 5   /* 5 seconds */
+#define PEER_TIMEOUT_SEC 180 /* Must exceed mobile/background re-register interval */
 #define MAX_PEERS_PER_LIST 10
 #define MAX_RELAY_DATA 1400
 
@@ -75,6 +75,7 @@ typedef int socket_t;
 #define CYXWIZ_UDP_REGISTER_ACK     0xF1
 #define CYXWIZ_UDP_PEER_LIST        0xF2
 #define CYXWIZ_UDP_CONNECT_REQ      0xF3
+#define CYXWIZ_UDP_DATA             0xF6    /* Application data wrapper */
 #define CYXWIZ_UDP_RELAY_PKT        0xF8    /* Relay any packet to peer */
 #define CYXWIZ_UDP_RELAY_ACK        0xF9    /* Client ACK for relayed packet */
 
@@ -717,7 +718,7 @@ static void process_scheduled_deliveries(void)
 {
     time_t now = time(NULL);
 
-    for (size_t i = 0; i < g_peer_count; i++) {
+    for (size_t i = 0; i < MAX_PEERS; i++) {
         peer_t *peer = &g_peers[i];
         if (!peer->active || peer->queue_deliver_at == 0) {
             continue;
@@ -1202,16 +1203,28 @@ static void handle_relay_packet(const struct sockaddr_in *from,
         return;
     }
 
+    const uint8_t *payload = data + 1 + NODE_ID_LEN + 2;
+
     /* Get sender info */
     peer_t *sender = find_peer_by_addr(from);
     node_id_t from_id;
     if (sender != NULL) {
+        sender->last_activity = time(NULL);
+        sender->delivery_failures = 0;
         memcpy(&from_id, &sender->id, sizeof(node_id_t));
+    } else if (data_len >= 1 + NODE_ID_LEN && payload[0] == CYXWIZ_UDP_DATA) {
+        endpoint_t addr = {
+            .ip = from->sin_addr.s_addr,
+            .port = from->sin_port
+        };
+        memcpy(&from_id, payload + 1, sizeof(node_id_t));
+        sender = add_or_update_peer(&from_id, &addr);
+        if (sender != NULL) {
+            sender->delivery_failures = 0;
+        }
     } else {
         memset(&from_id, 0, sizeof(node_id_t));
     }
-
-    const uint8_t *payload = data + 1 + NODE_ID_LEN + 2;
 
     /* Find target peer */
     peer_t *target = find_peer(to_id);
