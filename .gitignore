@@ -2,13 +2,19 @@
 build/
 build-*/
 out/
+build2/
+build_tools/
 
 # Dependencies
 libsodium/
 vcpkg/
+deps/
+vcpkg_installed/
+libsodium-src/
 
 # Logs
 *.log
+nul
 
 # IDE
 .vs/
@@ -18,6 +24,16 @@ vcpkg/
 
 # CMake
 CMakeUserPresets.json
+
+# Local agent/tooling/runtime artifacts
+.claude/
+.dart_tool/
+Hack/
+duplicate/
+cyxtrade/
+cyxwiz_*.dat
+tools/build_server.bat
+tools/simplify_relay.py
 
 # Object files
 *.o

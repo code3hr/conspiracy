@@ -91,6 +91,7 @@ typedef int socket_t;
 #define CYXCHAT_RELAY_DATA          0xE3
 #define CYXCHAT_RELAY_KEEPALIVE     0xE4
 #define CYXCHAT_RELAY_ERROR         0xE5
+#define CYXCHAT_RELAY_DATA_HDR_SIZE (1 + NODE_ID_LEN + NODE_ID_LEN + 2)
 
 /* Server registry message types (0xA0-0xA3) */
 #define CYXCHAT_MSG_SERVER_HEALTH_PING      0xA0
@@ -922,14 +923,19 @@ static void handle_relay_connect(const struct sockaddr_in *from,
 static void handle_relay_data(const struct sockaddr_in *from,
                               const uint8_t *data, size_t len)
 {
-    if (len < sizeof(relay_data_header_t)) {
+    if (len < CYXCHAT_RELAY_DATA_HDR_SIZE) {
         return;
     }
 
-    const relay_data_header_t *hdr = (const relay_data_header_t *)data;
-    uint16_t data_len = ntohs(hdr->data_len);
+    node_id_t from_id;
+    node_id_t to_id;
+    uint16_t net_len;
+    memcpy(&from_id, data + 1, sizeof(node_id_t));
+    memcpy(&to_id, data + 1 + NODE_ID_LEN, sizeof(node_id_t));
+    memcpy(&net_len, data + 1 + NODE_ID_LEN + NODE_ID_LEN, 2);
+    uint16_t data_len = ntohs(net_len);
 
-    if (len < sizeof(relay_data_header_t) + data_len) {
+    if (len < CYXCHAT_RELAY_DATA_HDR_SIZE + data_len) {
         return;
     }
 
@@ -938,10 +944,10 @@ static void handle_relay_data(const struct sockaddr_in *from,
         .ip = from->sin_addr.s_addr,
         .port = from->sin_port
     };
-    add_or_update_peer(&hdr->from_id, &addr);
+    add_or_update_peer(&from_id, &addr);
 
     /* Find target peer */
-    peer_t *target = find_peer(&hdr->to_id);
+    peer_t *target = find_peer(&to_id);
     if (target == NULL) {
         return;
     }
